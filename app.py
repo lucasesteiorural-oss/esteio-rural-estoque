@@ -1,832 +1,1027 @@
 import os
+import io
+import json
 import glob
-import shutil
+import unicodedata
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 
+# ==============================================================================
+# 1. CONFIGURAÇÃO DA PÁGINA E VISUAL LIQUID GLASS (ALTO CONTRASTE)
+# ==============================================================================
 st.set_page_config(
-    page_title="Esteio Rural | Gestão Inteligente de Estoque",
+    page_title="Esteio Rural — Inteligência de Estoque & Giro Sazonal",
     page_icon="🌾",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: radial-gradient(circle at 15% 15%, #0f2922 0%, #07120f 55%, #050a09 100%);
+        color: #f1f5f9;
+    }
+    .glass-card {
+        background: rgba(17, 37, 32, 0.72);
+        border: 1px solid rgba(52, 211, 153, 0.28);
+        border-radius: 14px;
+        padding: 18px 20px;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(12px);
+        margin-bottom: 14px;
+    }
+    .status-box {
+        background: rgba(15, 34, 29, 0.85);
+        border: 1px solid rgba(52, 211, 153, 0.45);
+        border-radius: 14px;
+        padding: 14px 18px;
+        text-align: left;
+    }
+    .status-label {
+        font-size: 0.78rem;
+        color: #94a3b8;
+        margin-bottom: 4px;
+        font-weight: 600;
+    }
+    .status-value {
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: #f8fafc;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .pill-tag {
+        display: inline-block;
+        background: rgba(20, 184, 166, 0.18);
+        border: 1px solid rgba(45, 212, 191, 0.4);
+        color: #5eead4;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 0.76rem;
+        font-family: monospace;
+        margin: 2px 3px 2px 0;
+    }
+    div[data-testid="stMetric"] {
+        background: rgba(17, 37, 32, 0.75);
+        border: 1px solid rgba(52, 211, 153, 0.25);
+        border-radius: 12px;
+        padding: 12px 16px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # ==============================================================================
-# ESTILO VISUAL LIQUID GLASS FUMÊ (ALTO CONTRASTE E NITIDEZ TOTAL)
-# ==============================================================================
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', sans-serif;
-        color: #F8FAFC !important;
-    }
-
-    /* Fundo escuro profundo de alto contraste */
-    .stApp {
-        background: radial-gradient(circle at 15% 15%, #132A21 0%, #0D1714 55%, #090E0C 100%) !important;
-        color: #FFFFFF !important;
-    }
-
-    /* Força nitidez em títulos, textos e rótulos de campos */
-    h1, h2, h3, h4, h5, h6 {
-        color: #FFFFFF !important;
-        font-weight: 700 !important;
-        letter-spacing: -0.01em;
-    }
-
-    p, span, label, div[data-testid="stMarkdownContainer"] p {
-        color: #F1F5F9 !important;
-    }
-
-    /* Destaque nítido para nomes de colunas em código (`Código`, `Saldo Geral`, etc.) */
-    code {
-        background-color: rgba(16, 185, 129, 0.22) !important;
-        color: #6EE7B7 !important;
-        border: 1px solid rgba(52, 211, 153, 0.45) !important;
-        padding: 2px 7px !important;
-        border-radius: 6px !important;
-        font-weight: 600 !important;
-        font-size: 0.92em !important;
-    }
-
-    /* Animação suave de entrada */
-    @keyframes fadeInUp {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-
-    /* Cartões de Métricas (KPIs) em Vidro Escuro Fumê */
-    div[data-testid="stMetric"] {
-        background: rgba(20, 38, 31, 0.88) !important;
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(74, 222, 128, 0.35) !important;
-        border-radius: 16px !important;
-        padding: 18px 22px !important;
-        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45) !important;
-        transition: all 0.25s ease;
-        animation: fadeInUp 0.4s ease-out both;
-    }
-
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-3px);
-        border-color: #34D399 !important;
-        box-shadow: 0 12px 32px rgba(16, 185, 129, 0.25) !important;
-    }
-
-    div[data-testid="stMetricLabel"] p {
-        color: #A7F3D0 !important;
-        font-weight: 600 !important;
-        font-size: 0.95rem !important;
-    }
-
-    div[data-testid="stMetricValue"] div {
-        color: #FFFFFF !important;
-        font-weight: 700 !important;
-    }
-
-    /* Caixas de Informação (st.info / st.warning / st.success) com contraste forte */
-    div[data-testid="stAlert"] {
-        background: rgba(17, 45, 36, 0.92) !important;
-        border: 1px solid rgba(52, 211, 153, 0.5) !important;
-        border-left: 5px solid #10B981 !important;
-        border-radius: 14px !important;
-        color: #FFFFFF !important;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35) !important;
-    }
-
-    div[data-testid="stAlert"] p, div[data-testid="stAlert"] strong {
-        color: #FFFFFF !important;
-    }
-
-    /* Caixas de Upload de Arquivos (corrige o título branco que sumia no fundo claro) */
-    div[data-testid="stFileUploader"] {
-        background: rgba(18, 30, 26, 0.92) !important;
-        border: 1px dashed rgba(52, 211, 153, 0.55) !important;
-        border-radius: 14px !important;
-        padding: 14px !important;
-    }
-
-    div[data-testid="stFileUploader"] label p {
-        color: #6EE7B7 !important;
-        font-weight: 700 !important;
-        font-size: 0.96rem !important;
-    }
-
-    /* Botões principais em Verde Esmeralda Vibrante */
-    .stButton > button, .stDownloadButton > button {
-        background: linear-gradient(135deg, #10B981 0%, #047857 100%) !important;
-        color: #FFFFFF !important;
-        border: 1px solid rgba(167, 243, 208, 0.4) !important;
-        border-radius: 12px !important;
-        padding: 0.6rem 1.2rem !important;
-        font-weight: 700 !important;
-        box-shadow: 0 6px 18px rgba(4, 120, 87, 0.4) !important;
-        transition: all 0.25s ease !important;
-    }
-
-    .stButton > button:hover, .stDownloadButton > button:hover {
-        transform: translateY(-2px);
-        background: linear-gradient(135deg, #34D399 0%, #059669 100%) !important;
-        box-shadow: 0 10px 24px rgba(16, 185, 129, 0.55) !important;
-    }
-
-    /* Abas do topo com leitura clara */
-    button[data-baseweb="tab"] {
-        background: rgba(24, 42, 35, 0.85) !important;
-        border: 1px solid rgba(255, 255, 255, 0.12) !important;
-        border-radius: 10px 10px 0 0 !important;
-        margin-right: 6px !important;
-        padding: 10px 18px !important;
-        color: #E2E8F0 !important;
-        font-weight: 600 !important;
-    }
-
-    button[data-baseweb="tab"][aria-selected="true"] {
-        background: linear-gradient(135deg, #059669 0%, #047857 100%) !important;
-        color: #FFFFFF !important;
-        border-color: #34D399 !important;
-        box-shadow: 0 -4px 16px rgba(16, 185, 129, 0.35) !important;
-    }
-
-    /* Tabelas */
-    div[data-testid="stDataFrame"] {
-        border-radius: 14px;
-        border: 1px solid rgba(74, 222, 128, 0.25);
-        overflow: hidden;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ==============================================================================
-# CONFIGURAÇÃO DE PASTAS, GRAVAÇÃO ATÔMICA E GOOGLE SHEETS
+# 2. DIRETÓRIOS E REGRAS DE TIPAGEM (PRESERVAÇÃO DE ZEROS À ESQUERDA)
 # ==============================================================================
 PASTA_DADOS = "dados_esteio"
-PASTA_BACKUP = "backups_esteio"
-MAX_BACKUPS_POR_ARQUIVO = 5
-MAX_DIAS_HISTORICO_GUARDADO = 180
-
+PASTA_BACKUPS = "backups_esteio"
 os.makedirs(PASTA_DADOS, exist_ok=True)
-os.makedirs(PASTA_BACKUP, exist_ok=True)
+os.makedirs(PASTA_BACKUPS, exist_ok=True)
 
-ARQ_ESTOQUE = os.path.join(PASTA_DADOS, "estoque_atual.csv")
-ARQ_CUSTOS = os.path.join(PASTA_DADOS, "custos_atuais.csv")
-ARQ_VENDAS = os.path.join(PASTA_DADOS, "vendas_atuais.csv")
-ARQ_CONFIG = os.path.join(PASTA_DADOS, "config_dias.txt")
-ARQ_HISTORICO = os.path.join(PASTA_DADOS, "historico_posicoes.csv")
+ARQUIVO_LOCAL = os.path.join(PASTA_DADOS, "estado_esteio.json")
+
+# Apenas estas colunas são convertidas para float; código e lote são sempre texto (str)
+COLUNAS_NUMERICAS = {"saldo_geral", "saldo_lote", "custo_unitario", "qtd_vendida"}
+COLUNAS_TEXTO_PURO = {"codigo", "lote", "descricao", "validade", "data"}
 
 
-def rotacionar_backups(prefixo):
-    padrao = os.path.join(PASTA_BACKUP, f"{prefixo}_*.csv")
-    arquivos = sorted(glob.glob(padrao), key=os.path.getmtime)
-    while len(arquivos) > MAX_BACKUPS_POR_ARQUIVO:
-        mais_antigo = arquivos.pop(0)
+def limpar_texto(val) -> str:
+    if pd.isna(val) or val is None:
+        return ""
+    s = str(val).strip()
+    if s.lower() in {"nan", "none", "nat", "<na>"}:
+        return ""
+    # Remove apenas sufixo '.0' caso o Excel tenha exportado inteiro como float, preservando zeros à esquerda
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+def converter_numero_br(serie: pd.Series) -> pd.Series:
+    """Converte números em formato brasileiro (1.234,56) ou americano (1234.56) para float."""
+    def _parse(val):
+        if pd.isna(val) or val is None:
+            return 0.0
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip().replace("R$", "").replace(" ", "")
+        if not s or s.lower() in {"nan", "none"}:
+            return 0.0
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".")
         try:
-            os.remove(mais_antigo)
-        except Exception:
-            pass
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    return serie.apply(_parse).astype(float)
 
 
-def salvar_csv_atomico(df, caminho_final, prefixo_backup):
-    if os.path.exists(caminho_final):
-        carimbo = datetime.now().strftime("%Y%m%d_%H%M%S")
-        destino_bkp = os.path.join(PASTA_BACKUP, f"{prefixo_backup}_{carimbo}.csv")
-        shutil.copy2(caminho_final, destino_bkp)
-        rotacionar_backups(prefixo_backup)
+def restaurar_tipos(df: pd.DataFrame) -> pd.DataFrame:
+    """Garante que códigos e lotes fiquem como texto puro (preservando zeros) e saldos/custos como float."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    for col in df.columns:
+        if col in COLUNAS_NUMERICAS:
+            df[col] = converter_numero_br(df[col])
+        else:
+            df[col] = df[col].apply(limpar_texto)
+    return df
 
-    caminho_tmp = caminho_final + ".tmp"
-    df.to_csv(caminho_tmp, index=False)
-    os.replace(caminho_tmp, caminho_final)
 
-
+# ==============================================================================
+# 3. CONEXÃO COM GOOGLE SHEETS (COM CACHE E GRAVAÇÃO INCREMENTAL SEGURA)
+# ==============================================================================
+@st.cache_resource(ttl=3600, show_spinner=False)
 def obter_planilha_gsheets():
-    """Retorna o objeto da planilha do Google Sheets e exibe erros se houverem."""
+    """Autentica e guarda a conexão em cache por 1 hora para evitar limite de 60 req/min."""
+    if "gcp_service_account" not in st.secrets:
+        return None, "Bloco [gcp_service_account] ausente em st.secrets"
     try:
-        if "gcp_service_account" not in st.secrets:
-            st.warning("⚠️ O bloco [gcp_service_account] não foi encontrado no arquivo secrets.toml.")
-            return None
         import gspread
         from google.oauth2.service_account import Credentials
 
         escopos = [
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
+            "https://www.googleapis.com/auth/drive",
         ]
         credenciais = Credentials.from_service_account_info(
             st.secrets["gcp_service_account"], scopes=escopos
         )
         cliente = gspread.authorize(credenciais)
         nome_planilha = st.secrets.get("sheet_name", "Banco_Dados_Esteio_Rural")
-        return cliente.open(nome_planilha)
+        return cliente.open(nome_planilha), None
     except Exception as e:
-        st.error(f"❌ Erro de Conexão com Google Sheets: {e}")
-        return None
+        return None, str(e)
 
 
-def salvar_aba_gsheets(nome_aba, df):
-    sh = obter_planilha_gsheets()
-    if sh is None:
-        return False
+def obter_ou_criar_aba(planilha, nome_aba: str, linhas: int = 100, cols: int = 10):
+    import gspread
     try:
-        try:
-            ws = sh.worksheet(nome_aba)
-        except Exception:
-            ws = sh.add_worksheet(title=nome_aba, rows=max(100, len(df) + 50), cols=max(10, len(df.columns) + 2))
-        ws.clear()
-        dados_envio = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-        ws.update(dados_envio)
-        return True
-    except Exception:
-        return False
-
-
-def carregar_aba_gsheets(nome_aba):
-    sh = obter_planilha_gsheets()
-    if sh is None:
-        return pd.DataFrame()
-    try:
-        ws = sh.worksheet(nome_aba)
-        registros = ws.get_all_records()
-        return pd.DataFrame(registros)
-    except Exception:
-        return pd.DataFrame()
-
-
-# ==============================================================================
-# FUNÇÕES DE TRATAMENTO E NORMALIZAÇÃO
-# ==============================================================================
-def normalizar_codigo(serie):
-    return (
-        serie.astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
-        .str.lstrip("0")
-        .replace("", "0")
-    )
-
-
-def converter_numero(serie):
-    if pd.api.types.is_numeric_dtype(serie):
-        return pd.to_numeric(serie, errors="coerce").fillna(0.0)
-    s = serie.astype(str).str.strip().str.replace("R$", "", regex=False).str.strip()
-    tem_virgula = s.str.contains(",", na=False)
-    s_br = s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
-    s_final = s.where(~tem_virgula, s_br)
-    return pd.to_numeric(s_final, errors="coerce").fillna(0.0)
-
-
-def lote_valido(serie_lote):
-    s = serie_lote.fillna("").astype(str).str.strip().str.upper()
-    invalidos = {"", "NAN", "NONE", "NULL", "SEM LOTE", "S/L", "0", "0.0", "-"}
-    return ~s.isin(invalidos)
-
-
-def ler_planilha(arquivo_upload):
-    nome = arquivo_upload.name.lower()
-    if nome.endswith(".csv"):
-        try:
-            return pd.read_csv(arquivo_upload, sep=None, engine="python")
-        except Exception:
-            arquivo_upload.seek(0)
-            return pd.read_csv(arquivo_upload, sep=";", encoding="latin1")
-    else:
-        return pd.read_excel(arquivo_upload)
-
-
-def registrar_snapshot_diario(novo_est, data_ref_str):
-    snap = novo_est[["Codigo", "Codigo_Lote", "Saldo_Geral", "Saldo_Lote"]].copy()
-    snap["Data_Snapshot"] = data_ref_str
-
-    if os.path.exists(ARQ_HISTORICO):
-        hist = pd.read_csv(ARQ_HISTORICO, dtype={"Codigo": str, "Codigo_Lote": str})
-        hist = hist[hist["Data_Snapshot"] != data_ref_str]
-        hist = pd.concat([hist, snap], ignore_index=True)
-    else:
-        hist = snap
-
-    hist["Data_DT"] = pd.to_datetime(hist["Data_Snapshot"], errors="coerce")
-    if not hist["Data_DT"].dropna().empty:
-        data_max = hist["Data_DT"].max()
-        corte = data_max - pd.Timedelta(days=MAX_DIAS_HISTORICO_GUARDADO)
-        hist = hist[hist["Data_DT"] >= corte].drop(columns=["Data_DT"])
-    else:
-        hist = hist.drop(columns=["Data_DT"], errors="ignore")
-
-    salvar_csv_atomico(hist, ARQ_HISTORICO, "backup_historico")
-    salvar_aba_gsheets("historico_posicoes", hist)
-
-
-# ==============================================================================
-# MOTOR DE CÁLCULO COM CACHE DE ALTA VELOCIDADE (@st.cache_data)
-# ==============================================================================
-@st.cache_data(show_spinner=False)
-def carregar_bases_cacheadas(mtime_est, mtime_cus, mtime_ven, mtime_cfg):
-    if not os.path.exists(ARQ_ESTOQUE):
-        df_nuvem = carregar_aba_gsheets("estoque_atual")
-        if not df_nuvem.empty:
-            df_nuvem.to_csv(ARQ_ESTOQUE, index=False)
-    if not os.path.exists(ARQ_CUSTOS):
-        df_nuvem = carregar_aba_gsheets("custos_atuais")
-        if not df_nuvem.empty:
-            df_nuvem.to_csv(ARQ_CUSTOS, index=False)
-    if not os.path.exists(ARQ_VENDAS):
-        df_nuvem = carregar_aba_gsheets("vendas_atuais")
-        if not df_nuvem.empty:
-            df_nuvem.to_csv(ARQ_VENDAS, index=False)
-    if not os.path.exists(ARQ_HISTORICO):
-        df_nuvem = carregar_aba_gsheets("historico_posicoes")
-        if not df_nuvem.empty:
-            df_nuvem.to_csv(ARQ_HISTORICO, index=False)
-
-    df_est = pd.read_csv(ARQ_ESTOQUE, dtype={"Codigo": str}) if os.path.exists(ARQ_ESTOQUE) else pd.DataFrame()
-    df_cus = pd.read_csv(ARQ_CUSTOS, dtype={"Codigo": str}) if os.path.exists(ARQ_CUSTOS) else pd.DataFrame()
-    df_ven = pd.read_csv(ARQ_VENDAS, dtype={"Codigo": str}) if os.path.exists(ARQ_VENDAS) else pd.DataFrame()
-
-    if not df_est.empty:
-        df_est["Saldo_Geral"] = converter_numero(df_est["Saldo_Geral"])
-        df_est["Saldo_Lote"] = converter_numero(df_est["Saldo_Lote"])
-    if not df_cus.empty:
-        df_cus["Custo_C1"] = converter_numero(df_cus["Custo_C1"])
-    if not df_ven.empty:
-        df_ven["Qtd_Vendida"] = converter_numero(df_ven["Qtd_Vendida"])
-
-    dias_hist = 90
-    if os.path.exists(ARQ_CONFIG):
-        try:
-            with open(ARQ_CONFIG, "r") as f:
-                dias_hist = int(f.read().strip())
-        except Exception:
-            dias_hist = 90
-
-    return df_est, df_cus, df_ven, dias_hist
-
-
-@st.cache_data(show_spinner=False)
-def calcular_giro_aprendido(janela_dias, mtime_hist):
-    if not os.path.exists(ARQ_HISTORICO):
-        return pd.DataFrame(columns=["Codigo", "Saida_Aprendida", "Giro_Aprendido"]), 0
-
-    hist = pd.read_csv(ARQ_HISTORICO, dtype={"Codigo": str, "Codigo_Lote": str})
-    if hist.empty:
-        return pd.DataFrame(columns=["Codigo", "Saida_Aprendida", "Giro_Aprendido"]), 0
-
-    hist["Saldo_Geral"] = converter_numero(hist["Saldo_Geral"])
-    hist["Saldo_Lote"] = converter_numero(hist["Saldo_Lote"])
-    hist["Data_DT"] = pd.to_datetime(hist["Data_Snapshot"], errors="coerce")
-    hist = hist.dropna(subset=["Data_DT"])
-
-    datas_unicas = sorted(hist["Data_DT"].unique())
-    if len(datas_unicas) < 2:
-        return pd.DataFrame(columns=["Codigo", "Saida_Aprendida", "Giro_Aprendido"]), 0
-
-    data_max = datas_unicas[-1]
-    data_corte = data_max - pd.Timedelta(days=janela_dias)
-    hist_janela = hist[hist["Data_DT"] >= data_corte].copy()
-
-    datas_janela = sorted(hist_janela["Data_DT"].unique())
-    if len(datas_janela) < 2:
-        datas_janela = datas_unicas[-2:]
-        hist_janela = hist[hist["Data_DT"].isin(datas_janela)].copy()
-
-    dias_acumulados = max(1, (datas_janela[-1] - datas_janela[0]).days)
-
-    prod_dia = (
-        hist_janela.groupby(["Data_DT", "Codigo"], as_index=False)
-        .agg(Saldo_Geral=("Saldo_Geral", "first"))
-        .sort_values(["Codigo", "Data_DT"])
-    )
-    prod_dia["Saldo_Ant"] = prod_dia.groupby("Codigo")["Saldo_Geral"].shift(1)
-    prod_dia["Queda_Geral"] = (prod_dia["Saldo_Ant"] - prod_dia["Saldo_Geral"]).clip(lower=0.0).fillna(0.0)
-    saidas_geral = prod_dia.groupby(["Data_DT", "Codigo"], as_index=False)["Queda_Geral"].sum()
-
-    lote_dia = (
-        hist_janela.groupby(["Data_DT", "Codigo", "Codigo_Lote"], as_index=False)
-        .agg(Saldo_Lote=("Saldo_Lote", "sum"))
-        .sort_values(["Codigo", "Codigo_Lote", "Data_DT"])
-    )
-    lote_dia["Lote_Ant"] = lote_dia.groupby(["Codigo", "Codigo_Lote"])["Saldo_Lote"].shift(1)
-    lote_dia["Queda_Lote"] = (lote_dia["Lote_Ant"] - lote_dia["Saldo_Lote"]).clip(lower=0.0).fillna(0.0)
-    saidas_lote = lote_dia.groupby(["Data_DT", "Codigo"], as_index=False)["Queda_Lote"].sum()
-
-    comp = pd.merge(saidas_geral, saidas_lote, on=["Data_DT", "Codigo"], how="outer").fillna(0.0)
-    comp["Saida_Real_Dia"] = comp[["Queda_Geral", "Queda_Lote"]].max(axis=1)
-
-    resumo = comp.groupby("Codigo", as_index=False).agg(Saida_Aprendida=("Saida_Real_Dia", "sum"))
-    resumo["Giro_Aprendido"] = resumo["Saida_Aprendida"] / dias_acumulados
-
-    return resumo, int(dias_acumulados)
-
-
-@st.cache_data(show_spinner=False)
-def consolidar_produtos(df_est, df_cus, df_ven, dias_hist, janela_sazonal, mtime_hist):
-    if df_est.empty:
-        return pd.DataFrame(), pd.DataFrame(), 0, 0.0
-
-    df_est_proc = df_est.copy()
-    df_est_proc["Tem_Lote_Linha"] = lote_valido(df_est_proc["Codigo_Lote"]) | (df_est_proc["Saldo_Lote"].abs() > 0.0001)
-
-    prod_est = (
-        df_est_proc.groupby("Codigo", as_index=False)
-        .agg(
-            Descricao=("Descricao", "first"),
-            Saldo_Geral=("Saldo_Geral", "first"),
-            Soma_Lotes=("Saldo_Lote", "sum"),
-            Tem_Controle_Lote=("Tem_Lote_Linha", "any"),
-            Qtd_Lotes=("Tem_Lote_Linha", "sum"),
+        return planilha.worksheet(nome_aba)
+    except gspread.exceptions.WorksheetNotFound:
+        return planilha.add_worksheet(
+            title=nome_aba, rows=max(linhas, 100), cols=max(cols, 10)
         )
+
+
+def ler_aba_bruta_gsheets(planilha, nome_aba: str) -> pd.DataFrame:
+    """Lê todas as células como texto (get_all_values) para nunca perder zeros à esquerda nos lotes."""
+    ws = obter_ou_criar_aba(planilha, nome_aba)
+    valores = ws.get_all_values()
+    if not valores or len(valores) < 2:
+        return pd.DataFrame()
+    cabecalho = [str(c).strip() for c in valores[0]]
+    df = pd.DataFrame(valores[1:], columns=cabecalho)
+    return restaurar_tipos(df)
+
+
+def gravar_aba_pequena_gsheets(planilha, nome_aba: str, df: pd.DataFrame):
+    """
+    Sobrescreve abas pequenas (estoque_atual, custos, base_inicial, meta) a partir de A1
+    SEM chamar clear() antes, redimensionando a aba ao final.
+    """
+    if df is None or df.empty:
+        return
+    df_str = df.fillna("").astype(str)
+    dados = [df_str.columns.tolist()] + df_str.values.tolist()
+
+    ws = obter_ou_criar_aba(
+        planilha, nome_aba, len(dados) + 10, len(df_str.columns) + 2
     )
+    ws.update(values=dados, range_name="A1", value_input_option="RAW")
+    ws.resize(rows=max(len(dados), 2), cols=max(len(df_str.columns), 1))
 
-    if not df_cus.empty:
-        cus_unico = df_cus.groupby("Codigo", as_index=False).agg(Custo_C1=("Custo_C1", "last"))
-        prod_est = pd.merge(prod_est, cus_unico, on="Codigo", how="left")
-    else:
-        prod_est["Custo_C1"] = 0.0
-    prod_est["Custo_C1"] = prod_est["Custo_C1"].fillna(0.0)
 
-    if not df_ven.empty:
-        ven_unico = df_ven.groupby("Codigo", as_index=False).agg(Qtd_Vendida=("Qtd_Vendida", "sum"))
-        prod_est = pd.merge(prod_est, ven_unico, on="Codigo", how="left")
-    else:
-        prod_est["Qtd_Vendida"] = 0.0
-    prod_est["Qtd_Vendida"] = prod_est["Qtd_Vendida"].fillna(0.0)
-    prod_est["Giro_Base_90d"] = prod_est["Qtd_Vendida"] / max(1, dias_hist)
+def gravar_historico_incremental_gsheets(
+    planilha, df_novo_dia: pd.DataFrame, data_ref: str
+):
+    """
+    Grava no histórico APENAS as linhas da data importada (~0,2 MB).
+    Se a data já existir, apaga apenas as linhas daquela data e anexa as novas ao final.
+    """
+    if df_novo_dia is None or df_novo_dia.empty:
+        return
 
-    df_aprendido, dias_aprendidos = calcular_giro_aprendido(janela_sazonal, mtime_hist)
-    prod_est = pd.merge(prod_est, df_aprendido[["Codigo", "Giro_Aprendido"]], on="Codigo", how="left")
-    prod_est["Giro_Aprendido"] = prod_est["Giro_Aprendido"].fillna(0.0)
+    df_str = df_novo_dia.fillna("").astype(str)
+    cabecalho = df_str.columns.tolist()
+    linhas_novas = df_str.values.tolist()
 
-    peso_diario = min(1.0, dias_aprendidos / max(1, janela_sazonal))
-    if df_ven.empty and dias_aprendidos > 0:
-        peso_diario = 1.0
-
-    prod_est["Giro_Diario"] = (
-        (prod_est["Giro_Aprendido"] * peso_diario) +
-        (prod_est["Giro_Base_90d"] * (1.0 - peso_diario))
+    ws = obter_ou_criar_aba(
+        planilha, "historico", len(linhas_novas) + 100, len(cabecalho) + 2
     )
+    primeira_linha = ws.row_values(1)
 
-    def detectar_tendencia(r):
-        if dias_aprendidos < 2:
-            return "🌱 Base Inicial (Aguardando dias)"
-        if r["Giro_Base_90d"] <= 0 and r["Giro_Aprendido"] > 0:
-            return "🔥 Giro Novo Detectado"
-        if r["Giro_Base_90d"] > 0:
-            razao = r["Giro_Aprendido"] / r["Giro_Base_90d"]
-            if razao >= 1.25:
-                return "📈 Alta Sazonal (+25%)"
-            elif razao <= 0.75:
-                return "📉 Baixa Sazonal (-25%)"
-        return "➡️ Giro Estável"
+    if not primeira_linha:
+        ws.update(
+            values=[cabecalho] + linhas_novas,
+            range_name="A1",
+            value_input_option="RAW",
+        )
+        return
 
-    prod_est["Tendencia_Sazonal"] = prod_est.apply(detectar_tendencia, axis=1)
-    prod_est["Cobertura_Dias"] = prod_est.apply(
-        lambda r: (r["Saldo_Geral"] / r["Giro_Diario"]) if r["Giro_Diario"] > 0 else 999.0, axis=1
+    idx_col_data = (
+        (primeira_linha.index("data") + 1) if "data" in primeira_linha else 1
     )
-    prod_est["Valor_Estoque_R$"] = prod_est["Saldo_Geral"] * prod_est["Custo_C1"]
+    col_datas = ws.col_values(idx_col_data)
 
-    prod_est["Divergencia_Lote"] = prod_est.apply(
-        lambda r: (r["Saldo_Geral"] - r["Soma_Lotes"]) if r["Tem_Controle_Lote"] else 0.0,
-        axis=1
-    )
+    linhas_para_apagar = [
+        i
+        for i, val in enumerate(col_datas, start=1)
+        if i >= 2 and str(val).strip() == str(data_ref).strip()
+    ]
 
-    df_lotes = df_est_proc.copy()
-    df_lotes = pd.merge(df_lotes, prod_est[["Codigo", "Custo_C1"]], on="Codigo", how="left")
-    df_lotes["Custo_C1"] = df_lotes["Custo_C1"].fillna(0.0)
-    df_lotes["Valor_Lote_R$"] = df_lotes["Saldo_Lote"] * df_lotes["Custo_C1"]
+    if linhas_para_apagar:
+        blocos = []
+        inicio = fim = linhas_para_apagar[0]
+        for r in linhas_para_apagar[1:]:
+            if r == fim + 1:
+                fim = r
+            else:
+                blocos.append((inicio, fim))
+                inicio = fim = r
+        blocos.append((inicio, fim))
 
-    return prod_est, df_lotes, dias_aprendidos, peso_diario
+        for ini, f in reversed(blocos):
+            ws.delete_rows(ini, f)
+
+    ws.append_rows(values=linhas_novas, value_input_option="RAW")
 
 
 # ==============================================================================
-# INTERFACE PRINCIPAL
+# 4. PERSISTÊNCIA HÍBRIDA (FONTE ÚNICA NA NUVEM + BACKUP DIÁRIO LOCAL)
 # ==============================================================================
-col_tit1, col_tit2 = st.columns([3, 1])
-with col_tit1:
-    st.title("🌾 Esteio Rural — Inteligência de Estoque & Giro Sazonal")
-with col_tit2:
-    gs_conectado = obter_planilha_gsheets() is not None
-    status_db = "☁️ Google Sheets Conectado" if gs_conectado else "💻 Banco Local Seguro (Atômico)"
-    st.metric("Status do Banco de Dados", status_db)
+def salvar_espelho_e_backup_local(estado: dict):
+    """Grava arquivo local de forma atômica e mantém 1 backup por dia (últimos 7 dias)."""
+    payload = {
+        "estoque_atual": estado.get("estoque_atual", pd.DataFrame()).to_dict(orient="records"),
+        "historico": estado.get("historico", pd.DataFrame()).to_dict(orient="records"),
+        "custos": estado.get("custos", pd.DataFrame()).to_dict(orient="records"),
+        "base_inicial": estado.get("base_inicial", pd.DataFrame()).to_dict(orient="records"),
+        "dias_base": int(estado.get("dias_base", 87)),
+        "ultima_atualizacao": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+    }
 
-mtime_est = os.path.getmtime(ARQ_ESTOQUE) if os.path.exists(ARQ_ESTOQUE) else 0
-mtime_cus = os.path.getmtime(ARQ_CUSTOS) if os.path.exists(ARQ_CUSTOS) else 0
-mtime_ven = os.path.getmtime(ARQ_VENDAS) if os.path.exists(ARQ_VENDAS) else 0
-mtime_cfg = os.path.getmtime(ARQ_CONFIG) if os.path.exists(ARQ_CONFIG) else 0
-mtime_hist = os.path.getmtime(ARQ_HISTORICO) if os.path.exists(ARQ_HISTORICO) else 0
+    temp_local = f"{ARQUIVO_LOCAL}.tmp"
+    with open(temp_local, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(temp_local, ARQUIVO_LOCAL)
 
-df_est, df_cus, df_ven, dias_hist = carregar_bases_cacheadas(mtime_est, mtime_cus, mtime_ven, mtime_cfg)
+    # Rotação diária: 1 arquivo por data (múltiplos testes no mesmo dia não apagam ontem)
+    hoje_str = datetime.now().strftime("%Y-%m-%d")
+    arq_backup = os.path.join(PASTA_BACKUPS, f"backup_{hoje_str}.json")
+    temp_bkp = f"{arq_backup}.tmp"
+    with open(temp_bkp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(temp_bkp, arq_backup)
 
-abas = st.tabs([
-    "📥 1. Importação & Nuvem",
-    "🛒 2. Sugestão de Compras & Sazonalidade",
-    "⏳ 3. Radar de Validades (FEFO)",
-    "📊 4. Curva ABC Financeira",
-    "🔍 5. Auditoria de ERP"
-])
+    backups = sorted(glob.glob(os.path.join(PASTA_BACKUPS, "backup_*.json")))
+    while len(backups) > 7:
+        try:
+            os.remove(backups.pop(0))
+        except OSError:
+            pass
 
-with abas[1]:
-    c_cfg1, c_cfg2, c_cfg3 = st.columns(3)
-    janela_sazonal = c_cfg1.selectbox(
-        "Janela de Aprendizado Sazonal (Dias):",
-        options=[15, 30, 60, 90, 120, 180],
-        index=2,
-        help="De 15 dias (campanhas rápidas) até 180 dias (estação completa de seca ou águas)."
+
+def carregar_espelho_local() -> dict:
+    """Lê o estado salvo em disco apenas quando não há conexão com o Google Sheets."""
+    estado_vazio = {
+        "estoque_atual": pd.DataFrame(),
+        "historico": pd.DataFrame(),
+        "custos": pd.DataFrame(),
+        "base_inicial": pd.DataFrame(),
+        "dias_base": 87,
+        "ultima_atualizacao": "Sem registros",
+    }
+    if not os.path.exists(ARQUIVO_LOCAL):
+        return estado_vazio
+    try:
+        with open(ARQUIVO_LOCAL, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return {
+            "estoque_atual": restaurar_tipos(pd.DataFrame(d.get("estoque_atual", []))),
+            "historico": restaurar_tipos(pd.DataFrame(d.get("historico", []))),
+            "custos": restaurar_tipos(pd.DataFrame(d.get("custos", []))),
+            "base_inicial": restaurar_tipos(pd.DataFrame(d.get("base_inicial", []))),
+            "dias_base": int(d.get("dias_base", 87)),
+            "ultima_atualizacao": d.get("ultima_atualizacao", "Local"),
+        }
+    except Exception:
+        return estado_vazio
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def carregar_estado_completo() -> dict:
+    """
+    Fonte Única da Verdade: Se conectado ao Google Sheets, lê direto da nuvem (com cache de 10 min).
+    Caso contrário, utiliza o espelho local.
+    """
+    planilha, _ = obter_planilha_gsheets()
+    if planilha is not None:
+        df_est = ler_aba_bruta_gsheets(planilha, "estoque_atual")
+        df_hist = ler_aba_bruta_gsheets(planilha, "historico")
+        df_cus = ler_aba_bruta_gsheets(planilha, "custos")
+        df_base = ler_aba_bruta_gsheets(planilha, "base_inicial")
+        df_meta = ler_aba_bruta_gsheets(planilha, "meta")
+
+        dias_base = 87
+        ult_att = "Sincronizado via Nuvem"
+        if not df_meta.empty and "chave" in df_meta.columns and "valor" in df_meta.columns:
+            mapa_meta = dict(zip(df_meta["chave"], df_meta["valor"]))
+            try:
+                dias_base = int(float(mapa_meta.get("dias_base", 87)))
+            except ValueError:
+                dias_base = 87
+            ult_att = mapa_meta.get("ultima_atualizacao", ult_att)
+
+        return {
+            "estoque_atual": df_est,
+            "historico": df_hist,
+            "custos": df_cus,
+            "base_inicial": df_base,
+            "dias_base": dias_base,
+            "ultima_atualizacao": ult_att,
+        }
+
+    return carregar_espelho_local()
+
+
+# ==============================================================================
+# 5. LEITURA E PADRONIZAÇÃO DE PLANILHAS (EXCEL / CSV COM DTYPE=STR)
+# ==============================================================================
+def normalizar_nome_col(nome: str) -> str:
+    s = unicodedata.normalize("NFKD", str(nome)).encode("ASCII", "ignore").decode("utf-8")
+    return s.lower().strip()
+
+
+def ler_arquivo_upload(arquivo) -> pd.DataFrame:
+    """Lê arquivos .xlsx ou .csv forçando dtype=str para jamais perder zeros à esquerda."""
+    nome = arquivo.name.lower()
+    if nome.endswith(".csv"):
+        conteudo = arquivo.getvalue()
+        for enc in ["utf-8-sig", "latin1", "cp1252"]:
+            for sep in [";", ",", "\t"]:
+                try:
+                    df = pd.read_csv(io.BytesIO(conteudo), sep=sep, encoding=enc, dtype=str)
+                    if df.shape[1] >= 2:
+                        return df
+                except Exception:
+                    continue
+        raise ValueError("Não foi possível ler o arquivo CSV. Verifique o separador.")
+    else:
+        return pd.read_excel(arquivo, dtype=str)
+
+
+def processar_planilha_estoque(arquivo, data_pos: date) -> pd.DataFrame:
+    df_raw = ler_arquivo_upload(arquivo)
+    if df_raw.shape[1] < 6:
+        raise ValueError(
+            f"A planilha de estoque precisa ter pelo menos 6 colunas (encontradas: {df_raw.shape[1]})."
+        )
+
+    # Mapeamento inteligente por nome ou pelas 6 primeiras colunas na ordem padrão do ERP
+    df = pd.DataFrame()
+    df["codigo"] = df_raw.iloc[:, 0].apply(limpar_texto)
+    df["saldo_geral"] = converter_numero_br(df_raw.iloc[:, 1])
+    df["descricao"] = df_raw.iloc[:, 2].apply(limpar_texto)
+    df["lote"] = df_raw.iloc[:, 3].apply(limpar_texto)
+    df["saldo_lote"] = converter_numero_br(df_raw.iloc[:, 4])
+    df["validade"] = df_raw.iloc[:, 5].apply(limpar_texto)
+    df["data"] = data_pos.strftime("%Y-%m-%d")
+
+    # Remove linhas vazias ou cabeçalhos repetidos no meio do relatório
+    df = df[df["codigo"] != ""].copy()
+    df = df[~df["codigo"].str.lower().isin(["codigo", "código", "cod", "total"])].copy()
+    return restaurar_tipos(df)
+
+
+def processar_planilha_custos(arquivo) -> pd.DataFrame:
+    df_raw = ler_arquivo_upload(arquivo)
+    if df_raw.shape[1] < 3:
+        raise ValueError("A planilha de custos precisa ter pelo menos 3 colunas (Código, Descrição, Custo).")
+
+    df = pd.DataFrame()
+    df["codigo"] = df_raw.iloc[:, 0].apply(limpar_texto)
+    df["descricao"] = df_raw.iloc[:, 1].apply(limpar_texto)
+    df["custo_unitario"] = converter_numero_br(df_raw.iloc[:, 2])
+
+    df = df[df["codigo"] != ""].copy()
+    df = df[~df["codigo"].str.lower().isin(["codigo", "código", "cod"])].copy()
+    df = df.drop_duplicates(subset=["codigo"], keep="last")
+    return restaurar_tipos(df)
+
+
+def processar_planilha_base_vendas(arquivo) -> pd.DataFrame:
+    df_raw = ler_arquivo_upload(arquivo)
+    if df_raw.shape[1] < 3:
+        raise ValueError("A Base Inicial de Vendas precisa ter pelo menos 3 colunas (Código, Descrição, Quantidade).")
+
+    df = pd.DataFrame()
+    df["codigo"] = df_raw.iloc[:, 0].apply(limpar_texto)
+    df["descricao"] = df_raw.iloc[:, 1].apply(limpar_texto)
+    df["qtd_vendida"] = converter_numero_br(df_raw.iloc[:, 2])
+
+    df = df[df["codigo"] != ""].copy()
+    df = df[~df["codigo"].str.lower().isin(["codigo", "código", "cod"])].copy()
+    df = df.groupby(["codigo", "descricao"], as_index=False)["qtd_vendida"].sum()
+    return restaurar_tipos(df)
+
+
+# ==============================================================================
+# 6. CABEÇALHO PRINCIPAL E VERIFICAÇÃO DE STATUS DA NUVEM
+# ==============================================================================
+planilha_gsheets, erro_gsheets = obter_planilha_gsheets()
+conectado_nuvem = planilha_gsheets is not None
+
+col_titulo, col_status = st.columns([3.4, 1.2])
+with col_titulo:
+    st.markdown(
+        "## 🌾 Esteio Rural — Inteligência de Estoque & Giro Sazonal"
     )
-    meta_dias = c_cfg2.slider("Meta de Cobertura Desejada (Dias):", min_value=5, max_value=180, value=30, step=5)
-    filtro_busca = c_cfg3.text_input("🔎 Buscar produto por Nome ou Código:")
+with col_status:
+    texto_status = (
+        "☁️ Google Sheets" if conectado_nuvem else "⚠️ Modo Temporário"
+    )
+    st.markdown(
+        f"""
+        <div class="status-box">
+            <div class="status-label">Status do Banco de Dados</div>
+            <div class="status-value" title="{texto_status}">{texto_status}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-df_produtos, df_lotes, dias_aprendidos, peso_diario = consolidar_produtos(
-    df_est, df_cus, df_ven, dias_hist, janela_sazonal, mtime_hist
+if not conectado_nuvem and "gcp_service_account" in st.secrets:
+    st.error(
+        f"❌ Erro de Conexão com Google Sheets: {erro_gsheets}. "
+        "Verifique as credenciais ou aguarde antes de importar para não salvar apenas em disco temporário."
+    )
+
+try:
+    estado = carregar_estado_completo()
+except Exception as erro_leitura:
+    st.error(f"❌ Erro ao ler dados do Google Sheets: {erro_leitura}")
+    estado = carregar_espelho_local()
+
+df_estoque = estado["estoque_atual"]
+df_historico = estado["historico"]
+df_custos = estado["custos"]
+df_base_vendas = estado["base_inicial"]
+dias_base_atual = estado["dias_base"]
+
+# ==============================================================================
+# 7. NAVEGAÇÃO POR ABAS
+# ==============================================================================
+aba1, aba2, aba3, aba4, aba5 = st.tabs(
+    [
+        "📥 1. Importação & Nuvem",
+        "🛒 2. Sugestão de Compras & Sazonalidade",
+        "⏳ 3. Radar de Validades (FEFO)",
+        "📊 4. Curva ABC Financeira",
+        "🔍 5. Auditoria de ERP",
+    ]
 )
 
-# ==============================================================================
-# ABA 1: IMPORTAÇÃO DE PLANILHAS
-# ==============================================================================
-with abas[0]:
-    st.subheader("Central de Importação Segura e Sincronização com Nuvem")
-    st.markdown(
-        "Gravação com **proteção atômica contra queda de energia**, rotação dos **últimos 5 backups** (incluindo histórico) "
-        "e sincronização automática com **Google Sheets**."
+# ------------------------------------------------------------------------------
+# ABA 1: CENTRAL DE IMPORTAÇÃO SEGURA E SINCRONIZAÇÃO COM NUVEM
+# ------------------------------------------------------------------------------
+with aba1:
+    st.markdown("### Central de Importação Segura e Sincronização com Nuvem")
+    st.caption(
+        "Gravação incremental no Google Sheets (sem apagar o histórico), "
+        "preservação de zeros à esquerda nos lotes e backup diário automático."
     )
 
-    col1, col2, col3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
 
-    with col1:
-        st.info("**1. Planilha de Estoque (Diária - 6 colunas)**\n\n`Código` · `Saldo Geral` · `Descrição` · `Código do Lote` · `Saldo Lote` · `Validade`")
-        data_ref = st.date_input("Data desta posição de estoque:", value=date.today())
-        up_est = st.file_uploader("Selecionar Estoque (.xlsx ou .csv)", type=["xlsx", "xls", "csv"], key="up_est")
-        if up_est is not None and st.button("⚡ Processar Estoque e Aprender Giro", use_container_width=True):
-            try:
-                bruto = ler_planilha(up_est)
-                if bruto.shape[1] < 6:
-                    st.error(f"A planilha enviada tem apenas {bruto.shape[1]} colunas. São necessárias 6 colunas.")
-                else:
-                    novo_est = pd.DataFrame()
-                    novo_est["Codigo"] = normalizar_codigo(bruto.iloc[:, 0])
-                    novo_est["Saldo_Geral"] = converter_numero(bruto.iloc[:, 1])
-                    novo_est["Descricao"] = bruto.iloc[:, 2].astype(str).str.strip()
-                    novo_est["Codigo_Lote"] = bruto.iloc[:, 3].fillna("SEM LOTE").astype(str).str.strip()
-                    novo_est["Saldo_Lote"] = converter_numero(bruto.iloc[:, 4])
-                    novo_est["Validade"] = pd.to_datetime(bruto.iloc[:, 5], dayfirst=True, errors="coerce").dt.strftime("%Y-%m-%d")
-
-                    novo_est = novo_est[novo_est["Codigo"] != "nan"]
-                    salvar_csv_atomico(novo_est, ARQ_ESTOQUE, "backup_estoque")
-                    salvar_aba_gsheets("estoque_atual", novo_est)
-
-                    registrar_snapshot_diario(novo_est, data_ref.strftime("%Y-%m-%d"))
-
-                    st.cache_data.clear()
-                    st.success(f"Estoque de {data_ref.strftime('%d/%m/%Y')} salvo com segurança e histórico atualizado!")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao importar estoque: {e}")
-
-    with col2:
-        st.info("**2. Planilha de Custos (Semanal - 3 colunas)**\n\n`Código` · `Descrição` · `Custo Unitário C1`")
-        up_cus = st.file_uploader("Selecionar Custos (.xlsx ou .csv)", type=["xlsx", "xls", "csv"], key="up_cus")
-        if up_cus is not None and st.button("⚡ Processar Custos", use_container_width=True):
-            try:
-                bruto = ler_planilha(up_cus)
-                if bruto.shape[1] < 3:
-                    st.error(f"A planilha enviada tem apenas {bruto.shape[1]} colunas. São necessárias 3 colunas.")
-                else:
-                    novo_cus = pd.DataFrame()
-                    novo_cus["Codigo"] = normalizar_codigo(bruto.iloc[:, 0])
-                    novo_cus["Descricao"] = bruto.iloc[:, 1].astype(str).str.strip()
-                    novo_cus["Custo_C1"] = converter_numero(bruto.iloc[:, 2])
-                    novo_cus = novo_cus[novo_cus["Codigo"] != "nan"]
-
-                    salvar_csv_atomico(novo_cus, ARQ_CUSTOS, "backup_custos")
-                    salvar_aba_gsheets("custos_atuais", novo_cus)
-
-                    st.cache_data.clear()
-                    st.success(f"Custos atualizados com sucesso! ({len(novo_cus)} produtos)")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao importar custos: {e}")
-
-    with col3:
-        st.info("**3. Base Inicial de Vendas (Apoio - 3 colunas)**\n\n`Código` · `Descrição` · `Quantidade Vendida`")
-        dias_input = st.number_input("Período da base inicial (dias):", min_value=1, max_value=365, value=dias_hist)
-        up_ven = st.file_uploader("Selecionar Base Inicial (.xlsx ou .csv)", type=["xlsx", "xls", "csv"], key="up_ven")
-        if up_ven is not None and st.button("⚡ Processar Base Inicial", use_container_width=True):
-            try:
-                bruto = ler_planilha(up_ven)
-                if bruto.shape[1] < 3:
-                    st.error(f"A planilha enviada tem apenas {bruto.shape[1]} colunas. São necessárias 3 colunas.")
-                else:
-                    novo_ven = pd.DataFrame()
-                    novo_ven["Codigo"] = normalizar_codigo(bruto.iloc[:, 0])
-                    novo_ven["Descricao"] = bruto.iloc[:, 1].astype(str).str.strip()
-                    novo_ven["Qtd_Vendida"] = converter_numero(bruto.iloc[:, 2])
-                    novo_ven = novo_ven[novo_ven["Codigo"] != "nan"]
-
-                    salvar_csv_atomico(novo_ven, ARQ_VENDAS, "backup_vendas")
-                    salvar_aba_gsheets("vendas_atuais", novo_ven)
-                    with open(ARQ_CONFIG, "w") as f:
-                        f.write(str(int(dias_input)))
-
-                    st.cache_data.clear()
-                    st.success("Base inicial de vendas atualizada!")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao importar vendas: {e}")
-
-    st.divider()
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Produtos Ativos", len(df_produtos))
-    m2.metric("Dias Aprendidos no Histórico", f"{dias_aprendidos} dias")
-    m3.metric("Peso do Aprendizado Diário", f"{peso_diario * 100:.0f}%")
-    m4.metric("Peso da Base Inicial", f"{(1 - peso_diario) * 100:.0f}%")
-
-# ==============================================================================
-# ABA 2: SUGESTÃO DE COMPRAS & GIRO SAZONAL
-# ==============================================================================
-with abas[1]:
-    if df_produtos.empty:
-        st.warning("Importe primeiro a Planilha de Estoque na Aba 1.")
-    else:
-        st.info(
-            f"🧠 **Motor Sazonal Ativo (Janela de {janela_sazonal} dias):** Acumulamos **{dias_aprendidos} dias** de histórico real. "
-            f"O cálculo de giro combina **{peso_diario*100:.0f}% do Aprendizado Diário** + **{(1-peso_diario)*100:.0f}% da Base Inicial ({dias_hist}d)**."
+    with c1:
+        st.markdown(
+            """
+            <div class="glass-card">
+                <strong>1. Planilha de Estoque (Diária - 6 colunas)</strong><br><br>
+                <span class="pill-tag">Código</span>
+                <span class="pill-tag">Saldo Geral</span>
+                <span class="pill-tag">Descrição</span>
+                <span class="pill-tag">Código do Lote</span>
+                <span class="pill-tag">Saldo Lote</span>
+                <span class="pill-tag">Validade</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        data_posicao = st.date_input("Data desta posição de estoque:", value=date.today())
+        arq_estoque = st.file_uploader(
+            "Selecionar Estoque (.xlsx ou .csv)",
+            type=["xlsx", "xls", "csv"],
+            key="up_estoque",
         )
 
-        df_comp = df_produtos.copy()
-        df_comp["Estoque_Ideal"] = (df_comp["Giro_Diario"] * meta_dias).round(2)
-        df_comp["Qtd_Sugerida_Compra"] = (df_comp["Estoque_Ideal"] - df_comp["Saldo_Geral"]).apply(lambda x: max(0.0, round(x, 2)))
-        df_comp["Orcamento_Compra_R$"] = (df_comp["Qtd_Sugerida_Compra"] * df_comp["Custo_C1"]).round(2)
+    with c2:
+        st.markdown(
+            """
+            <div class="glass-card">
+                <strong>2. Planilha de Custos (Semanal - 3 colunas)</strong><br><br>
+                <span class="pill-tag">Código</span>
+                <span class="pill-tag">Descrição</span>
+                <span class="pill-tag">Custo Unitário C1</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        arq_custos = st.file_uploader(
+            "Selecionar Custos (.xlsx ou .csv)",
+            type=["xlsx", "xls", "csv"],
+            key="up_custos",
+        )
+
+    with c3:
+        st.markdown(
+            """
+            <div class="glass-card">
+                <strong>3. Base Inicial de Vendas (Apoio - 3 colunas)</strong><br><br>
+                <span class="pill-tag">Código</span>
+                <span class="pill-tag">Descrição</span>
+                <span class="pill-tag">Quantidade Vendida</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        dias_base_input = st.number_input(
+            "Período da base inicial (dias):",
+            min_value=1,
+            max_value=730,
+            value=int(dias_base_atual),
+            step=1,
+        )
+        arq_base = st.file_uploader(
+            "Selecionar Base Inicial (.xlsx ou .csv)",
+            type=["xlsx", "xls", "csv"],
+            key="up_base",
+        )
+
+    st.markdown("---")
+    if st.button("🚀 Processar e Sincronizar com Segurança", type="primary", use_container_width=True):
+        if not any([arq_estoque, arq_custos, arq_base]) and int(dias_base_input) == int(dias_base_atual):
+            st.warning("⚠️ Selecione pelo menos uma planilha para importar ou altere o período da base.")
+        else:
+            with st.spinner("Processando arquivos e gravando de forma incremental no Google Sheets..."):
+                try:
+                    novo_estoque = df_estoque.copy()
+                    novo_historico = df_historico.copy()
+                    novos_custos = df_custos.copy()
+                    nova_base = df_base_vendas.copy()
+                    data_str = data_posicao.strftime("%Y-%m-%d")
+
+                    if arq_estoque is not None:
+                        novo_estoque = processar_planilha_estoque(arq_estoque, data_posicao)
+                        if not novo_historico.empty and "data" in novo_historico.columns:
+                            novo_historico = novo_historico[novo_historico["data"] != data_str].copy()
+                        novo_historico = pd.concat([novo_historico, novo_estoque], ignore_index=True)
+
+                    if arq_custos is not None:
+                        novos_custos = processar_planilha_custos(arq_custos)
+
+                    if arq_base is not None:
+                        nova_base = processar_planilha_base_vendas(arq_base)
+
+                    agora_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+                    # Se o Google Sheets estiver configurado, exige sucesso na gravação em nuvem antes de confirmar
+                    if "gcp_service_account" in st.secrets:
+                        if not conectado_nuvem:
+                            raise RuntimeError(
+                                f"Google Sheets configurado, mas desconectado no momento ({erro_gsheets})."
+                            )
+                        if arq_estoque is not None:
+                            gravar_aba_pequena_gsheets(planilha_gsheets, "estoque_atual", novo_estoque)
+                            gravar_historico_incremental_gsheets(planilha_gsheets, novo_estoque, data_str)
+                        if arq_custos is not None:
+                            gravar_aba_pequena_gsheets(planilha_gsheets, "custos", novos_custos)
+                        if arq_base is not None:
+                            gravar_aba_pequena_gsheets(planilha_gsheets, "base_inicial", nova_base)
+
+                        df_meta_novo = pd.DataFrame(
+                            [
+                                {"chave": "dias_base", "valor": str(int(dias_base_input))},
+                                {"chave": "ultima_atualizacao", "valor": agora_str},
+                            ]
+                        )
+                        gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_novo)
+
+                    # Atualiza espelho e backup diário local
+                    novo_estado = {
+                        "estoque_atual": novo_estoque,
+                        "historico": novo_historico,
+                        "custos": novos_custos,
+                        "base_inicial": nova_base,
+                        "dias_base": int(dias_base_input),
+                        "ultima_atualizacao": agora_str,
+                    }
+                    salvar_espelho_e_backup_local(novo_estado)
+
+                    # Limpa o cache de leitura para exibir os dados novos imediatamente
+                    carregar_estado_completo.clear()
+                    st.success(
+                        f"✅ Dados processados e sincronizados com segurança em {agora_str}!"
+                    )
+                    st.rerun()
+
+                except Exception as erro_gravacao:
+                    st.error(
+                        f"❌ Falha durante a sincronização (nenhum dado antigo foi perdido): {erro_gravacao}"
+                    )
+
+    # Resumo do banco carregado
+    r1, r2, r3, r4 = st.columns(4)
+    qtd_skus = df_estoque["codigo"].nunique() if not df_estoque.empty else 0
+    qtd_datas = df_historico["data"].nunique() if (not df_historico.empty and "data" in df_historico.columns) else 0
+    qtd_custos = len(df_custos) if not df_custos.empty else 0
+    r1.metric("Produtos no Estoque Atual", f"{qtd_skus}")
+    r2.metric("Dias no Histórico Sazonal", f"{qtd_datas} dia(s)")
+    r3.metric("Itens com Custo Cadastrado", f"{qtd_custos}")
+    r4.metric("Última Sincronização", estado.get("ultima_atualizacao", "-"))
+
+# ------------------------------------------------------------------------------
+# ABA 2: SUGESTÃO DE COMPRAS & SAZONALIDADE
+# ------------------------------------------------------------------------------
+with aba2:
+    st.markdown("### 🛒 Sugestão de Compras & Giro Sazonal")
+    if df_estoque.empty:
+        st.info("Importe a Planilha de Estoque na Aba 1 para calcular o giro e as sugestões de compra.")
+    else:
+        p1, p2, p3, p4 = st.columns(4)
+        cobertura_desejada = p1.number_input("Cobertura Desejada (dias):", min_value=5, max_value=180, value=30)
+        lead_time = p2.number_input("Tempo de Entrega / Lead Time (dias):", min_value=0, max_value=90, value=7)
+        fator_sazonal = p3.slider("Ajuste Sazonal de Demanda (%):", min_value=-50, max_value=200, value=0, step=5)
+        filtro_busca = p4.text_input("Filtrar por Código ou Descrição:")
+
+        # Consolida estoque por produto (Saldo Geral é único por código)
+        df_prod = (
+            df_estoque.groupby("codigo", as_index=False)
+            .agg(
+                descricao=("descricao", "first"),
+                saldo_atual=("saldo_geral", "first"),
+            )
+        )
+
+        # Calcula giro pelo histórico de variações diárias (se houver >= 2 datas)
+        giro_hist = pd.DataFrame(columns=["codigo", "giro_historico"])
+        if not df_historico.empty and "data" in df_historico.columns and df_historico["data"].nunique() >= 2:
+            hist_diario = (
+                df_historico.groupby(["codigo", "data"], as_index=False)["saldo_geral"]
+                .first()
+                .sort_values(["codigo", "data"])
+            )
+            hist_diario["delta"] = hist_diario.groupby("codigo")["saldo_geral"].diff()
+            # Quedas de saldo representam saídas/vendas; subidas são entradas de nota fiscal
+            hist_diario["saida"] = hist_diario["delta"].apply(lambda x: abs(x) if pd.notna(x) and x < 0 else 0.0)
+
+            datas_unicas = sorted(df_historico["data"].unique())
+            intervalo_dias = max(
+                (pd.to_datetime(datas_unicas[-1]) - pd.to_datetime(datas_unicas[0])).days, 1
+            )
+            giro_hist = (
+                hist_diario.groupby("codigo", as_index=False)["saida"]
+                .sum()
+                .rename(columns={"saida": "saida_total"})
+            )
+            giro_hist["giro_historico"] = giro_hist["saida_total"] / intervalo_dias
+
+        df_calc = df_prod.merge(giro_hist[["codigo", "giro_historico"]], on="codigo", how="left")
+        df_calc["giro_historico"] = df_calc["giro_historico"].fillna(0.0)
+
+        # Junta com Base Inicial de Vendas
+        if not df_base_vendas.empty:
+            df_calc = df_calc.merge(
+                df_base_vendas[["codigo", "qtd_vendida"]], on="codigo", how="left"
+            )
+            df_calc["qtd_vendida"] = df_calc["qtd_vendida"].fillna(0.0)
+            df_calc["giro_base"] = df_calc["qtd_vendida"] / max(int(dias_base_atual), 1)
+        else:
+            df_calc["giro_base"] = 0.0
+
+        # Usa o maior giro entre a base histórica e o acumulado diário, ajustado pela sazonalidade
+        df_calc["giro_diario"] = df_calc[["giro_historico", "giro_base"]].max(axis=1) * (
+            1.0 + (fator_sazonal / 100.0)
+        )
+
+        # Junta com Custos
+        if not df_custos.empty:
+            df_calc = df_calc.merge(
+                df_custos[["codigo", "custo_unitario"]], on="codigo", how="left"
+            )
+            df_calc["custo_unitario"] = df_calc["custo_unitario"].fillna(0.0)
+        else:
+            df_calc["custo_unitario"] = 0.0
+
+        dias_totais_nec = cobertura_desejada + lead_time
+        df_calc["estoque_ideal"] = (df_calc["giro_diario"] * dias_totais_nec).round(1)
+        df_calc["sugestao_compra"] = (df_calc["estoque_ideal"] - df_calc["saldo_atual"]).apply(
+            lambda x: max(round(x), 0)
+        )
+        df_calc["investimento_estimado"] = df_calc["sugestao_compra"] * df_calc["custo_unitario"]
+        df_calc["autonomia_dias"] = df_calc.apply(
+            lambda r: round(r["saldo_atual"] / r["giro_diario"], 1) if r["giro_diario"] > 0 else 999.0,
+            axis=1,
+        )
 
         if filtro_busca:
-            termo = filtro_busca.lower()
-            df_comp = df_comp[
-                df_comp["Descricao"].str.lower().str.contains(termo, na=False) |
-                df_comp["Codigo"].str.lower().str.contains(termo, na=False)
+            termo = filtro_busca.lower().strip()
+            df_calc = df_calc[
+                df_calc["codigo"].str.lower().str.contains(termo, na=False)
+                | df_calc["descricao"].str.lower().str.contains(termo, na=False)
             ]
 
-        apenas_comprar = st.checkbox("Mostrar apenas itens com necessidade de compra (Qtd Sugerida > 0)", value=True)
-        if apenas_comprar:
-            df_comp = df_comp[df_comp["Qtd_Sugerida_Compra"] > 0]
+        df_compras = df_calc.sort_values("investimento_estimado", ascending=False)
 
-        df_comp = df_comp.sort_values(by="Orcamento_Compra_R$", ascending=False)
-
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Itens para Reposição", len(df_comp))
-        k2.metric("Orçamento Total Estimado (R$)", f"R$ {df_comp['Orcamento_Compra_R$'].sum():,.2f}")
-        k3.metric("Janela Sazonal Selecionada", f"{janela_sazonal} dias")
+        m1, m2, m3 = st.columns(3)
+        itens_comprar = int((df_compras["sugestao_compra"] > 0).sum())
+        orcamento_total = df_compras["investimento_estimado"].sum()
+        m1.metric("Itens com Necessidade de Compra", f"{itens_comprar} SKUs")
+        m2.metric("Orçamento Estimado de Reposição", f"R$ {orcamento_total:,.2f}")
+        m3.metric("Janela de Proteção (Cobertura + Entrega)", f"{dias_totais_nec} dias")
 
         st.dataframe(
-            df_comp[[
-                "Codigo", "Descricao", "Tendencia_Sazonal", "Saldo_Geral",
-                "Giro_Base_90d", "Giro_Aprendido", "Giro_Diario",
-                "Cobertura_Dias", "Qtd_Sugerida_Compra", "Custo_C1", "Orcamento_Compra_R$"
-            ]].round(2),
+            df_compras[
+                [
+                    "codigo",
+                    "descricao",
+                    "saldo_atual",
+                    "giro_diario",
+                    "autonomia_dias",
+                    "sugestao_compra",
+                    "custo_unitario",
+                    "investimento_estimado",
+                ]
+            ].rename(
+                columns={
+                    "codigo": "Código",
+                    "descricao": "Descrição",
+                    "saldo_atual": "Saldo Atual",
+                    "giro_diario": "Giro/Dia",
+                    "autonomia_dias": "Autonomia (Dias)",
+                    "sugestao_compra": "Sugestão Compra",
+                    "custo_unitario": "Custo Unit. (R$)",
+                    "investimento_estimado": "Total Compra (R$)",
+                }
+            ),
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
         )
 
-        csv_comp = df_comp.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 Baixar Sugestão de Compras (CSV/Excel)", data=csv_comp, file_name="sugestao_compras_esteio.csv", mime="text/csv")
-
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # ABA 3: RADAR DE VALIDADES (FEFO)
-# ==============================================================================
-with abas[2]:
-    st.subheader("⏳ Radar de Validades e Lotes (Metodologia FEFO)")
-    if df_lotes.empty:
-        st.warning("Importe a Planilha de Estoque na Aba 1 para monitorar os lotes.")
+# ------------------------------------------------------------------------------
+with aba3:
+    st.markdown("### ⏳ Radar de Validades — Gestão FEFO (Primeiro que Vence, Primeiro que Sai)")
+    if df_estoque.empty:
+        st.info("Importe a Planilha de Estoque na Aba 1 para monitorar os lotes e validades.")
     else:
-        hoje = pd.Timestamp.today().normalize()
-        lotes_fefo = df_lotes[df_lotes["Saldo_Lote"] > 0].copy()
-        lotes_fefo["Data_Validade"] = pd.to_datetime(lotes_fefo["Validade"], errors="coerce")
-        lotes_fefo["Dias_Para_Vencer"] = (lotes_fefo["Data_Validade"] - hoje).dt.days
-
-        def classificar_risco(dias):
-            if pd.isna(dias):
-                return "⚪ Sem Data"
-            elif dias < 0:
-                return "🔴 1. Vencido"
-            elif dias <= 30:
-                return "🟠 2. Crítico (<= 30 dias)"
-            elif dias <= 60:
-                return "🟡 3. Atenção (31 a 60 dias)"
-            elif dias <= 90:
-                return "🔵 4. Alerta (61 a 90 dias)"
-            else:
-                return "🟢 5. Seguro (> 90 dias)"
-
-        lotes_fefo["Status_FEFO"] = lotes_fefo["Dias_Para_Vencer"].apply(classificar_risco)
-        lotes_fefo = lotes_fefo.sort_values(by=["Dias_Para_Vencer", "Valor_Lote_R$"], ascending=[True, False])
-
-        vencidos_rs = lotes_fefo[lotes_fefo["Dias_Para_Vencer"] < 0]["Valor_Lote_R$"].sum()
-        criticos_rs = lotes_fefo[(lotes_fefo["Dias_Para_Vencer"] >= 0) & (lotes_fefo["Dias_Para_Vencer"] <= 30)]["Valor_Lote_R$"].sum()
-        atencao_rs = lotes_fefo[(lotes_fefo["Dias_Para_Vencer"] > 30) & (lotes_fefo["Dias_Para_Vencer"] <= 60)]["Valor_Lote_R$"].sum()
-
-        r1, r2, r3 = st.columns(3)
-        r1.metric("🔴 Vencidos (Risco em R$)", f"R$ {vencidos_rs:,.2f}")
-        r2.metric("🟠 Crítico <= 30 dias (R$)", f"R$ {criticos_rs:,.2f}")
-        r3.metric("🟡 Atenção 31-60 dias (R$)", f"R$ {atencao_rs:,.2f}")
-
-        filtro_status = st.multiselect(
-            "Filtrar por Status de Validade:",
-            options=sorted(lotes_fefo["Status_FEFO"].unique()),
-            default=sorted(lotes_fefo["Status_FEFO"].unique())
-        )
-        lotes_exib = lotes_fefo[lotes_fefo["Status_FEFO"].isin(filtro_status)]
-
-        st.dataframe(
-            lotes_exib[[
-                "Status_FEFO", "Codigo", "Descricao", "Codigo_Lote",
-                "Saldo_Lote", "Validade", "Dias_Para_Vencer", "Custo_C1", "Valor_Lote_R$"
-            ]].round(2),
-            use_container_width=True,
-            hide_index=True
-        )
-
-# ==============================================================================
-# ABA 4: CURVA ABC
-# ==============================================================================
-with abas[3]:
-    st.subheader("📊 Análise de Curva ABC (Capital Imobilizado em Estoque)")
-    if df_produtos.empty:
-        st.warning("Importe os dados de Estoque e Custos na Aba 1.")
-    else:
-        abc = df_produtos[df_produtos["Saldo_Geral"] > 0].copy()
-        abc = abc.sort_values(by="Valor_Estoque_R$", ascending=False)
-        valor_total_estoque = abc["Valor_Estoque_R$"].sum()
-
-        if valor_total_estoque > 0:
-            abc["Participacao_%"] = (abc["Valor_Estoque_R$"] / valor_total_estoque) * 100
-            abc["Acumulado_%"] = abc["Participacao_%"].cumsum()
-
-            def definir_classe(acum):
-                if acum <= 80.0:
-                    return "Classe A (Até 80%)"
-                elif acum <= 95.0:
-                    return "Classe B (80% a 95%)"
-                else:
-                    return "Classe C (95% a 100%)"
-
-            abc["Classe_ABC"] = abc["Acumulado_%"].apply(definir_classe)
+        df_fefo = df_estoque[df_estoque["saldo_lote"] > 0].copy()
+        if not df_custos.empty:
+            df_fefo = df_fefo.merge(df_custos[["codigo", "custo_unitario"]], on="codigo", how="left")
+            df_fefo["custo_unitario"] = df_fefo["custo_unitario"].fillna(0.0)
         else:
-            abc["Participacao_%"] = 0.0
-            abc["Acumulado_%"] = 0.0
-            abc["Classe_ABC"] = "Sem Custo C1"
+            df_fefo["custo_unitario"] = 0.0
 
-        a1, a2, a3 = st.columns(3)
-        a1.metric("Capital Total Imobilizado", f"R$ {valor_total_estoque:,.2f}")
-        a2.metric("Itens Classe A (80% do Valor)", len(abc[abc["Classe_ABC"].str.startswith("Classe A")]))
-        a3.metric("Itens Classe B e C", len(abc[~abc["Classe_ABC"].str.startswith("Classe A")]))
-
-        st.dataframe(
-            abc[[
-                "Classe_ABC", "Codigo", "Descricao", "Saldo_Geral",
-                "Custo_C1", "Valor_Estoque_R$", "Participacao_%", "Acumulado_%"
-            ]].round(2),
-            use_container_width=True,
-            hide_index=True
+        df_fefo["dt_validade"] = pd.to_datetime(
+            df_fefo["validade"], format="%d/%m/%Y", errors="coerce"
         )
-
-# ==============================================================================
-# ABA 5: AUDITORIA DE DIVERGÊNCIAS DO ERP
-# ==============================================================================
-with abas[4]:
-    st.subheader("🔍 Auditoria Inteligente de Divergências do ERP")
-    if df_produtos.empty:
-        st.warning("Importe a Planilha de Estoque na Aba 1.")
-    else:
-        div_lotes = df_produtos[
-            (df_produtos["Tem_Controle_Lote"]) &
-            (df_produtos["Divergencia_Lote"].abs() > 0.001)
-        ].copy()
-
-        itens_sem_controle_lote = len(df_produtos[~df_produtos["Tem_Controle_Lote"]])
-        sem_custo = df_produtos[(df_produtos["Saldo_Geral"] > 0) & (df_produtos["Custo_C1"] <= 0)].copy()
-        lotes_negativos = df_lotes[df_lotes["Saldo_Lote"] < 0].copy()
-
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("⚠️ Divergências Reais de Lote", len(div_lotes))
-        d2.metric("ℹ️ Itens Sem Controle de Lote (Ignorados)", itens_sem_controle_lote)
-        d3.metric("⚠️ Estoque Positivo Sem Custo C1", len(sem_custo))
-        d4.metric("⚠️ Lotes com Saldo Negativo", len(lotes_negativos))
-
-        st.markdown("#### 1. Divergências Reais (Apenas produtos com controle de lote onde Saldo Geral ≠ Soma dos Lotes)")
-        if div_lotes.empty:
-            st.success("Nenhuma divergência real encontrada nos produtos controlados por lote!")
-        else:
-            st.dataframe(
-                div_lotes[["Codigo", "Descricao", "Saldo_Geral", "Soma_Lotes", "Divergencia_Lote", "Qtd_Lotes"]].round(2),
-                use_container_width=True,
-                hide_index=True
+        mask_iso = df_fefo["dt_validade"].isna()
+        if mask_iso.any():
+            df_fefo.loc[mask_iso, "dt_validade"] = pd.to_datetime(
+                df_fefo.loc[mask_iso, "validade"], errors="coerce", dayfirst=True
             )
 
-        st.markdown("#### 2. Produtos com Saldo Positivo mas Sem Custo Unitário (C1) Cadastrado")
-        if sem_custo.empty:
-            st.success("Todos os produtos em estoque possuem custo cadastrado!")
+        hoje_ts = pd.Timestamp(date.today())
+        df_fefo["dias_para_vencer"] = (df_fefo["dt_validade"] - hoje_ts).dt.days
+        df_fefo["valor_em_risco"] = df_fefo["saldo_lote"] * df_fefo["custo_unitario"]
+
+        def classificar_fefo(dias):
+            if pd.isna(dias):
+                return "⚪ Sem Data de Validade"
+            if dias < 0:
+                return "🔴 1. Vencido"
+            if dias <= 30:
+                return "🟠 2. Crítico (0 a 30 dias)"
+            if dias <= 60:
+                return "🟡 3. Atenção (31 a 60 dias)"
+            if dias <= 90:
+                return "🔵 4. Preventivo (61 a 90 dias)"
+            return "🟢 5. Seguro (> 90 dias)"
+
+        df_fefo["status_fefo"] = df_fefo["dias_para_vencer"].apply(classificar_fefo)
+
+        v1, v2, v3, v4 = st.columns(4)
+        vlr_vencido = df_fefo.loc[df_fefo["status_fefo"] == "🔴 1. Vencido", "valor_em_risco"].sum()
+        vlr_30d = df_fefo.loc[df_fefo["status_fefo"] == "🟠 2. Crítico (0 a 30 dias)", "valor_em_risco"].sum()
+        vlr_60d = df_fefo.loc[df_fefo["status_fefo"] == "🟡 3. Atenção (31 a 60 dias)", "valor_em_risco"].sum()
+        vlr_90d = df_fefo.loc[df_fefo["status_fefo"] == "🔵 4. Preventivo (61 a 90 dias)", "valor_em_risco"].sum()
+
+        v1.metric("🔴 Vencidos", f"R$ {vlr_vencido:,.2f}")
+        v2.metric("🟠 Vencendo em 30 dias", f"R$ {vlr_30d:,.2f}")
+        v3.metric("🟡 Vencendo em 31-60 dias", f"R$ {vlr_60d:,.2f}")
+        v4.metric("🔵 Vencendo em 61-90 dias", f"R$ {vlr_90d:,.2f}")
+
+        filtro_status = st.multiselect(
+            "Filtrar faixas de vencimento:",
+            options=sorted(df_fefo["status_fefo"].unique()),
+            default=[s for s in sorted(df_fefo["status_fefo"].unique()) if not s.startswith("🟢")],
+        )
+
+        df_fefo_view = df_fefo[df_fefo["status_fefo"].isin(filtro_status)].sort_values(
+            "dias_para_vencer", ascending=True
+        )
+
+        st.dataframe(
+            df_fefo_view[
+                [
+                    "status_fefo",
+                    "codigo",
+                    "descricao",
+                    "lote",
+                    "validade",
+                    "dias_para_vencer",
+                    "saldo_lote",
+                    "valor_em_risco",
+                ]
+            ].rename(
+                columns={
+                    "status_fefo": "Faixa FEFO",
+                    "codigo": "Código",
+                    "descricao": "Descrição",
+                    "lote": "Código do Lote",
+                    "validade": "Validade",
+                    "dias_para_vencer": "Dias p/ Vencer",
+                    "saldo_lote": "Saldo do Lote",
+                    "valor_em_risco": "Capital no Lote (R$)",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+# ------------------------------------------------------------------------------
+# ABA 4: CURVA ABC FINANCEIRA
+# ------------------------------------------------------------------------------
+with aba4:
+    st.markdown("### 📊 Curva ABC Financeira (Pareto 80 / 15 / 5)")
+    if df_estoque.empty or df_custos.empty:
+        st.info("Importe a Planilha de Estoque e a Planilha de Custos na Aba 1 para gerar a Curva ABC Financeira.")
+    else:
+        df_abc = (
+            df_estoque.groupby("codigo", as_index=False)
+            .agg(descricao=("descricao", "first"), saldo_geral=("saldo_geral", "first"))
+            .merge(df_custos[["codigo", "custo_unitario"]], on="codigo", how="left")
+        )
+        df_abc["custo_unitario"] = df_abc["custo_unitario"].fillna(0.0)
+        df_abc["valor_estoque"] = df_abc["saldo_geral"].clip(lower=0.0) * df_abc["custo_unitario"]
+        df_abc = df_abc[df_abc["valor_estoque"] > 0].sort_values("valor_estoque", ascending=False).copy()
+
+        total_fin = df_abc["valor_estoque"].sum()
+        if total_fin > 0:
+            df_abc["part_pct"] = (df_abc["valor_estoque"] / total_fin) * 100.0
+            df_abc["acum_pct"] = df_abc["part_pct"].cumsum()
+            df_abc["classe_abc"] = df_abc["acum_pct"].apply(
+                lambda p: "Classe A (Até 80%)" if p <= 80.0 else ("Classe B (80% a 95%)" if p <= 95.0 else "Classe C (95% a 100%)")
+            )
+
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Capital Total Imobilizado", f"R$ {total_fin:,.2f}")
+            a2.metric("Itens Classe A (80% do Valor)", f"{int((df_abc['classe_abc'].str.startswith('Classe A')).sum())} SKUs")
+            a3.metric("Itens Classe B + C", f"{int((~df_abc['classe_abc'].str.startswith('Classe A')).sum())} SKUs")
+
+            st.dataframe(
+                df_abc[
+                    ["classe_abc", "codigo", "descricao", "saldo_geral", "custo_unitario", "valor_estoque", "part_pct", "acum_pct"]
+                ].rename(
+                    columns={
+                        "classe_abc": "Classe ABC",
+                        "codigo": "Código",
+                        "descricao": "Descrição",
+                        "saldo_geral": "Saldo Geral",
+                        "custo_unitario": "Custo Unit. (R$)",
+                        "valor_estoque": "Valor Total (R$)",
+                        "part_pct": "% Individual",
+                        "acum_pct": "% Acumulado",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.warning("Nenhum produto com saldo e custo positivos encontrado para calcular a Curva ABC.")
+
+# ------------------------------------------------------------------------------
+# ABA 5: AUDITORIA DE ERP (ZERO FALSOS ALARMES)
+# ------------------------------------------------------------------------------
+with aba5:
+    st.markdown("### 🔍 Auditoria de Inconsistências de ERP")
+    if df_estoque.empty:
+        st.info("Importe a Planilha de Estoque na Aba 1 para auditar divergências de lote e saldos.")
+    else:
+        # 1. Divergência real entre Saldo Geral e Soma dos Lotes (apenas para produtos que possuem lote informado)
+        df_com_lote = df_estoque[df_estoque["lote"] != ""].copy()
+        if not df_com_lote.empty:
+            aud_lotes = (
+                df_com_lote.groupby("codigo", as_index=False)
+                .agg(
+                    descricao=("descricao", "first"),
+                    saldo_geral=("saldo_geral", "first"),
+                    soma_lotes=("saldo_lote", "sum"),
+                    qtd_lotes=("lote", "count"),
+                )
+            )
+            aud_lotes["diferenca"] = (aud_lotes["saldo_geral"] - aud_lotes["soma_lotes"]).round(3)
+            div_lotes = aud_lotes[aud_lotes["diferenca"].abs() > 0.01].copy()
+        else:
+            div_lotes = pd.DataFrame()
+
+        # 2. Saldos gerais ou de lote negativos
+        saldos_negativos = df_estoque[
+            (df_estoque["saldo_geral"] < -0.001) | (df_estoque["saldo_lote"] < -0.001)
+        ].copy()
+
+        # 3. Produtos com estoque físico positivo mas sem custo cadastrado
+        if not df_custos.empty:
+            cods_com_custo = set(df_custos.loc[df_custos["custo_unitario"] > 0, "codigo"])
+        else:
+            cods_com_custo = set()
+        prod_positivos = (
+            df_estoque.groupby("codigo", as_index=False)
+            .agg(descricao=("descricao", "first"), saldo_geral=("saldo_geral", "first"))
+        )
+        sem_custo = prod_positivos[
+            (prod_positivos["saldo_geral"] > 0) & (~prod_positivos["codigo"].isin(cods_com_custo))
+        ].copy()
+
+        au1, au2, au3 = st.columns(3)
+        au1.metric("Divergências (Saldo Geral ≠ Soma Lotes)", len(div_lotes))
+        au2.metric("Registros com Saldo Negativo", len(saldos_negativos))
+        au3.metric("Produtos c/ Estoque e Sem Custo", len(sem_custo))
+
+        st.markdown("#### 1. Divergência entre Saldo Geral e Soma dos Lotes")
+        if div_lotes.empty:
+            st.success("✅ Nenhuma divergência entre Saldo Geral e Soma de Lotes encontrada!")
         else:
             st.dataframe(
-                sem_custo[["Codigo", "Descricao", "Saldo_Geral", "Custo_C1"]].round(2),
+                div_lotes.rename(
+                    columns={
+                        "codigo": "Código",
+                        "descricao": "Descrição",
+                        "saldo_geral": "Saldo Geral (ERP)",
+                        "soma_lotes": "Soma dos Lotes",
+                        "qtd_lotes": "Qtd. Lotes",
+                        "diferenca": "Diferença",
+                    }
+                ),
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+            )
+
+        st.markdown("#### 2. Saldos Negativos no Sistema")
+        if saldos_negativos.empty:
+            st.success("✅ Nenhum saldo negativo encontrado!")
+        else:
+            st.dataframe(
+                saldos_negativos[["codigo", "descricao", "saldo_geral", "lote", "saldo_lote"]].rename(
+                    columns={
+                        "codigo": "Código",
+                        "descricao": "Descrição",
+                        "saldo_geral": "Saldo Geral",
+                        "lote": "Lote",
+                        "saldo_lote": "Saldo Lote",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("#### 3. Produtos com Estoque Físico Sem Custo Unitário")
+        if sem_custo.empty:
+            st.success("✅ Todos os itens com estoque positivo possuem custo cadastrado!")
+        else:
+            st.dataframe(
+                sem_custo.rename(
+                    columns={
+                        "codigo": "Código",
+                        "descricao": "Descrição",
+                        "saldo_geral": "Saldo Geral",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
