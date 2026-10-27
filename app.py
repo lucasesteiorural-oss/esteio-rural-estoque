@@ -94,6 +94,7 @@ ESQUEMA_ABAS = {
     "historico": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
     "custos": ["codigo", "descricao", "custo_unitario"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
+    "ocultos": ["codigo", "descricao", "data_ocultado"],
     "meta": ["chave", "valor"],
 }
 
@@ -107,6 +108,7 @@ MAPA_SINONIMOS = {
     "data": ["data", "data_posicao", "data_ref", "data_importacao", "dt", "dia"],
     "custo_unitario": ["custo_unitario", "custo_unitario_c1", "custo_c1", "custo", "preco_custo", "valor_unitario", "c1"],
     "qtd_vendida": ["qtd_vendida", "quantidade_vendida", "quantidade", "qtd", "vendas", "saida", "total_vendido"],
+    "data_ocultado": ["data_ocultado", "data", "ocultado_em"],
     "chave": ["chave", "key", "parametro", "config"],
     "valor": ["valor", "value", "conteudo"],
 }
@@ -198,7 +200,6 @@ def padronizar_dataframe(df: pd.DataFrame, nome_aba: str) -> pd.DataFrame:
 
     df = df.rename(columns=renomear)
 
-    # Fallback posicional caso a planilha tenha cabeçalhos personalizados diferentes
     if "codigo" in colunas_esperadas and "codigo" not in df.columns:
         if nome_aba in ("estoque_atual", "historico") and df.shape[1] >= 6:
             novos_nomes = ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade"]
@@ -213,13 +214,15 @@ def padronizar_dataframe(df: pd.DataFrame, nome_aba: str) -> pd.DataFrame:
         elif nome_aba == "base_inicial" and df.shape[1] >= 3:
             df = df.iloc[:, :3].copy()
             df.columns = ["codigo", "descricao", "qtd_vendida"]
+        elif nome_aba == "ocultos" and df.shape[1] >= 2:
+            df = df.iloc[:, :2].copy()
+            df.columns = ["codigo", "descricao"]
 
-    # Garante a existência de todas as colunas do esquema
     for col_alvo in colunas_esperadas:
         if col_alvo not in df.columns:
             if col_alvo in COLUNAS_NUMERICAS:
                 df[col_alvo] = 0.0
-            elif col_alvo == "data":
+            elif col_alvo in ("data", "data_ocultado"):
                 df[col_alvo] = date.today().strftime("%Y-%m-%d")
             else:
                 df[col_alvo] = ""
@@ -284,22 +287,30 @@ def ler_aba_bruta_gsheets(planilha, nome_aba: str) -> pd.DataFrame:
     return padronizar_dataframe(df, nome_aba)
 
 
-def gravar_aba_pequena_gsheets(planilha, nome_aba: str, df: pd.DataFrame):
+def gravar_aba_pequena_gsheets(planilha, nome_aba: str, df: pd.DataFrame, permitir_vazio: bool = False):
     """
-    Sobrescreve abas pequenas (estoque_atual, custos, base_inicial, meta) a partir de A1
+    Sobrescreve abas pequenas (estoque_atual, custos, base_inicial, ocultos, meta) a partir de A1
     SEM chamar clear() antes, redimensionando a aba ao final.
     """
-    if df is None or df.empty:
+    if df is None:
         return
+    if df.empty and not permitir_vazio:
+        return
+
     df_padrao = padronizar_dataframe(df, nome_aba) if nome_aba in ESQUEMA_ABAS else df
     df_str = df_padrao.fillna("").astype(str)
-    dados = [df_str.columns.tolist()] + df_str.values.tolist()
+    cabecalho = df_str.columns.tolist()
+
+    if df_str.empty:
+        dados = [cabecalho, ["" for _ in cabecalho]]
+    else:
+        dados = [cabecalho] + df_str.values.tolist()
 
     ws = obter_ou_criar_aba(
-        planilha, nome_aba, len(dados) + 10, len(df_str.columns) + 2
+        planilha, nome_aba, len(dados) + 10, max(len(cabecalho), 1) + 2
     )
     ws.update(values=dados, range_name="A1", value_input_option="RAW")
-    ws.resize(rows=max(len(dados), 2), cols=max(len(df_str.columns), 1))
+    ws.resize(rows=max(len(dados), 2), cols=max(len(cabecalho), 1))
 
 
 def gravar_historico_incremental_gsheets(
@@ -322,7 +333,6 @@ def gravar_historico_incremental_gsheets(
     )
     primeira_linha = [str(c).strip() for c in ws.row_values(1)]
 
-    # Se a aba estiver vazia, escreve cabeçalho + linhas
     if not primeira_linha:
         ws.update(
             values=[cabecalho] + linhas_novas,
@@ -331,7 +341,6 @@ def gravar_historico_incremental_gsheets(
         )
         return
 
-    # Se o cabeçalho antigo na planilha for diferente do novo padrão, migra e padroniza mantendo o histórico
     if primeira_linha != cabecalho:
         df_antigo = ler_aba_bruta_gsheets(planilha, "historico")
         if not df_antigo.empty:
@@ -374,12 +383,13 @@ def gravar_historico_incremental_gsheets(
 # 4. PERSISTÊNCIA HÍBRIDA (FONTE ÚNICA NA NUVEM + BACKUP DIÁRIO LOCAL)
 # ==============================================================================
 def salvar_espelho_e_backup_local(estado: dict):
-    """Grava ficheiro local de forma atómica e mantém 1 backup por dia (últimos 7 dias)."""
+    """Grava arquivo local de forma atômica e mantém 1 backup por dia (últimos 7 dias)."""
     payload = {
         "estoque_atual": estado.get("estoque_atual", pd.DataFrame()).to_dict(orient="records"),
         "historico": estado.get("historico", pd.DataFrame()).to_dict(orient="records"),
         "custos": estado.get("custos", pd.DataFrame()).to_dict(orient="records"),
         "base_inicial": estado.get("base_inicial", pd.DataFrame()).to_dict(orient="records"),
+        "ocultos": estado.get("ocultos", pd.DataFrame()).to_dict(orient="records"),
         "dias_base": int(estado.get("dias_base", 87)),
         "ultima_atualizacao": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
     }
@@ -411,8 +421,9 @@ def carregar_espelho_local() -> dict:
         "historico": padronizar_dataframe(pd.DataFrame(), "historico"),
         "custos": padronizar_dataframe(pd.DataFrame(), "custos"),
         "base_inicial": padronizar_dataframe(pd.DataFrame(), "base_inicial"),
+        "ocultos": padronizar_dataframe(pd.DataFrame(), "ocultos"),
         "dias_base": 87,
-        "ultima_atualizacao": "Sem registos",
+        "ultima_atualizacao": "Sem registros",
     }
     if not os.path.exists(ARQUIVO_LOCAL):
         return estado_vazio
@@ -424,6 +435,7 @@ def carregar_espelho_local() -> dict:
             "historico": padronizar_dataframe(pd.DataFrame(d.get("historico", [])), "historico"),
             "custos": padronizar_dataframe(pd.DataFrame(d.get("custos", [])), "custos"),
             "base_inicial": padronizar_dataframe(pd.DataFrame(d.get("base_inicial", [])), "base_inicial"),
+            "ocultos": padronizar_dataframe(pd.DataFrame(d.get("ocultos", [])), "ocultos"),
             "dias_base": int(d.get("dias_base", 87)),
             "ultima_atualizacao": d.get("ultima_atualizacao", "Local"),
         }
@@ -443,6 +455,7 @@ def carregar_estado_completo() -> dict:
         df_hist = ler_aba_bruta_gsheets(planilha, "historico")
         df_cus = ler_aba_bruta_gsheets(planilha, "custos")
         df_base = ler_aba_bruta_gsheets(planilha, "base_inicial")
+        df_ocul = ler_aba_bruta_gsheets(planilha, "ocultos")
         df_meta = ler_aba_bruta_gsheets(planilha, "meta")
 
         dias_base = 87
@@ -460,6 +473,7 @@ def carregar_estado_completo() -> dict:
             "historico": df_hist,
             "custos": df_cus,
             "base_inicial": df_base,
+            "ocultos": df_ocul,
             "dias_base": dias_base,
             "ultima_atualizacao": ult_att,
         }
@@ -471,7 +485,7 @@ def carregar_estado_completo() -> dict:
 # 5. LEITURA E PADRONIZAÇÃO DE PLANILHAS (EXCEL / CSV COM DTYPE=STR)
 # ==============================================================================
 def ler_arquivo_upload(arquivo) -> pd.DataFrame:
-    """Lê ficheiros .xlsx ou .csv forçando dtype=str para jamais perder zeros à esquerda."""
+    """Lê arquivos .xlsx ou .csv forçando dtype=str para jamais perder zeros à esquerda."""
     nome = arquivo.name.lower()
     if nome.endswith(".csv"):
         conteudo = arquivo.getvalue()
@@ -483,7 +497,7 @@ def ler_arquivo_upload(arquivo) -> pd.DataFrame:
                         return df
                 except Exception:
                     continue
-        raise ValueError("Não foi possível ler o ficheiro CSV. Verifique o separador.")
+        raise ValueError("Não foi possível ler o arquivo CSV. Verifique o separador.")
     else:
         return pd.read_excel(arquivo, dtype=str)
 
@@ -575,22 +589,47 @@ except Exception as erro_leitura:
     st.error(f"❌ Erro ao ler dados do Google Sheets: {erro_leitura}")
     estado = carregar_espelho_local()
 
-df_estoque = padronizar_dataframe(estado.get("estoque_atual"), "estoque_atual")
-df_historico = padronizar_dataframe(estado.get("historico"), "historico")
+df_estoque_bruto = padronizar_dataframe(estado.get("estoque_atual"), "estoque_atual")
+df_historico_bruto = padronizar_dataframe(estado.get("historico"), "historico")
 df_custos = padronizar_dataframe(estado.get("custos"), "custos")
 df_base_vendas = padronizar_dataframe(estado.get("base_inicial"), "base_inicial")
+df_ocultos = padronizar_dataframe(estado.get("ocultos"), "ocultos")
 dias_base_atual = int(estado.get("dias_base", 87))
+
+codigos_ocultos = set(df_ocultos["codigo"].unique()) if not df_ocultos.empty else set()
+
+# Barra rápida de controle caso existam produtos ocultos
+mostrar_ocultos_temp = False
+if len(codigos_ocultos) > 0:
+    col_aviso_oc, col_toggle_oc = st.columns([2.8, 1.2])
+    with col_aviso_oc:
+        st.caption(
+            f"🙈 Atualmente há **{len(codigos_ocultos)} produto(s) oculto(s)** dos relatórios (gerencie na Aba 6)."
+        )
+    with col_toggle_oc:
+        mostrar_ocultos_temp = st.toggle(
+            "👁️ Mostrar ocultos temporariamente", value=False
+        )
+
+# Filtra os DataFrames usados nos relatórios (Abas 2, 3, 4 e 5)
+if codigos_ocultos and not mostrar_ocultos_temp:
+    df_estoque = df_estoque_bruto[~df_estoque_bruto["codigo"].isin(codigos_ocultos)].copy()
+    df_historico = df_historico_bruto[~df_historico_bruto["codigo"].isin(codigos_ocultos)].copy()
+else:
+    df_estoque = df_estoque_bruto.copy()
+    df_historico = df_historico_bruto.copy()
 
 # ==============================================================================
 # 7. NAVEGAÇÃO POR ABAS
 # ==============================================================================
-aba1, aba2, aba3, aba4, aba5 = st.tabs(
+aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs(
     [
         "📥 1. Importação & Nuvem",
-        "🛒 2. Sugestão de Compras & Sazonalidade",
+        "🛒 2. Sugestão de Compras",
         "⏳ 3. Radar de Validades (FEFO)",
         "📊 4. Curva ABC Financeira",
         "🔍 5. Auditoria de ERP",
+        f"👁️‍🗨️ 6. Ocultar Produtos ({len(codigos_ocultos)})",
     ]
 )
 
@@ -676,10 +715,10 @@ with aba1:
         if not any([arq_estoque, arq_custos, arq_base]) and int(dias_base_input) == int(dias_base_atual):
             st.warning("⚠️ Selecione pelo menos uma planilha para importar ou altere o período da base.")
         else:
-            with st.spinner("Processando ficheiros e gravando de forma incremental no Google Sheets..."):
+            with st.spinner("Processando arquivos e gravando de forma incremental no Google Sheets..."):
                 try:
-                    novo_estoque = df_estoque.copy()
-                    novo_historico = df_historico.copy()
+                    novo_estoque = df_estoque_bruto.copy()
+                    novo_historico = df_historico_bruto.copy()
                     novos_custos = df_custos.copy()
                     nova_base = df_base_vendas.copy()
                     data_str = data_posicao.strftime("%Y-%m-%d")
@@ -724,6 +763,7 @@ with aba1:
                         "historico": novo_historico,
                         "custos": novos_custos,
                         "base_inicial": nova_base,
+                        "ocultos": df_ocultos,
                         "dias_base": int(dias_base_input),
                         "ultima_atualizacao": agora_str,
                     }
@@ -741,10 +781,10 @@ with aba1:
                     )
 
     r1, r2, r3, r4 = st.columns(4)
-    qtd_skus = df_estoque["codigo"].nunique() if (not df_estoque.empty and "codigo" in df_estoque.columns) else 0
-    qtd_datas = df_historico["data"].nunique() if (not df_historico.empty and "data" in df_historico.columns) else 0
+    qtd_skus_visiveis = df_estoque["codigo"].nunique() if (not df_estoque.empty and "codigo" in df_estoque.columns) else 0
+    qtd_datas = df_historico_bruto["data"].nunique() if (not df_historico_bruto.empty and "data" in df_historico_bruto.columns) else 0
     qtd_custos = len(df_custos) if not df_custos.empty else 0
-    r1.metric("Produtos no Estoque Atual", f"{qtd_skus}")
+    r1.metric("Produtos Ativos nos Relatórios", f"{qtd_skus_visiveis} (Ocultos: {len(codigos_ocultos)})")
     r2.metric("Dias no Histórico Sazonal", f"{qtd_datas} dia(s)")
     r3.metric("Itens com Custo Cadastrado", f"{qtd_custos}")
     r4.metric("Última Sincronização", estado.get("ultima_atualizacao", "-"))
@@ -755,7 +795,7 @@ with aba1:
 with aba2:
     st.markdown("### 🛒 Sugestão de Compras & Giro Sazonal")
     if df_estoque.empty:
-        st.info("Importe a Planilha de Estoque na Aba 1 para calcular o giro e as sugestões de compra.")
+        st.info("Importe a Planilha de Estoque na Aba 1 (ou verifique se todos os itens estão ocultos na Aba 6).")
     else:
         p1, p2, p3, p4 = st.columns(4)
         cobertura_desejada = p1.number_input("Cobertura Desejada (dias):", min_value=5, max_value=180, value=30)
@@ -877,7 +917,7 @@ with aba2:
 with aba3:
     st.markdown("### ⏳ Radar de Validades — Gestão FEFO (Primeiro que Vence, Primeiro que Sai)")
     if df_estoque.empty:
-        st.info("Importe a Planilha de Estoque na Aba 1 para monitorizar os lotes e validades.")
+        st.info("Importe a Planilha de Estoque na Aba 1 para monitorar os lotes e validades.")
     else:
         df_fefo = df_estoque[df_estoque["saldo_lote"] > 0].copy()
         if not df_custos.empty:
@@ -1056,7 +1096,7 @@ with aba5:
 
         au1, au2, au3 = st.columns(3)
         au1.metric("Divergências (Saldo Geral ≠ Soma Lotes)", len(div_lotes))
-        au2.metric("Registos com Saldo Negativo", len(saldos_negativos))
+        au2.metric("Registros com Saldo Negativo", len(saldos_negativos))
         au3.metric("Produtos c/ Estoque e Sem Custo", len(sem_custo))
 
         st.markdown("#### 1. Divergência entre Saldo Geral e Soma dos Lotes")
@@ -1111,3 +1151,195 @@ with aba5:
                 use_container_width=True,
                 hide_index=True,
             )
+
+# ------------------------------------------------------------------------------
+# ABA 6: GERENCIADOR DE PRODUTOS OCULTOS (CAIXAS DE SELEÇÃO EM LOTE)
+# ------------------------------------------------------------------------------
+with aba6:
+    st.markdown("### 👁️‍🗨️ Ocultar ou Restaurar Produtos dos Relatórios")
+    st.caption(
+        "Marque as caixas de seleção para ocultar vários produtos de uma só vez (ex: brindes, uso interno ou itens fora de linha). "
+        "A lista fica salva no Google Sheets e pode ser restaurada a qualquer momento."
+    )
+
+    # Catálogo consolidado de todos os produtos conhecidos no sistema
+    frames_catalogo = []
+    if not df_estoque_bruto.empty:
+        frames_catalogo.append(df_estoque_bruto[["codigo", "descricao"]])
+    if not df_custos.empty:
+        frames_catalogo.append(df_custos[["codigo", "descricao"]])
+    if not df_base_vendas.empty:
+        frames_catalogo.append(df_base_vendas[["codigo", "descricao"]])
+
+    if frames_catalogo:
+        df_catalogo = (
+            pd.concat(frames_catalogo, ignore_index=True)
+            .drop_duplicates(subset=["codigo"], keep="first")
+            .sort_values("descricao")
+            .reset_index(drop=True)
+        )
+    else:
+        df_catalogo = pd.DataFrame(columns=["codigo", "descricao"])
+
+    col_esq, col_dir = st.columns(2)
+
+    # --- COLUNA DA ESQUERDA: PRODUTOS VISÍVEIS PARA OCULTAR ---
+    with col_esq:
+        st.markdown("#### ✅ Produtos Visíveis nos Relatórios")
+        if df_catalogo.empty:
+            st.info("Importe suas planilhas na Aba 1 para listar os produtos aqui.")
+        else:
+            df_visiveis = df_catalogo[~df_catalogo["codigo"].isin(codigos_ocultos)].copy()
+            busca_visiveis = st.text_input(
+                "🔍 Pesquisar produto visível (Código ou Nome):",
+                key="busca_visiveis_oc",
+            )
+            if busca_visiveis:
+                termo_v = busca_visiveis.lower().strip()
+                df_visiveis = df_visiveis[
+                    df_visiveis["codigo"].str.lower().str.contains(termo_v, na=False)
+                    | df_visiveis["descricao"].str.lower().str.contains(termo_v, na=False)
+                ].copy()
+
+            marcar_todos_visiveis = st.checkbox(
+                f"Selecionar todos os {len(df_visiveis)} produtos listados abaixo",
+                value=False,
+                key="chk_todos_visiveis",
+            )
+            df_visiveis.insert(0, "selecionar", marcar_todos_visiveis)
+
+            ed_visiveis = st.data_editor(
+                df_visiveis,
+                hide_index=True,
+                use_container_width=True,
+                height=380,
+                key="editor_ocultar",
+                disabled=["codigo", "descricao"],
+                column_config={
+                    "selecionar": st.column_config.CheckboxColumn(
+                        "Ocultar?",
+                        help="Marque para ocultar este produto dos relatórios",
+                        default=False,
+                    ),
+                    "codigo": st.column_config.TextColumn("Código"),
+                    "descricao": st.column_config.TextColumn("Descrição"),
+                },
+            )
+
+            selecionados_para_ocultar = ed_visiveis[ed_visiveis["selecionar"] == True]
+
+            if st.button(
+                f"🙈 Ocultar Selecionados ({len(selecionados_para_ocultar)})",
+                type="primary",
+                use_container_width=True,
+                disabled=selecionados_para_ocultar.empty,
+            ):
+                with st.spinner("Salvando produtos ocultos na nuvem..."):
+                    try:
+                        novos_ocultos = selecionados_para_ocultar[["codigo", "descricao"]].copy()
+                        novos_ocultos["data_ocultado"] = date.today().strftime("%Y-%m-%d")
+
+                        df_ocultos_atualizado = (
+                            pd.concat([df_ocultos, novos_ocultos], ignore_index=True)
+                            .drop_duplicates(subset=["codigo"], keep="last")
+                            .reset_index(drop=True)
+                        )
+
+                        if "gcp_service_account" in st.secrets:
+                            if not conectado_nuvem:
+                                raise RuntimeError(f"Sem conexão com Google Sheets ({erro_gsheets}).")
+                            gravar_aba_pequena_gsheets(
+                                planilha_gsheets, "ocultos", df_ocultos_atualizado, permitir_vazio=True
+                            )
+
+                        estado["ocultos"] = df_ocultos_atualizado
+                        salvar_espelho_e_backup_local(estado)
+                        carregar_estado_completo.clear()
+                        st.success(f"✅ {len(selecionados_para_ocultar)} produto(s) ocultado(s) com sucesso!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Erro ao ocultar produtos: {e}")
+
+    # --- COLUNA DA DIREITA: PRODUTOS OCULTOS PARA RESTAURAR ---
+    with col_dir:
+        st.markdown(f"#### 🙈 Produtos Ocultos ({len(df_ocultos)})")
+        if df_ocultos.empty:
+            st.success("Nenhum produto está oculto no momento. Todos os itens estão visíveis nos relatórios!")
+        else:
+            busca_ocultos = st.text_input(
+                "🔍 Pesquisar entre os ocultos:",
+                key="busca_ocultos_oc",
+            )
+            df_oc_view = df_ocultos.copy()
+            if busca_ocultos:
+                termo_o = busca_ocultos.lower().strip()
+                df_oc_view = df_oc_view[
+                    df_oc_view["codigo"].str.lower().str.contains(termo_o, na=False)
+                    | df_oc_view["descricao"].str.lower().str.contains(termo_o, na=False)
+                ].copy()
+
+            marcar_todos_ocultos = st.checkbox(
+                f"Selecionar todos os {len(df_oc_view)} ocultos listados abaixo",
+                value=False,
+                key="chk_todos_ocultos",
+            )
+            df_oc_view.insert(0, "restaurar", marcar_todos_ocultos)
+
+            ed_ocultos = st.data_editor(
+                df_oc_view,
+                hide_index=True,
+                use_container_width=True,
+                height=380,
+                key="editor_restaurar",
+                disabled=["codigo", "descricao", "data_ocultado"],
+                column_config={
+                    "restaurar": st.column_config.CheckboxColumn(
+                        "Voltar?",
+                        help="Marque para voltar a exibir este produto nos relatórios",
+                        default=False,
+                    ),
+                    "codigo": st.column_config.TextColumn("Código"),
+                    "descricao": st.column_config.TextColumn("Descrição"),
+                    "data_ocultado": st.column_config.TextColumn("Ocultado em"),
+                },
+            )
+
+            selecionados_para_restaurar = ed_ocultos[ed_ocultos["restaurar"] == True]
+
+            b_rest_1, b_rest_2 = st.columns(2)
+            with b_rest_1:
+                btn_restaurar_sel = st.button(
+                    f"👁️ Restaurar Marcados ({len(selecionados_para_restaurar)})",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=selecionados_para_restaurar.empty,
+                )
+            with b_rest_2:
+                btn_restaurar_todos = st.button(
+                    "🔄 Restaurar Todos",
+                    use_container_width=True,
+                )
+
+            if btn_restaurar_sel or btn_restaurar_todos:
+                with st.spinner("Restaurando produtos na nuvem..."):
+                    try:
+                        if btn_restaurar_todos:
+                            df_ocultos_restante = padronizar_dataframe(pd.DataFrame(), "ocultos")
+                        else:
+                            cods_remover = set(selecionados_para_restaurar["codigo"].unique())
+                            df_ocultos_restante = df_ocultos[~df_ocultos["codigo"].isin(cods_remover)].copy()
+
+                        if "gcp_service_account" in st.secrets:
+                            if not conectado_nuvem:
+                                raise RuntimeError(f"Sem conexão com Google Sheets ({erro_gsheets}).")
+                            gravar_aba_pequena_gsheets(
+                                planilha_gsheets, "ocultos", df_ocultos_restante, permitir_vazio=True
+                            )
+
+                        estado["ocultos"] = df_ocultos_restante
+                        salvar_espelho_e_backup_local(estado)
+                        carregar_estado_completo.clear()
+                        st.success("✅ Produto(s) restaurado(s) para os relatórios com sucesso!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Erro ao restaurar produtos: {e}")
