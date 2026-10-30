@@ -252,22 +252,32 @@ def limpar_serie_texto(serie: pd.Series) -> pd.Series:
             return ""
         return re.sub(r"^(\d+)\.0$", r"\1", s)
     return serie.map(_limpar_val)
-def converter_numero_br(serie: pd.Series) -> pd.Series:
+def converter_numero_br(
+    serie: pd.Series,
+    nome_coluna: str = "",
+    origem_gsheets: bool = False,
+    bloquear_invalidos: bool = False,
+    codigos_ref: pd.Series = None,
+) -> pd.Series:
     """
-    Conversão inteligente que preserva 100% dos valores numéricos nativos do Excel (ex: float 13.071)
-    sem confundi-los com milhares, e desambigua textos de CSV/Sheets olhando o contexto da coluna:
-    1. Valores já numéricos (int/float vindos do Excel): mantidos exatamente como float (13.071 -> 13.071).
-    2. Textos com vírgula decimal ('1.234,56' ou '13,071'): ponto é milhar, vírgula é decimal.
-    3. Textos com 2 ou mais pontos ('1.234.567'): pontos são milhar (1234567.0).
-    4. Textos com 1 único ponto e 3 dígitos ('1.000' vs '13.071'):
-       - Se a coluna usa ponto como separador decimal (ex: dados do Google Sheets ou CSV com '10.5', '4.25'),
-         '13.071' é lido como decimal 13.071.
-       - Só é tratado como milhar (1000.0) se a coluna for explicitamente texto no padrão BR (com vírgulas
-         decimais na coluna e sem decimais com ponto).
+    Conversão numérica blindada com separação de origem (Google Sheets vs Upload ERP):
+    1. Valores numéricos nativos do Excel (int/float): preservados sem alteração (ex: 13.071 -> 13.071).
+    2. Leitura do Google Sheets (origem_gsheets=True): ponto único é sempre decimal (padrão Python/RAW).
+    3. Upload de arquivos (origem_gsheets=False):
+       - Nas colunas de saldo e quantidade ('saldo_geral', 'saldo_lote', 'qtd_vendida'), textos no formato
+         '1.234' são convertidos como milhar (1234.0), mesmo que a coluna não possua vírgulas decimais.
+       - Na coluna 'custo_unitario', preserva 3 casas decimais caso o arquivo venha com ponto decimal,
+         ou converte milhar se a coluna usar padrão brasileiro com vírgula.
+    4. Bloqueio de entradas inválidas (bloquear_invalidos=True): células vazias ou '-' viram 0.0, mas
+       textos corrompidos ou erros de fórmula ('#VALOR!', 'ERRO', '10 UN') bloqueiam o upload informando o SKU.
     """
+    if serie is None or serie.empty:
+        return pd.Series(dtype=float)
     if pd.api.types.is_numeric_dtype(serie):
         return pd.to_numeric(serie, errors="coerce").fillna(0.0).astype(float)
-    mask_nativo_num = serie.map(lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and pd.notna(x))
+    mask_nativo_num = serie.map(
+        lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and pd.notna(x)
+    )
     if mask_nativo_num.all():
         return serie.astype(float)
     s_str = (
@@ -275,44 +285,81 @@ def converter_numero_br(serie: pd.Series) -> pd.Series:
         .astype(str)
         .str.strip()
         .str.replace("R$", "", regex=False)
+        .str.replace("r$", "", regex=False)
         .str.replace("\u00a0", "", regex=False)
         .str.replace(" ", "", regex=False)
     )
     s_apenas_str = s_str[~mask_nativo_num]
     tem_virgula_decimal_na_coluna = s_apenas_str.str.contains(r",\d+$", regex=True).any()
-    tem_ponto_nao_3_digitos = s_apenas_str.str.match(r"^[+-]?\d+\.\d{1,2}$|^[+-]?\d+\.\d{4,}$").any()
-    tratar_1ponto_3dig_como_milhar = (not tem_ponto_nao_3_digitos) and tem_virgula_decimal_na_coluna
-    def _parse_elemento(val):
+    tem_ponto_nao_3_digitos = s_apenas_str.str.match(
+        r"^[+-]?\d+\.\d{1,2}$|^[+-]?\d+\.\d{4,}$"
+    ).any()
+    if origem_gsheets:
+        tratar_1ponto_3dig_como_milhar = False
+    elif nome_coluna in ("saldo_geral", "saldo_lote", "qtd_vendida"):
+        tratar_1ponto_3dig_como_milhar = (not tem_ponto_nao_3_digitos) or tem_virgula_decimal_na_coluna
+    else:
+        tratar_1ponto_3dig_como_milhar = (not tem_ponto_nao_3_digitos) and tem_virgula_decimal_na_coluna
+    erros_encontrados = []
+    valores_convertidos = []
+    for idx, val in serie.items():
         if pd.isna(val) or val is None:
-            return 0.0
+            valores_convertidos.append(0.0)
+            continue
         if isinstance(val, (int, float)) and not isinstance(val, bool):
-            return float(val)
+            v_flt = float(val)
+            if math.isnan(v_flt) or math.isinf(v_flt):
+                valores_convertidos.append(0.0)
+            else:
+                valores_convertidos.append(v_flt)
+            continue
+        txt_bruto = str(val).strip()
         txt = (
-            str(val)
-            .strip()
-            .replace("R$", "")
+            txt_bruto.replace("R$", "")
+            .replace("r$", "")
             .replace("\u00a0", "")
             .replace(" ", "")
         )
-        if not txt or txt.lower() in ("nan", "none", "nat", "<na>"):
-            return 0.0
+        if not txt or txt.lower() in ("-", "--", "nan", "none", "nat", "<na>"):
+            valores_convertidos.append(0.0)
+            continue
         if "," in txt and "." in txt:
             if txt.rfind(",") > txt.rfind("."):
                 txt = txt.replace(".", "").replace(",", ".")
             else:
                 txt = txt.replace(",", "")
         elif "," in txt:
-            txt = txt.replace(",", ".")
+            if txt.count(",") == 1:
+                txt = txt.replace(",", ".")
+            elif re.match(r"^[+-]?\d{1,3}(,\d{3})+$", txt):
+                txt = txt.replace(",", "")
         elif "." in txt:
             if txt.count(".") >= 2 and re.match(r"^[+-]?\d{1,3}(\.\d{3}){2,}$", txt):
                 txt = txt.replace(".", "")
             elif tratar_1ponto_3dig_como_milhar and re.match(r"^[+-]?\d{1,3}\.\d{3}$", txt):
                 txt = txt.replace(".", "")
         try:
-            return float(txt)
+            num = float(txt)
+            if math.isnan(num) or math.isinf(num):
+                raise ValueError("NaN/Inf")
+            valores_convertidos.append(num)
         except ValueError:
-            return 0.0
-    return serie.map(_parse_elemento).astype(float)
+            if bloquear_invalidos:
+                cod_id = ""
+                if codigos_ref is not None and idx in codigos_ref.index:
+                    cod_id = str(codigos_ref.loc[idx]).strip()
+                identificador = f"SKU '{cod_id}'" if cod_id else f"Linha {idx + 2}"
+                erros_encontrados.append(f"{identificador} (valor lido: '{txt_bruto}')")
+            valores_convertidos.append(0.0)
+    if bloquear_invalidos and erros_encontrados:
+        amostra = ", ".join(erros_encontrados[:8])
+        raise ValueError(
+            f"Trava de Segurança (Valor Numérico Inválido na coluna '{nome_coluna}'): "
+            f"Foram encontrados {len(erros_encontrados)} registro(s) com texto inválido ou erro de fórmula "
+            f"que seriam zerados indevidamente. Exemplos: {amostra}. "
+            f"Corrija esses itens na planilha antes de importar."
+        )
+    return pd.Series(valores_convertidos, index=serie.index, dtype=float)
 def converter_datas_deterministico(serie: pd.Series) -> pd.Series:
     s_limpa = serie.fillna("").astype(str).str.strip().str.split(r"[ T]", regex=True).str[0]
     resultado = pd.Series(pd.NaT, index=serie.index, dtype="datetime64[ns]")
@@ -331,24 +378,37 @@ def converter_datas_deterministico(serie: pd.Series) -> pd.Series:
         convertido = pd.to_datetime(s_limpa[faltantes], format=fmt, errors="coerce")
         resultado.loc[faltantes] = convertido
     return resultado
-def restaurar_tipos(df: pd.DataFrame) -> pd.DataFrame:
+def restaurar_tipos(
+    df: pd.DataFrame,
+    origem_gsheets: bool = False,
+    bloquear_invalidos: bool = False,
+) -> pd.DataFrame:
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
     df = df.copy()
     for col in df.columns:
-        if col in COLUNAS_NUMERICAS:
-            df[col] = converter_numero_br(df[col])
-        else:
+        if col not in COLUNAS_NUMERICAS:
             df[col] = limpar_serie_texto(df[col])
+    codigos_ref = df["codigo"] if "codigo" in df.columns else None
+    for col in df.columns:
+        if col in COLUNAS_NUMERICAS:
+            df[col] = converter_numero_br(
+                df[col],
+                nome_coluna=col,
+                origem_gsheets=origem_gsheets,
+                bloquear_invalidos=bloquear_invalidos,
+                codigos_ref=codigos_ref,
+            )
     return df
 def estruturar_dataframe_bruto(
     df: pd.DataFrame,
     nome_aba: str,
     exigir_colunas_obrigatorias: bool = False,
+    origem_gsheets: bool = False,
 ) -> pd.DataFrame:
     colunas_esperadas = ESQUEMA_ABAS.get(nome_aba, [])
     if df is None or df.empty:
-        return restaurar_tipos(pd.DataFrame(columns=colunas_esperadas))
+        return restaurar_tipos(pd.DataFrame(columns=colunas_esperadas), origem_gsheets=origem_gsheets)
     df_orig = df.loc[:, ~df.columns.duplicated()].copy()
     if nome_aba == "historico" and df_orig.shape[1] >= 7:
         cols_norm_hist = [normalizar_chave_coluna(c) for c in df_orig.columns]
@@ -399,13 +459,26 @@ def estruturar_dataframe_bruto(
             else:
                 df[col_alvo] = ""
     df = df[colunas_esperadas].copy()
-    df = restaurar_tipos(df)
     if "codigo" in df.columns:
+        df["codigo"] = limpar_serie_texto(df["codigo"])
         df = df[df["codigo"] != ""].copy()
-        df = df[~df["codigo"].str.lower().isin(["codigo", "código", "cod", "total"])].copy()
+        df = df[
+            ~df["codigo"].str.lower().isin(
+                ["codigo", "código", "cod", "sku", "id", "item", "total", "total geral", "subtotal"]
+            )
+        ].copy()
+    df = restaurar_tipos(
+        df,
+        origem_gsheets=origem_gsheets,
+        bloquear_invalidos=exigir_colunas_obrigatorias and (not origem_gsheets),
+    )
     return df.reset_index(drop=True)
-def padronizar_dataframe(df: pd.DataFrame, nome_aba: str) -> pd.DataFrame:
-    df = estruturar_dataframe_bruto(df, nome_aba)
+def padronizar_dataframe(
+    df: pd.DataFrame,
+    nome_aba: str,
+    origem_gsheets: bool = False,
+) -> pd.DataFrame:
+    df = estruturar_dataframe_bruto(df, nome_aba, origem_gsheets=origem_gsheets)
     if df.empty:
         return df
     if nome_aba in ("estoque_atual", "historico"):
@@ -465,13 +538,13 @@ def ler_aba_bruta_gsheets(planilha, nome_aba: str) -> pd.DataFrame:
     ws = obter_ou_criar_aba(planilha, nome_aba)
     valores = ws.get_all_values()
     if not valores or len(valores) < 2:
-        return padronizar_dataframe(pd.DataFrame(), nome_aba)
+        return padronizar_dataframe(pd.DataFrame(), nome_aba, origem_gsheets=True)
     cabecalho = [
         str(c).strip() if str(c).strip() else f"col_{i}"
         for i, c in enumerate(valores[0])
     ]
     df = pd.DataFrame(valores[1:], columns=cabecalho)
-    return padronizar_dataframe(df, nome_aba)
+    return padronizar_dataframe(df, nome_aba, origem_gsheets=True)
 def gravar_aba_pequena_gsheets(planilha, nome_aba: str, df: pd.DataFrame, permitir_vazio: bool = False):
     if df is None:
         return
@@ -1062,7 +1135,18 @@ def calcular_motor_giro_sazonal(
         df_prod["giro_base"] = 0.0
     intervalo_historico_dias = 0
     peso_historico = 0.0
-    df_saidas_sku = pd.DataFrame(columns=["codigo", "giro_historico", "taxa_recente", "taxa_antiga"])
+    df_saidas_sku = pd.DataFrame(
+        columns=[
+            "codigo",
+            "giro_historico",
+            "giro_historico_sem_pico",
+            "saida_ult_dia",
+            "data_ult_dia",
+            "queda_pico_recente",
+            "data_pico_recente",
+            "saldo_antes_pico",
+        ]
+    )
     if not df_historico.empty and "data" in df_historico.columns:
         datas_todas = sorted(df_historico["data"].unique())
         dt_max = pd.to_datetime(datas_todas[-1], format="%Y-%m-%d", errors="coerce")
@@ -1103,54 +1187,59 @@ def calcular_motor_giro_sazonal(
             quedas_por_sku = quedas_lotes_sku.combine(quedas_geral_sku, lambda s1, s2: s1.combine(s2, max))
             saida_total = quedas_por_sku.sum(axis=1)
             cols_transicao = datas_win[1:]
-            meio = max(len(cols_transicao) // 2, 1)
-            cols_antigas = cols_transicao[:meio]
-            cols_recentes = cols_transicao[meio:] if len(cols_transicao) > 1 else cols_transicao
-            dt_meio = pd.to_datetime(datas_win[meio], format="%Y-%m-%d", errors="coerce")
-            if pd.notna(d_ini) and pd.notna(dt_meio) and pd.notna(d_fim):
-                dias_antigos = max(int((dt_meio - d_ini).days), len(cols_antigas), 1)
-                dias_recentes = (
-                    max(int((d_fim - dt_meio).days), len(cols_recentes), 1)
-                    if len(cols_transicao) > 1
-                    else dias_antigos
-                )
-            else:
-                dias_antigos = max(len(cols_antigas), 1)
-                dias_recentes = max(len(cols_recentes), 1)
-            taxa_antiga = quedas_por_sku[cols_antigas].sum(axis=1) / float(dias_antigos)
-            taxa_recente = quedas_por_sku[cols_recentes].sum(axis=1) / float(dias_recentes)
+            ult_col = cols_transicao[-1]
+            dt_ult_fmt = pd.to_datetime(ult_col, format="%Y-%m-%d", errors="coerce")
+            str_ult_dia = dt_ult_fmt.strftime("%d/%m") if pd.notna(dt_ult_fmt) else ult_col
+            saida_ult_dia_s = quedas_por_sku[ult_col]
+            # Monitora o maior pico de queda nos últimos 5 registros diários da janela
+            cols_recentes_pico = cols_transicao[-min(len(cols_transicao), 5):]
+            quedas_rec_df = quedas_por_sku[cols_recentes_pico]
+            queda_pico_s = quedas_rec_df.max(axis=1)
+            col_data_pico_s = quedas_rec_df.idxmax(axis=1)
+            # Obtém o saldo imediatamente anterior ao dia do pico
+            saldo_ref_sku = pivot_geral.combine(
+                pivot_lotes.groupby(level="codigo").sum(),
+                lambda s1, s2: s1.combine(s2, max),
+            )
+            saldo_prev_sku = saldo_ref_sku.shift(1, axis=1).fillna(0.0)
+            saldo_antes_pico_vals = []
+            data_pico_fmt_vals = []
+            for cod_idx, col_dt in col_data_pico_s.items():
+                if cod_idx in saldo_prev_sku.index and col_dt in saldo_prev_sku.columns:
+                    saldo_antes_pico_vals.append(float(saldo_prev_sku.loc[cod_idx, col_dt]))
+                else:
+                    saldo_antes_pico_vals.append(0.0)
+                dt_p = pd.to_datetime(col_dt, format="%Y-%m-%d", errors="coerce")
+                data_pico_fmt_vals.append(dt_p.strftime("%d/%m") if pd.notna(dt_p) else str(col_dt))
+            saida_sem_pico = (saida_total - queda_pico_s).clip(lower=0.0)
             df_saidas_sku = pd.DataFrame(
                 {
                     "codigo": quedas_por_sku.index,
                     "giro_historico": (saida_total / float(intervalo_historico_dias)).values,
-                    "taxa_recente": taxa_recente.values,
-                    "taxa_antiga": taxa_antiga.values,
+                    "giro_historico_sem_pico": (saida_sem_pico / float(intervalo_historico_dias)).values,
+                    "saida_ult_dia": saida_ult_dia_s.values,
+                    "data_ult_dia": str_ult_dia,
+                    "queda_pico_recente": queda_pico_s.values,
+                    "data_pico_recente": data_pico_fmt_vals,
+                    "saldo_antes_pico": saldo_antes_pico_vals,
                 }
             )
     df_calc = df_prod.merge(df_saidas_sku, on="codigo", how="left")
     df_calc["giro_historico"] = df_calc["giro_historico"].fillna(0.0)
-    df_calc["taxa_recente"] = df_calc.get("taxa_recente", pd.Series(0.0, index=df_calc.index)).fillna(0.0)
-    df_calc["taxa_antiga"] = df_calc.get("taxa_antiga", pd.Series(0.0, index=df_calc.index)).fillna(0.0)
+    df_calc["giro_historico_sem_pico"] = df_calc["giro_historico_sem_pico"].fillna(0.0)
+    df_calc["saida_ult_dia"] = df_calc["saida_ult_dia"].fillna(0.0)
+    df_calc["data_ult_dia"] = df_calc["data_ult_dia"].fillna("-")
+    df_calc["queda_pico_recente"] = df_calc["queda_pico_recente"].fillna(0.0)
+    df_calc["data_pico_recente"] = df_calc["data_pico_recente"].fillna("-")
+    df_calc["saldo_antes_pico"] = df_calc["saldo_antes_pico"].fillna(0.0)
     df_calc["giro_ponderado"] = (
         (df_calc["giro_historico"] * peso_historico)
         + (df_calc["giro_base"] * (1.0 - peso_historico))
     )
-    def _classificar_tendencia(row):
-        if intervalo_historico_dias < 1:
-            return "➡️ Base Inicial"
-        ref = row["giro_base"] if row["giro_base"] > 0 else row["taxa_antiga"]
-        atual = row["giro_historico"] if row["giro_base"] > 0 else row["taxa_recente"]
-        if ref <= 0.0001 and atual <= 0.0001:
-            return "➡️ Sem Giro"
-        if ref <= 0.0001 and atual > 0.0001:
-            return "📈 Alta (Novo Giro)"
-        razao = atual / ref
-        if razao >= 1.15:
-            return f"📈 Alta (+{int(round((razao - 1.0) * 100))}%)"
-        if razao <= 0.85:
-            return f"📉 Baixa (-{int(round((1.0 - razao) * 100))}%)"
-        return "➡️ Estável"
-    df_calc["tendencia"] = df_calc.apply(_classificar_tendencia, axis=1)
+    df_calc["giro_ponderado_sem_pico"] = (
+        (df_calc["giro_historico_sem_pico"] * peso_historico)
+        + (df_calc["giro_base"] * (1.0 - peso_historico))
+    )
     return df_calc, intervalo_historico_dias, peso_historico
 # ==============================================================================
 # 6. CABEÇALHO PRINCIPAL E VERIFICAÇÃO DE CONEXÃO COM A NUVEM
@@ -1512,13 +1601,13 @@ with aba1:
     r3.metric("Itens com Custo Cadastrado", f"{formatar_num_br(qtd_custos)}")
     r4.metric("Última Sincronização", estado.get("ultima_atualizacao", "-"))
 # ------------------------------------------------------------------------------
-# ABA 2: SUGESTÃO DE COMPRAS & COTAÇÃO POR LISTA (PRECISÃO TOTAL E EDIÇÃO POR SKU)
+# ABA 2: SUGESTÃO DE COMPRAS, ALERTA DE PICO SAZONAL & COTAÇÃO POR LISTA
 # ------------------------------------------------------------------------------
 with aba2:
-    st.markdown("### 🛒 Sugestão de Compras, Giro Sazonal & Cotação por Lista")
+    st.markdown("### 🛒 Sugestão de Compras, Detector de Pico Sazonal & Cotação por Lista")
     st.caption(
-        "Catálogo unificado (inclui produtos com saldo zero que possuem histórico de vendas), precisão decimal completa no cálculo "
-        "de giro, arredondamento protetivo para cima e edições vinculadas diretamente ao código do produto."
+        "Detecta saídas bruscas fora do padrão (ex: vendas sazonais concentradas em 1 dia), calcula sugestão reforçada "
+        "para recompor o estoque sem inflar o giro normal e destaca o item para conferência no ERP."
     )
     with st.expander("📋 Importar Planilha de Produtos para Cotação Direcionada (Opcional)", expanded=True):
         arq_lista_cotacao = st.file_uploader(
@@ -1541,21 +1630,29 @@ with aba2:
     lead_time = p3.number_input("Lead Time / Entrega (dias):", min_value=0, max_value=90, value=7)
     fator_sazonal = p4.slider("Ajuste Sazonal Extra (%):", min_value=-50, max_value=200, value=0, step=5)
     filtro_busca = p5.text_input("Filtrar Código ou Descrição:")
-    c_op1, c_op2, c_op3 = st.columns([1.5, 1.5, 1])
+    c_op1, c_op2, c_op3, c_op4 = st.columns([1.3, 1.4, 1.2, 0.9])
     with c_op1:
         incluir_zerados_com_giro = st.checkbox(
-            "Incluir produtos sem estoque atual (Saldo = 0) que possuem histórico de giro",
+            "Incluir Saldo = 0 com histórico de giro",
             value=True,
         )
     with c_op2:
-        arredondar_para_cima = st.checkbox(
-            "Arredondar sugestão de compra para cima (garantir 100% da cobertura)",
+        usar_sugestao_reforcada_pico = st.checkbox(
+            "⚡ Aplicar Sugestão Reforçada em Saídas Fora do Padrão (Pico)",
             value=True,
+            help="Quando um produto sofre uma queda brusca em 1 dia (ex: D KELLBYOL caindo de 41 para 11), sugere recompor o lote consumido + cobertura regular.",
         )
     with c_op3:
-        if st.button("🔄 Limpar Edições Manuais da Cotação", use_container_width=True):
+        filtrar_apenas_picos = st.checkbox(
+            "🚨 Mostrar apenas Saídas Fora do Padrão",
+            value=False,
+            help="Filtra somente os produtos que tiveram queda brusca recente para você conferir se foi venda real ou ajuste no Siagri.",
+        )
+    with c_op4:
+        if st.button("🔄 Limpar Edições", use_container_width=True):
             st.session_state.pop("edicoes_cotacao_por_sku", None)
             st.rerun()
+    arredondar_para_cima = True
     df_est_fonte = df_estoque_bruto if arq_lista_cotacao is not None else df_estoque
     df_hist_fonte = df_historico_bruto if arq_lista_cotacao is not None else df_historico
     df_base_fonte = df_base_vendas if arq_lista_cotacao is not None else df_base_vendas_rel
@@ -1574,15 +1671,15 @@ with aba2:
         )
         df_calc = df_base_giro.copy()
         codigos_nao_encontrados_lista = []
+        cods_conhecidos_erp = (
+            set(df_estoque_bruto["codigo"].unique())
+            | set(df_custos["codigo"].unique())
+            | set(df_base_vendas["codigo"].unique())
+            | set(df_historico_bruto["codigo"].unique())
+        )
         if arq_lista_cotacao is not None:
             try:
                 df_lista = ler_lista_produtos_cotacao(arq_lista_cotacao)
-                cods_conhecidos_erp = (
-                    set(df_estoque_bruto["codigo"].unique())
-                    | set(df_custos["codigo"].unique())
-                    | set(df_base_vendas["codigo"].unique())
-                    | set(df_historico_bruto["codigo"].unique())
-                )
                 mapa_sem_zero = {}
                 for c_erp in cods_conhecidos_erp:
                     chave_sz = c_erp.lstrip("0") or "0"
@@ -1591,6 +1688,7 @@ with aba2:
                 df_lista["codigo"] = df_lista["codigo_lista"].apply(
                     lambda c: c if c in cods_conhecidos_erp else mapa_sem_zero.get(c.lstrip("0") or "0", c)
                 )
+                df_lista = df_lista.drop_duplicates(subset=["codigo"], keep="first").reset_index(drop=True)
                 mask_inexistente = ~df_lista["codigo"].isin(cods_conhecidos_erp)
                 if mask_inexistente.any():
                     codigos_nao_encontrados_lista = df_lista.loc[mask_inexistente, "codigo_lista"].tolist()
@@ -1599,15 +1697,15 @@ with aba2:
                 df_merged["descricao"] = df_merged["descricao"].where(
                     df_merged["descricao"] != "", df_merged["descricao_lista"]
                 )
-                df_merged["saldo_atual"] = df_merged["saldo_atual"].fillna(0.0)
-                df_merged["giro_base"] = df_merged["giro_base"].fillna(0.0)
-                df_merged["giro_historico"] = df_merged["giro_historico"].fillna(0.0)
-                df_merged["giro_ponderado"] = df_merged["giro_ponderado"].fillna(0.0)
-                df_merged["tendencia"] = df_merged["tendencia"].fillna(
-                    df_merged["codigo"].apply(
-                        lambda c: "⚠️ Não Cadastrado no ERP" if c not in cods_conhecidos_erp else "➡️ Sem Histórico"
-                    )
-                )
+                for col_num_fill in [
+                    "saldo_atual", "giro_base", "giro_historico", "giro_historico_sem_pico",
+                    "giro_ponderado", "giro_ponderado_sem_pico", "saida_ult_dia",
+                    "queda_pico_recente", "saldo_antes_pico"
+                ]:
+                    if col_num_fill in df_merged.columns:
+                        df_merged[col_num_fill] = df_merged[col_num_fill].fillna(0.0)
+                df_merged["data_ult_dia"] = df_merged["data_ult_dia"].fillna("-")
+                df_merged["data_pico_recente"] = df_merged["data_pico_recente"].fillna("-")
                 df_calc = df_merged.drop(columns=["codigo_lista", "descricao_lista"])
             except Exception as e:
                 st.error(f"❌ Erro ao processar a lista de produtos para cotação: {e}")
@@ -1619,7 +1717,9 @@ with aba2:
                 f"**não foram encontrados** em nenhuma base do ERP (Estoque, Custos ou Vendas) e aparecem "
                 f"com saldo 0: {lista_str}{sufixo}. Verifique se os códigos estão corretos antes de fechar o pedido."
             )
-        df_calc["giro_diario"] = (df_calc["giro_ponderado"] * (1.0 + (fator_sazonal / 100.0))).clip(lower=0.0)
+        fator_mult = 1.0 + (fator_sazonal / 100.0)
+        df_calc["giro_diario"] = (df_calc["giro_ponderado"] * fator_mult).clip(lower=0.0)
+        df_calc["giro_diario_sem_pico"] = (df_calc["giro_ponderado_sem_pico"] * fator_mult).clip(lower=0.0)
         if not df_custos.empty:
             df_calc = df_calc.merge(
                 df_custos[["codigo", "custo_unitario"]], on="codigo", how="left"
@@ -1627,20 +1727,6 @@ with aba2:
             df_calc["custo_unitario"] = df_calc["custo_unitario"].fillna(0.0)
         else:
             df_calc["custo_unitario"] = 0.0
-        df_abc_unificado = calcular_tabela_curva_abc(df_estoque, df_custos)
-        mapa_abc = (
-            dict(zip(df_abc_unificado["codigo"], df_abc_unificado["classe_abc_curta"]))
-            if not df_abc_unificado.empty
-            else {}
-        )
-        df_calc["classe_abc_tendencia"] = df_calc.apply(
-            lambda r: (
-                "⚠️ Não Cadastrado no ERP"
-                if r["tendencia"] == "⚠️ Não Cadastrado no ERP"
-                else f"{mapa_abc.get(r['codigo'], 'Sem Classe')} | {r['tendencia']}"
-            ),
-            axis=1,
-        )
         mapa_venc_60d = {}
         if not df_est_fonte.empty:
             df_lotes_pos = df_est_fonte[df_est_fonte["saldo_lote"] > 0].copy()
@@ -1651,18 +1737,78 @@ with aba2:
                 if not df_curto.empty:
                     mapa_venc_60d = df_curto.groupby("codigo")["saldo_lote"].sum().to_dict()
         df_calc["vencendo_60d"] = df_calc["codigo"].map(mapa_venc_60d).fillna(0.0)
-        dias_totais_nec = cobertura_desejada + lead_time
-        df_calc["estoque_ideal"] = df_calc["giro_diario"] * float(dias_totais_nec)
-        necessidade_bruta = (df_calc["estoque_ideal"] - df_calc["saldo_atual"]).clip(lower=0.0)
-        if arredondar_para_cima:
-            df_calc["sugestao_compra"] = necessidade_bruta.apply(lambda x: float(math.ceil(x - 1e-9)) if x > 0 else 0.0)
+        dias_totais_nec = float(cobertura_desejada + lead_time)
+        df_calc["estoque_ideal"] = df_calc["giro_diario"] * dias_totais_nec
+        df_calc["estoque_ideal_sem_pico"] = df_calc["giro_diario_sem_pico"] * dias_totais_nec
+        necessidade_padrao = (df_calc["estoque_ideal"] - df_calc["saldo_atual"]).clip(lower=0.0)
+        df_calc["sugestao_padrao"] = necessidade_padrao.apply(
+            lambda x: float(math.ceil(x - 1e-9)) if x > 0 else 0.0
+        )
+        # Detecção de Saída Fora do Padrão (Pico Sazonal ainda não reposto)
+        def _avaliar_pico_e_sugestao(r):
+            cod = str(r["codigo"])
+            if cod not in cods_conhecidos_erp:
+                return False, "⚠️ Não Cadastrado no ERP", 0.0
+            queda_pico = float(r.get("queda_pico_recente", 0.0))
+            saldo_antes = float(r.get("saldo_antes_pico", 0.0))
+            saldo_at = float(r.get("saldo_atual", 0.0))
+            giro_d = float(r.get("giro_diario", 0.0))
+            giro_sem_p = float(r.get("giro_diario_sem_pico", 0.0))
+            est_ideal = float(r.get("estoque_ideal", 0.0))
+            est_ideal_sem_p = float(r.get("estoque_ideal_sem_pico", 0.0))
+            sug_padrao = float(r.get("sugestao_padrao", 0.0))
+            saida_ult = float(r.get("saida_ult_dia", 0.0))
+            dt_ult = str(r.get("data_ult_dia", "-"))
+            dt_pico = str(r.get("data_pico_recente", "-"))
+            # Verifica se houve queda relevante (>= 3 un.) e se o estoque ainda não foi reposto ao nível pré-queda
+            nao_reposto = (saldo_antes <= 0.0) or (saldo_at < (saldo_antes * 0.85))
+            proporcao_estoque = (queda_pico / saldo_antes) if saldo_antes > 0 else 1.0
+            eh_pico = (
+                queda_pico >= 3.0
+                and nao_reposto
+                and (
+                    (queda_pico >= 5.0 and proporcao_estoque >= 0.35)
+                    or (queda_pico >= 5.0 and giro_sem_p > 0 and queda_pico >= (giro_sem_p * 3.0))
+                    or (queda_pico > sug_padrao and queda_pico > saldo_at)
+                )
+            )
+            if eh_pico:
+                reserva_min = max(est_ideal_sem_p, giro_d * float(lead_time))
+                teto_recompor_anterior = min(saldo_antes, queda_pico + est_ideal) if saldo_antes > 0 else (queda_pico + reserva_min)
+                alvo_reforcado = max(est_ideal, queda_pico + reserva_min, teto_recompor_anterior)
+                nec_ref = max(0.0, alvo_reforcado - saldo_at)
+                sug_ref = float(math.ceil(nec_ref - 1e-9)) if nec_ref > 0 else 0.0
+                sug_ref = max(sug_ref, sug_padrao)
+                txt_alerta = (
+                    f"🚨 Pico: -{formatar_qtd_br(queda_pico)} un. ({dt_pico}) | "
+                    f"Padrão: {formatar_qtd_br(sug_padrao)}"
+                )
+                return True, txt_alerta, sug_ref
+            if saida_ult > 0:
+                return False, f"✔️ -{formatar_qtd_br(saida_ult)} un. ({dt_ult})", sug_padrao
+            return False, "➖ Sem saída recente", sug_padrao
+        res_pico = df_calc.apply(_avaliar_pico_e_sugestao, axis=1)
+        df_calc["tem_pico"] = [x[0] for x in res_pico]
+        df_calc["alerta_saida_recente"] = [x[1] for x in res_pico]
+        df_calc["sugestao_reforcada"] = [x[2] for x in res_pico]
+        if usar_sugestao_reforcada_pico:
+            df_calc["sugestao_compra"] = df_calc["sugestao_reforcada"]
         else:
-            df_calc["sugestao_compra"] = necessidade_bruta.round(0)
+            df_calc["sugestao_compra"] = df_calc["sugestao_padrao"]
         df_calc["autonomia_dias"] = (
             (df_calc["saldo_atual"] / df_calc["giro_diario"].replace(0.0, pd.NA))
             .fillna(999.0)
             .round(1)
         )
+        qtd_total_picos = int(df_calc["tem_pico"].sum())
+        if qtd_total_picos > 0:
+            st.info(
+                f"🚨 **Radar de Saída Fora do Padrão:** Foram detectados **{formatar_num_br(qtd_total_picos)} produto(s)** "
+                f"com queda brusca recente de estoque. Confira na coluna **Saída Recente & Alerta** se a baixa foi venda "
+                f"sazonal real ou ajuste de estoque antes de confirmar o pedido."
+            )
+        if filtrar_apenas_picos:
+            df_calc = df_calc[df_calc["tem_pico"] == True].copy()
         if filtro_busca:
             termo = filtro_busca.lower().strip()
             df_calc = df_calc[
@@ -1671,9 +1817,17 @@ with aba2:
             ]
         if arq_lista_cotacao is None:
             df_calc["_inv_ord"] = df_calc["sugestao_compra"] * df_calc["custo_unitario"]
-            df_compras = df_calc.sort_values(["_inv_ord", "descricao"], ascending=[False, True]).drop(columns=["_inv_ord"])
+            df_compras = df_calc.sort_values(
+                ["tem_pico", "_inv_ord", "descricao"], ascending=[False, False, True]
+            ).drop(columns=["_inv_ord"])
         else:
             df_compras = df_calc.copy()
+        df_compras = df_compras.drop_duplicates(subset=["codigo"], keep="first").reset_index(drop=True)
+        hash_codigos_exibidos = hmac.new(
+            b"esteio_cotacao",
+            "|".join(df_compras["codigo"].astype(str)).encode("utf-8"),
+            "md5",
+        ).hexdigest()[:10]
         if "edicoes_cotacao_por_sku" not in st.session_state:
             st.session_state["edicoes_cotacao_por_sku"] = {}
         memoria_sku = st.session_state["edicoes_cotacao_por_sku"]
@@ -1693,7 +1847,7 @@ with aba2:
             {
                 "Código": df_compras["codigo"].values,
                 "Descrição": df_compras["descricao"].values,
-                "Classe ABC & Tendência": df_compras["classe_abc_tendencia"].values,
+                "Saída Recente & Alerta": df_compras["alerta_saida_recente"].values,
                 "Saldo Atual": df_compras["saldo_atual"].values,
                 "Vencido ou vencendo (≤60d)": df_compras["vencendo_60d"].values,
                 "Giro Médio/Dia": df_compras["giro_diario"].values,
@@ -1726,10 +1880,10 @@ with aba2:
             hide_index=False,
             use_container_width=True,
             height=430,
-            key=f"editor_cotacao_aba2_{janela_dias}_{cobertura_desejada}_{lead_time}_{fator_sazonal}",
+            key=f"editor_cotacao_aba2_{janela_dias}_{cobertura_desejada}_{lead_time}_{fator_sazonal}_{usar_sugestao_reforcada_pico}_{hash_codigos_exibidos}",
             disabled=[
                 "Descrição",
-                "Classe ABC & Tendência",
+                "Saída Recente & Alerta",
                 "Saldo Atual",
                 "Vencido ou vencendo (≤60d)",
                 "Giro Médio/Dia",
@@ -1776,7 +1930,7 @@ with aba2:
         orcamento_total = float(total_item_s.sum())
         m1.metric("Produtos Listados", f"{formatar_num_br(len(df_completo_13_cols))} SKUs (Comprar: {formatar_num_br(itens_com_pedido)})")
         m2.metric("Orçamento Total do Pedido", formatar_moeda_br(orcamento_total))
-        m3.metric("Janela de Giro / Proteção", f"{janela_dias}d Giro | {dias_totais_nec}d Cobertura")
+        m3.metric("Itens c/ Alerta de Pico", f"{formatar_num_br(qtd_total_picos)} SKU(s)")
         m4.metric(
             "Peso Histórico vs Base",
             f"{int(round(peso_hist * 100))}% Hist. / {int(round((1 - peso_hist) * 100))}% Base",
