@@ -160,7 +160,7 @@ COLUNAS_NUMERICAS = {
 }
 ESQUEMA_ABAS = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
-    "historico": ["codigo", "saldo_geral", "lote", "saldo_lote", "data"],
+    "historico": ["codigo", "saldo_geral", "data"],
     "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "data"],
     "saidas_diarias": ["codigo", "descricao", "qtd_saida", "data"],
     "custos": ["codigo", "descricao", "custo_unitario"],
@@ -170,7 +170,7 @@ ESQUEMA_ABAS = {
 }
 COLUNAS_OBRIGATORIAS_UPLOAD = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade"],
-    "historico": ["codigo", "saldo_geral", "lote", "saldo_lote", "data"],
+    "historico": ["codigo", "saldo_geral", "data"],
     "entradas_diarias": ["codigo", "descricao", "qtd_entrada"],
     "saidas_diarias": ["codigo", "descricao", "qtd_saida"],
     "custos": ["codigo", "descricao", "custo_unitario"],
@@ -180,7 +180,7 @@ COLUNAS_OBRIGATORIAS_UPLOAD = {
 }
 ORDEM_POSICIONAL_PADRAO = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
-    "historico": ["codigo", "saldo_geral", "lote", "saldo_lote", "data"],
+    "historico": ["codigo", "saldo_geral", "data"],
     "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "data"],
     "saidas_diarias": ["codigo", "descricao", "qtd_saida", "data"],
     "custos": ["codigo", "descricao", "custo_unitario"],
@@ -572,12 +572,21 @@ def estruturar_dataframe_bruto(
     if df is None or df.empty:
         return restaurar_tipos(pd.DataFrame(columns=colunas_esperadas), origem_gsheets=origem_gsheets)
     df_orig = df.loc[:, ~df.columns.duplicated()].copy()
-    if aba_esquema == "historico" and df_orig.shape[1] >= 7 and not exigir_colunas_obrigatorias:
+    if aba_esquema == "historico" and not exigir_colunas_obrigatorias:
         cols_norm_hist = [normalizar_chave_coluna(c) for c in df_orig.columns]
         if "codigo" not in cols_norm_hist:
-            df_pos = df_orig.iloc[:, :7].copy()
-            df_pos.columns = ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"]
-            df_orig = df_pos
+            if df_orig.shape[1] >= 7:
+                df_pos = df_orig.iloc[:, :7].copy()
+                df_pos.columns = ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"]
+                df_orig = df_pos
+            elif df_orig.shape[1] == 5:
+                df_pos = df_orig.iloc[:, :5].copy()
+                df_pos.columns = ["codigo", "saldo_geral", "lote", "saldo_lote", "data"]
+                df_orig = df_pos
+            elif df_orig.shape[1] == 3:
+                df_pos = df_orig.iloc[:, :3].copy()
+                df_pos.columns = ["codigo", "saldo_geral", "data"]
+                df_orig = df_pos
     cols_norm = {col: normalizar_chave_coluna(col) for col in df_orig.columns}
     renomear = {}
     colunas_orig_usadas = set()
@@ -651,8 +660,11 @@ def padronizar_dataframe(
     df = estruturar_dataframe_bruto(df, aba_esquema, origem_gsheets=origem_gsheets)
     if df.empty:
         return df
-    if aba_esquema in ("estoque_atual", "historico"):
+    if aba_esquema == "estoque_atual":
         df = df.drop_duplicates(subset=["codigo", "lote", "data"], keep="last")
+    elif aba_esquema == "historico":
+        df = df.drop_duplicates(subset=["codigo", "data"], keep="first")
+        df = df[df["saldo_geral"].abs() > 1e-9].copy()
     elif aba_esquema in ("entradas_diarias", "saidas_diarias"):
         df = df.drop_duplicates(subset=["codigo", "data"], keep="last")
     elif aba_esquema in ("custos", "ocultos"):
@@ -675,9 +687,27 @@ def podar_historico_180_dias(df_hist: pd.DataFrame, nome_aba: str = "historico")
     df_h["data"] = dt_validas.dt.strftime("%Y-%m-%d")
     limite_ts = pd.Timestamp(hoje_br() - timedelta(days=DIAS_MAX_HISTORICO))
     df_filtrado = df_h[dt_validas >= limite_ts].copy()
-    chaves_dedup = ["codigo", "lote", "data"] if "lote" in df_filtrado.columns else ["codigo", "data"]
-    df_filtrado = df_filtrado.drop_duplicates(subset=chaves_dedup, keep="last")
+    if nome_aba == "historico":
+        df_filtrado = df_filtrado.drop_duplicates(subset=["codigo", "data"], keep="first")
+        if "saldo_geral" in df_filtrado.columns:
+            df_filtrado = df_filtrado[df_filtrado["saldo_geral"].abs() > 1e-9].copy()
+    else:
+        chaves_dedup = ["codigo", "lote", "data"] if "lote" in df_filtrado.columns else ["codigo", "data"]
+        df_filtrado = df_filtrado.drop_duplicates(subset=chaves_dedup, keep="last")
     return df_filtrado.reset_index(drop=True)
+
+
+def compactar_estoque_para_historico(df_estoque_dia: pd.DataFrame, data_ref: str) -> pd.DataFrame:
+    """Reduz o snapshot diário a 1 linha por SKU com saldo != 0 (3 colunas: codigo, saldo_geral, data)."""
+    if df_estoque_dia is None or df_estoque_dia.empty:
+        return padronizar_dataframe(pd.DataFrame(), "historico")
+    df_c = df_estoque_dia.copy()
+    df_c["codigo"] = limpar_serie_codigo(df_c["codigo"])
+    df_c = df_c[df_c["codigo"] != ""].copy()
+    df_sku = df_c.groupby("codigo", as_index=False).agg(saldo_geral=("saldo_geral", "first"))
+    df_sku = df_sku[df_sku["saldo_geral"].abs() > 1e-9].copy()
+    df_sku["data"] = str(data_ref).strip()
+    return padronizar_dataframe(df_sku[["codigo", "saldo_geral", "data"]], "historico")
 
 
 # ==============================================================================
@@ -887,7 +917,7 @@ def gravar_aba_incremental_por_data_gsheets(
     cabecalho = df_str.columns.tolist()
     linhas_novas = df_str.values.tolist()
     linhas_nec_inicial = len(linhas_novas) + 10
-    cols_nec = max(len(cabecalho), 4)
+    cols_nec = max(len(cabecalho), 3)
     ws = obter_ou_criar_aba(planilha, nome_aba, linhas_nec_inicial + 50, cols_nec + 2)
     primeira_linha = [str(c).strip() for c in ws.row_values(1)]
     if not primeira_linha:
@@ -937,10 +967,11 @@ def gravar_aba_incremental_por_data_gsheets(
 
 
 def gravar_historico_incremental_gsheets(planilha, df_novo_dia: pd.DataFrame, data_ref: str):
-    gravar_aba_incremental_por_data_gsheets(planilha, "historico", df_novo_dia, data_ref)
+    df_compacto = compactar_estoque_para_historico(df_novo_dia, data_ref)
+    gravar_aba_incremental_por_data_gsheets(planilha, "historico", df_compacto, data_ref)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def carregar_estado_completo() -> dict:
     planilha, erro = obter_planilha_gsheets()
     if planilha is None:
@@ -1167,18 +1198,20 @@ def validar_coerencia_data_upload(
     data_selecionada: date,
     rotulo: str,
     ignorar_trava: bool = False,
-):
-    """Impede que uma planilha com data no nome (ex: 30-10-2026) seja importada com data diferente no seletor."""
-    if ignorar_trava or arquivo is None:
-        return
+) -> bool:
+    """Impede que uma planilha com data no nome (ex: 30-10-2026) seja importada com data diferente no seletor.
+    Retorna True se o arquivo continha data explícita no nome e False caso contrário."""
+    if arquivo is None:
+        return True
     dt_nome = extrair_data_nome_arquivo(getattr(arquivo, "name", ""))
-    if dt_nome is not None and dt_nome != data_selecionada:
+    if dt_nome is not None and dt_nome != data_selecionada and not ignorar_trava:
         raise ValueError(
             f"Trava de Coerência de Data ({rotulo}): O arquivo enviado chama-se **'{arquivo.name}'** "
             f"(indicando a data **{dt_nome.strftime('%d/%m/%Y')}**), mas o seletor de data na tela está marcado em "
             f"**{data_selecionada.strftime('%d/%m/%Y')}**. Ajuste a data no seletor para **{dt_nome.strftime('%d/%m/%Y')}** "
             f"antes de sincronizar para evitar gravar o movimento no dia errado!"
         )
+    return dt_nome is not None
 
 
 def ler_arquivo_upload(arquivo, exigir_multiplas_colunas: bool = False) -> pd.DataFrame:
@@ -1318,7 +1351,9 @@ def processar_planilha_estoque(
     codigos_ref: set,
     ignorar_trava_catalogo: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
-    validar_coerencia_data_upload(arquivo, data_pos, "Posição de Estoque", ignorar_trava=ignorar_trava_catalogo)
+    tem_data_no_nome = validar_coerencia_data_upload(
+        arquivo, data_pos, "Posição de Estoque", ignorar_trava=ignorar_trava_catalogo
+    )
     df_raw = ler_arquivo_upload(arquivo, exigir_multiplas_colunas=True)
     if df_raw.shape[1] < 6:
         raise ValueError(
@@ -1367,6 +1402,7 @@ def processar_planilha_estoque(
         "qtd_duplicadas": qtd_duplicadas,
         "exemplos": exemplos_dup,
         "taxa_coincidencia": taxa_coincidencia,
+        "tem_data_no_nome": tem_data_no_nome,
     }
     return df_final, info_dup
 
@@ -1462,7 +1498,9 @@ def processar_planilha_movimento_diario(
     codigos_ref: set,
     ignorar_trava_catalogo: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
-    validar_coerencia_data_upload(arquivo, data_mov, rotulo_amigavel, ignorar_trava=ignorar_trava_catalogo)
+    tem_data_no_nome = validar_coerencia_data_upload(
+        arquivo, data_mov, rotulo_amigavel, ignorar_trava=ignorar_trava_catalogo
+    )
     df_raw = ler_arquivo_upload(arquivo, exigir_multiplas_colunas=True)
     if df_raw.shape[1] < 3:
         raise ValueError(
@@ -1484,6 +1522,15 @@ def processar_planilha_movimento_diario(
             ignorar_trava_catalogo=ignorar_trava_catalogo,
             exigir_cobertura_total=False,
         )
+    df_pos = df[df[col_qtd] > 0].copy()
+    contagem_por_sku = df_pos.groupby("codigo")[col_qtd].count()
+    cods_repetidos = contagem_por_sku[contagem_por_sku > 1].index.tolist()
+    exemplos_repetidos = []
+    for c_rep in cods_repetidos[:6]:
+        parcelas = [formatar_qtd_br(v) for v in df_pos.loc[df_pos["codigo"] == c_rep, col_qtd].tolist()]
+        soma_c = float(df_pos.loc[df_pos["codigo"] == c_rep, col_qtd].sum())
+        exemplos_repetidos.append(f"SKU {c_rep} ({'+'.join(parcelas)} = {formatar_qtd_br(soma_c)})")
+
     df_agrupado = df.groupby("codigo", as_index=False).agg(
         descricao=("descricao", "last"),
         **{col_qtd: (col_qtd, "sum")},
@@ -1502,6 +1549,9 @@ def processar_planilha_movimento_diario(
         "soma_qtd": soma_qtd,
         "data_iso": data_iso,
         "taxa_coincidencia": taxa_coincidencia,
+        "qtd_codigos_repetidos": len(cods_repetidos),
+        "exemplos_repetidos": exemplos_repetidos,
+        "tem_data_no_nome": tem_data_no_nome,
     }
 
 
@@ -1571,6 +1621,7 @@ def calcular_motor_giro_sazonal(
             "queda_pico_recente",
             "data_pico_recente",
             "saldo_antes_pico",
+            "alerta_nf_nao_refletida",
         ]
     )
     datas_candidatas = set()
@@ -1608,9 +1659,11 @@ def calcular_motor_giro_sazonal(
         saldo_prev_sku = pd.DataFrame()
         dias_por_coluna = {}
         primeiro_saldo_sku = pd.Series(dtype=float)
+        mapa_nf_nao_refletida = {}
 
         if not df_h_win.empty:
-            df_h_win = df_h_win.drop_duplicates(subset=["codigo", "lote", "data"], keep="last")
+            chaves_dedup_h = ["codigo", "lote", "data"] if "lote" in df_h_win.columns else ["codigo", "data"]
+            df_h_win = df_h_win.drop_duplicates(subset=chaves_dedup_h, keep="first")
             grade_geral = (
                 df_h_win.groupby(["codigo", "data"], as_index=False)["saldo_geral"]
                 .first()
@@ -1647,33 +1700,57 @@ def calcular_motor_giro_sazonal(
                             deltas_geral = deltas_geral.reindex(entradas_transicao.index, fill_value=0.0)
                         entradas_transicao.loc[soma_ent.index, dt_ini_t] = soma_ent.values
 
-            # 1. Comparação direta das planilhas de Estoque Diário (captura quedas de saldo e consumo interno de fábrica)
-            queda_direta = (-deltas_geral[cols_transicao]).clip(lower=0.0)
-
-            # 2. Consumo parcial no mesmo dia da Entrada: só atua quando o estoque subiu (deltas_geral > 0),
-            # mas subiu menos do que a NF de entrada (impede somar Entrada com Queda quando a NF já estava no saldo)
-            mask_alta_parcial = (
-                (entradas_transicao > 0.0)
-                & (deltas_geral[cols_transicao] > 0.0)
-                & (deltas_geral[cols_transicao] < entradas_transicao)
-            )
-            consumo_em_alta = (entradas_transicao - deltas_geral[cols_transicao]).where(mask_alta_parcial, 0.0)
-            quedas_por_sku = queda_direta.combine(consumo_em_alta, lambda s1, s2: s1.combine(s2, max))
-
-            # 3. Cruzamento com Saídas/Vendas Diárias via max() (nunca soma duplicado com a queda de estoque)
+            saidas_transicao = pd.DataFrame(0.0, index=entradas_transicao.index, columns=cols_transicao)
+            datas_com_planilha_saida = set()
             if not df_sai_win.empty:
                 df_sai_grp = df_sai_win.groupby(["codigo", "data"], as_index=False)["qtd_saida"].sum()
                 for idx_t, dt_ini_t in enumerate(cols_transicao):
                     dt_fim_t = datas_hist[idx_t + 1]
                     mask_sai = (df_sai_grp["data"] >= dt_ini_t) & (df_sai_grp["data"] < dt_fim_t)
                     if mask_sai.any():
+                        datas_com_planilha_saida.add(dt_ini_t)
                         soma_sai = df_sai_grp.loc[mask_sai].groupby("codigo")["qtd_saida"].sum()
-                        novos_idx = soma_sai.index.difference(quedas_por_sku.index)
+                        novos_idx = soma_sai.index.difference(saidas_transicao.index)
                         if len(novos_idx) > 0:
-                            quedas_por_sku = quedas_por_sku.reindex(quedas_por_sku.index.union(novos_idx), fill_value=0.0)
-                        quedas_por_sku.loc[soma_sai.index, dt_ini_t] = quedas_por_sku.loc[soma_sai.index, dt_ini_t].combine(
-                            soma_sai, max
-                        )
+                            uniao_idx = saidas_transicao.index.union(novos_idx)
+                            saidas_transicao = saidas_transicao.reindex(uniao_idx, fill_value=0.0)
+                            entradas_transicao = entradas_transicao.reindex(uniao_idx, fill_value=0.0)
+                            deltas_geral = deltas_geral.reindex(uniao_idx, fill_value=0.0)
+                        saidas_transicao.loc[soma_sai.index, dt_ini_t] = soma_sai.values
+
+            # 1. Queda direta do Saldo Geral entre snapshots (captura vendas e consumo de fábrica de ração)
+            queda_direta = (-deltas_geral[cols_transicao]).clip(lower=0.0)
+
+            # 2. Consumo parcial no mesmo dia da Entrada:
+            #    - Se a planilha de Saídas daquele dia já foi importada, a própria planilha de Saídas traz a venda real,
+            #      evitando que uma NF de Entrada ainda não lançada no saldo do ERP infle o consumo artificialmente.
+            #    - Se não houve planilha de Saídas naquele dia, só considera consumo em alta quando o estoque subiu (deltas_geral > 0).
+            cols_sem_planilha_saida = [c for c in cols_transicao if c not in datas_com_planilha_saida]
+            consumo_em_alta = pd.DataFrame(0.0, index=deltas_geral.index, columns=cols_transicao)
+            if cols_sem_planilha_saida:
+                ent_sub = entradas_transicao[cols_sem_planilha_saida]
+                del_sub = deltas_geral[cols_sem_planilha_saida]
+                mask_alta_parcial = (ent_sub > 0.0) & (del_sub > 0.0) & (del_sub < ent_sub)
+                consumo_em_alta[cols_sem_planilha_saida] = (ent_sub - del_sub).where(mask_alta_parcial, 0.0)
+
+            # Auditoria: detecta Entradas (NF) que não refletiram no saldo nem tiveram saída correspondente
+            for col_t in cols_transicao:
+                ent_c = entradas_transicao[col_t]
+                del_c = deltas_geral[col_t]
+                sai_c = saidas_transicao[col_t]
+                mask_nf_fantasma = (ent_c > 0.0) & ((del_c + sai_c) < (ent_c * 0.5)) & (del_c <= 0.0)
+                if mask_nf_fantasma.any():
+                    dt_f = pd.to_datetime(col_t, format="%Y-%m-%d", errors="coerce")
+                    dt_f_str = dt_f.strftime("%d/%m") if pd.notna(dt_f) else str(col_t)
+                    for cod_nf, val_nf in ent_c[mask_nf_fantasma].items():
+                        mapa_nf_nao_refletida[cod_nf] = f"+{formatar_qtd_br(val_nf)} un. em {dt_f_str}"
+
+            # 3. Consolidação via max() entre Queda Direta, Consumo em Alta e Saídas Diárias explícitas
+            quedas_por_sku = (
+                queda_direta
+                .combine(consumo_em_alta, lambda s1, s2: s1.combine(s2, max))
+                .combine(saidas_transicao, lambda s1, s2: s1.combine(s2, max))
+            )
 
             saldo_prev_base = (
                 pivot_geral
@@ -1717,13 +1794,18 @@ def calcular_motor_giro_sazonal(
                     quedas_por_sku = quedas_por_sku.reindex(idx_unido, fill_value=0.0)
                     saldo_prev_sku = saldo_prev_sku.reindex(idx_unido, fill_value=0.0)
                     saldo_base_ex = primeiro_saldo_sku.reindex(idx_unido).fillna(0.0)
+                    ult_saldo_ex = (
+                        pivot_geral[datas_hist[-1]].reindex(idx_unido).fillna(0.0)
+                        if datas_hist
+                        else pd.Series(0.0, index=idx_unido)
+                    )
                     for col_dt_ex in pivot_sai_extra.columns:
                         col_s_ex = pivot_sai_extra[col_dt_ex].reindex(idx_unido, fill_value=0.0)
                         quedas_por_sku[col_dt_ex] = col_s_ex
                         if datas_hist and col_dt_ex < datas_hist[0]:
                             saldo_prev_sku[col_dt_ex] = col_s_ex + saldo_base_ex
                         else:
-                            saldo_prev_sku[col_dt_ex] = col_s_ex
+                            saldo_prev_sku[col_dt_ex] = ult_saldo_ex.combine(col_s_ex, max)
                     quedas_por_sku = quedas_por_sku[sorted(quedas_por_sku.columns)]
                     saldo_prev_sku = saldo_prev_sku[sorted(saldo_prev_sku.columns)]
 
@@ -1789,6 +1871,7 @@ def calcular_motor_giro_sazonal(
                     "queda_pico_recente": queda_pico_s.values,
                     "data_pico_recente": data_pico_fmt_vals,
                     "saldo_antes_pico": saldo_antes_pico_vals,
+                    "alerta_nf_nao_refletida": [mapa_nf_nao_refletida.get(c, "") for c in quedas_por_sku.index],
                 }
             )
     df_calc = df_prod.merge(df_saidas_sku, on="codigo", how="left")
@@ -1799,6 +1882,7 @@ def calcular_motor_giro_sazonal(
     df_calc["queda_pico_recente"] = df_calc["queda_pico_recente"].fillna(0.0)
     df_calc["data_pico_recente"] = df_calc["data_pico_recente"].fillna("-")
     df_calc["saldo_antes_pico"] = df_calc["saldo_antes_pico"].fillna(0.0)
+    df_calc["alerta_nf_nao_refletida"] = df_calc["alerta_nf_nao_refletida"].fillna("")
     df_calc["giro_ponderado"] = (
         (df_calc["giro_historico"] * peso_historico)
         + (df_calc["giro_base"] * (1.0 - peso_historico))
@@ -1910,8 +1994,8 @@ aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs(
 with aba1:
     st.markdown("### Central de Importação Segura e Sincronização 100% Nuvem")
     st.caption(
-        "Importação por data de Estoque, Entradas (NF) e Saídas/Vendas diárias, preservação de tipos numéricos do Excel "
-        "(ex: custos com 3 ou 4 casas decimais como 13,071), cópia automática antes de sobrescrever e download de backup."
+        "Importação por data de Estoque (com proteção contra sobrescrita por data retroativa e histórico enxuto), "
+        "Entradas (NF), Saídas/Vendas diárias, Custos, cópia automática `_bkp_*` e download de backup."
     )
     if "msg_sucesso_sync" in st.session_state:
         st.success(st.session_state.pop("msg_sucesso_sync"))
@@ -1965,6 +2049,12 @@ with aba1:
             type=["xlsx", "xls", "csv"],
             key="up_entradas",
         )
+        somar_entradas_mesmo_dia = st.checkbox(
+            "➕ Somar ao dia se já houver entrada nesta data",
+            value=False,
+            key="chk_somar_ent_dia",
+            help="Desmarcado (padrão): substitui os lançamentos da data. Marcado: soma as quantidades com o arquivo já enviado para o mesmo dia.",
+        )
     with c3:
         st.markdown(
             """
@@ -1986,6 +2076,12 @@ with aba1:
             "Selecionar Saídas (.xlsx, .xls ou .csv)",
             type=["xlsx", "xls", "csv"],
             key="up_saidas",
+        )
+        somar_saidas_mesmo_dia = st.checkbox(
+            "➕ Somar ao dia se já houver saída nesta data",
+            value=False,
+            key="chk_somar_sai_dia",
+            help="Desmarcado (padrão): substitui os lançamentos da data. Marcado: soma as quantidades com o arquivo já enviado para o mesmo dia.",
         )
     with c4:
         st.markdown(
@@ -2072,10 +2168,11 @@ with aba1:
                     type="primary",
                     use_container_width=True,
                 )
-    with st.expander("⏪ Desfazer Última Importação (Restaurar Cópia Automática Anterior)", expanded=False):
+    with st.expander("⏪ Desfazer Última Importação ou Remover Data de Movimento", expanded=False):
         st.caption(
             "Sempre que você importa Estoque, Custos ou Base Inicial, o sistema guarda automaticamente a versão anterior em "
-            "`_bkp_estoque_atual`, `_bkp_custos` ou `_bkp_base_inicial` (e remove do histórico datas divergentes ao reverter o estoque)."
+            "`_bkp_estoque_atual`, `_bkp_custos` ou `_bkp_base_inicial`. Você também pode excluir uma data específica de "
+            "Entradas, Saídas ou Histórico caso tenha subido algum dia por engano."
         )
         cr1, cr2 = st.columns([2, 1])
         mapa_opcoes_restaurar = {
@@ -2085,7 +2182,7 @@ with aba1:
         }
         with cr1:
             rotulo_aba_rest = st.selectbox(
-                "Selecione qual base deseja reverter para a versão imediatamente anterior:",
+                "1. Reverter base completa para a versão imediatamente anterior (`_bkp_*`):",
                 options=list(mapa_opcoes_restaurar.keys()),
                 key="sel_aba_restaurar_bkp",
             )
@@ -2120,6 +2217,57 @@ with aba1:
                     st.rerun()
                 except Exception as erro_rest:
                     st.error(f"❌ Não foi possível restaurar `{aba_alvo_rest}`: {erro_rest}")
+
+        st.markdown("---")
+        cm1, cm2, cm3 = st.columns([1.4, 1.2, 1.0])
+        mapa_abas_mov_del = {
+            "Entradas Diárias (entradas_diarias)": ("entradas_diarias", df_entradas_bruto),
+            "Saídas / Vendas Diárias (saidas_diarias)": ("saidas_diarias", df_saidas_bruto),
+            "Histórico de Estoque (historico)": ("historico", df_historico_bruto),
+        }
+        with cm1:
+            rotulo_mov_del = st.selectbox(
+                "2. Remover lançamentos de uma data específica:",
+                options=list(mapa_abas_mov_del.keys()),
+                key="sel_aba_del_data",
+            )
+        aba_mov_del, df_mov_mem = mapa_abas_mov_del[rotulo_mov_del]
+        datas_disp_del = (
+            sorted([str(d).strip() for d in df_mov_mem["data"].unique() if str(d).strip()], reverse=True)
+            if (df_mov_mem is not None and not df_mov_mem.empty and "data" in df_mov_mem.columns)
+            else []
+        )
+        with cm2:
+            data_escolhida_del = st.selectbox(
+                "Data a excluir:",
+                options=datas_disp_del if datas_disp_del else ["Nenhuma data gravada"],
+                key="sel_data_especifica_del",
+                disabled=not bool(datas_disp_del),
+            )
+        with cm3:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            btn_excluir_data_mov = st.button(
+                "🗑️ Excluir Data Selecionada",
+                use_container_width=True,
+                disabled=not bool(datas_disp_del),
+            )
+        if btn_excluir_data_mov and datas_disp_del and data_escolhida_del in datas_disp_del:
+            with st.spinner(f"Removendo registros de `{data_escolhida_del}` da aba `{aba_mov_del}`..."):
+                try:
+                    remover_datas_aba_incremental_gsheets(
+                        planilha_gsheets, aba_mov_del, {str(data_escolhida_del)}
+                    )
+                    st.session_state.pop("bkp_db_xlsx_bytes", None)
+                    st.session_state.pop("backup_zip_bytes", None)
+                    carregar_estado_completo.clear()
+                    calcular_motor_giro_sazonal.clear()
+                    st.session_state["msg_sucesso_sync"] = (
+                        f"✅ Registros da data `{data_escolhida_del}` removidos de `{aba_mov_del}` com sucesso!"
+                    )
+                    st.rerun()
+                except Exception as erro_del_dt:
+                    st.error(f"❌ Erro ao excluir data `{data_escolhida_del}`: {erro_del_dt}")
+
     if btn_sincronizar:
         if (
             not any([arq_estoque, arq_entradas, arq_saidas, arq_custos, arq_base])
@@ -2159,6 +2307,13 @@ with aba1:
                     novas_saidas = None
                     novos_custos = None
                     nova_base = None
+                    atualizar_aba_estoque_atual = True
+                    max_data_estoque_existente = ""
+                    if not df_estoque_bruto.empty and "data" in df_estoque_bruto.columns:
+                        datas_est_exist = [str(d).strip() for d in df_estoque_bruto["data"].unique() if str(d).strip()]
+                        if datas_est_exist:
+                            max_data_estoque_existente = max(datas_est_exist)
+
                     if arq_estoque is not None:
                         novo_estoque, info_dup_est = processar_planilha_estoque(
                             arq_estoque,
@@ -2167,6 +2322,20 @@ with aba1:
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
                         )
                         codigos_ref_geral = codigos_ref_geral | set(novo_estoque["codigo"].unique())
+                        if max_data_estoque_existente and data_str < max_data_estoque_existente:
+                            atualizar_aba_estoque_atual = False
+                            teve_alerta = True
+                            dt_at_fmt = pd.to_datetime(max_data_estoque_existente, format="%Y-%m-%d", errors="coerce")
+                            str_at_fmt = dt_at_fmt.strftime("%d/%m/%Y") if pd.notna(dt_at_fmt) else max_data_estoque_existente
+                            mensagens_auditoria_upload.append(
+                                f"ℹ️ **Estoque Retroativo ({data_posicao.strftime('%d/%m/%Y')}):** Gravado apenas na aba `historico`. "
+                                f"O `estoque_atual` foi preservado na data mais recente (**{str_at_fmt}**) para não voltar seus saldos atuais no tempo."
+                            )
+                        if not info_dup_est.get("tem_data_no_nome", True):
+                            teve_alerta = True
+                            mensagens_auditoria_upload.append(
+                                f"⚠️ **Estoque sem data no nome ('{arq_estoque.name}'):** Gravado como **{data_posicao.strftime('%d/%m/%Y')}** conforme seletor."
+                            )
                         if info_dup_est["qtd_duplicadas"] > 0:
                             teve_alerta = True
                             amostra_txt = ", ".join(info_dup_est["exemplos"])
@@ -2192,10 +2361,38 @@ with aba1:
                             codigos_ref=codigos_ref_geral,
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
                         )
-                        mensagens_auditoria_upload.append(
-                            f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs "
-                            f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.)."
-                        )
+                        dt_ent_iso = data_entrada.strftime("%Y-%m-%d")
+                        if somar_entradas_mesmo_dia and not df_entradas_bruto.empty:
+                            df_ent_existente_dia = df_entradas_bruto[df_entradas_bruto["data"] == dt_ent_iso].copy()
+                            if not df_ent_existente_dia.empty:
+                                df_comb_ent = pd.concat([df_ent_existente_dia, novas_entradas], ignore_index=True)
+                                df_comb_ent = df_comb_ent.groupby("codigo", as_index=False).agg(
+                                    descricao=("descricao", "last"),
+                                    qtd_entrada=("qtd_entrada", "sum"),
+                                    data=("data", "last"),
+                                )
+                                novas_entradas = padronizar_dataframe(df_comb_ent, "entradas_diarias")
+                                mensagens_auditoria_upload.append(
+                                    f"➕ **Entradas ({data_entrada.strftime('%d/%m')}):** Somadas aos lançamentos já existentes da mesma data "
+                                    f"(Total acumulado no dia: {formatar_qtd_br(novas_entradas['qtd_entrada'].sum())} un.)."
+                                )
+                        if not info_ent.get("tem_data_no_nome", True):
+                            teve_alerta = True
+                            mensagens_auditoria_upload.append(
+                                f"⚠️ **Entradas sem data no nome ('{arq_entradas.name}'):** Gravadas como **{data_entrada.strftime('%d/%m/%Y')}**."
+                            )
+                        if info_ent.get("qtd_codigos_repetidos", 0) > 0:
+                            teve_alerta = True
+                            ex_rep_ent = ", ".join(info_ent["exemplos_repetidos"])
+                            mensagens_auditoria_upload.append(
+                                f"⚠️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['qtd_codigos_repetidos'])} produto(s) "
+                                f"apareceram em mais de uma linha na planilha e tiveram suas quantidades somadas: {ex_rep_ent}."
+                            )
+                        else:
+                            mensagens_auditoria_upload.append(
+                                f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs "
+                                f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.)."
+                            )
                     if arq_saidas is not None:
                         novas_saidas, info_sai = processar_planilha_movimento_diario(
                             arquivo=arq_saidas,
@@ -2206,10 +2403,38 @@ with aba1:
                             codigos_ref=codigos_ref_geral,
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
                         )
-                        mensagens_auditoria_upload.append(
-                            f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['total_itens'])} SKUs "
-                            f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.)."
-                        )
+                        dt_sai_iso = data_saida.strftime("%Y-%m-%d")
+                        if somar_saidas_mesmo_dia and not df_saidas_bruto.empty:
+                            df_sai_existente_dia = df_saidas_bruto[df_saidas_bruto["data"] == dt_sai_iso].copy()
+                            if not df_sai_existente_dia.empty:
+                                df_comb_sai = pd.concat([df_sai_existente_dia, novas_saidas], ignore_index=True)
+                                df_comb_sai = df_comb_sai.groupby("codigo", as_index=False).agg(
+                                    descricao=("descricao", "last"),
+                                    qtd_saida=("qtd_saida", "sum"),
+                                    data=("data", "last"),
+                                )
+                                novas_saidas = padronizar_dataframe(df_comb_sai, "saidas_diarias")
+                                mensagens_auditoria_upload.append(
+                                    f"➕ **Saídas ({data_saida.strftime('%d/%m')}):** Somadas aos lançamentos já existentes da mesma data "
+                                    f"(Total acumulado no dia: {formatar_qtd_br(novas_saidas['qtd_saida'].sum())} un.)."
+                                )
+                        if not info_sai.get("tem_data_no_nome", True):
+                            teve_alerta = True
+                            mensagens_auditoria_upload.append(
+                                f"⚠️ **Saídas sem data no nome ('{arq_saidas.name}'):** Gravadas como **{data_saida.strftime('%d/%m/%Y')}**."
+                            )
+                        if info_sai.get("qtd_codigos_repetidos", 0) > 0:
+                            teve_alerta = True
+                            ex_rep_sai = ", ".join(info_sai["exemplos_repetidos"])
+                            mensagens_auditoria_upload.append(
+                                f"⚠️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['qtd_codigos_repetidos'])} produto(s) "
+                                f"apareceram em mais de uma linha na planilha e tiveram suas quantidades somadas: {ex_rep_sai}."
+                            )
+                        else:
+                            mensagens_auditoria_upload.append(
+                                f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['total_itens'])} SKUs "
+                                f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.)."
+                            )
                     if arq_custos is not None:
                         novos_custos, info_cus = processar_planilha_custos(
                             arq_custos,
@@ -2251,11 +2476,12 @@ with aba1:
                         mensagens_auditoria_upload.append(msg_base)
                     agora_str = agora_br().strftime("%d/%m/%Y %H:%M:%S")
                     if novo_estoque is not None:
-                        salvar_backup_automatico_aba_gsheets(planilha_gsheets, "estoque_atual", df_estoque_bruto)
+                        if atualizar_aba_estoque_atual:
+                            salvar_backup_automatico_aba_gsheets(planilha_gsheets, "estoque_atual", df_estoque_bruto)
+                            gravar_aba_pequena_gsheets(planilha_gsheets, "estoque_atual", novo_estoque)
+                            abas_ja_gravadas.append("estoque_atual")
                         gravar_historico_incremental_gsheets(planilha_gsheets, novo_estoque, data_str)
                         abas_ja_gravadas.append("historico")
-                        gravar_aba_pequena_gsheets(planilha_gsheets, "estoque_atual", novo_estoque)
-                        abas_ja_gravadas.append("estoque_atual")
                     if novas_entradas is not None:
                         gravar_aba_incremental_por_data_gsheets(
                             planilha_gsheets,
@@ -2409,6 +2635,20 @@ with aba2:
             df_saidas=df_sai_fonte,
         )
         df_calc = df_base_giro.copy()
+        if "alerta_nf_nao_refletida" in df_calc.columns:
+            df_nf_pendente = df_calc[df_calc["alerta_nf_nao_refletida"] != ""][
+                ["codigo", "descricao", "alerta_nf_nao_refletida"]
+            ].drop_duplicates(subset=["codigo"])
+            if not df_nf_pendente.empty:
+                amostra_nf = ", ".join(
+                    f"`{r['codigo']}` ({r['alerta_nf_nao_refletida']})"
+                    for _, r in df_nf_pendente.head(6).iterrows()
+                )
+                st.warning(
+                    f"⚠️ **Atenção (Auditoria de Entradas vs. Saldo Inicial):** {formatar_num_br(len(df_nf_pendente))} produto(s) "
+                    f"tiveram Nota Fiscal de Entrada lançada, mas o saldo do dia seguinte não subiu nem houve saída equivalente "
+                    f"(ex.: {amostra_nf}). O sistema protegeu o giro para não inflar vendas caso a NF tenha entrado no Siagri em outra data."
+                )
         codigos_nao_encontrados_lista = []
         cods_conhecidos_erp = (
             set(df_estoque_bruto["codigo"].unique())
