@@ -255,11 +255,16 @@ MAPA_SINONIMOS = {
     "validade": [
         "validade",
         "validade_tempo_germinacao",
+        "data_de_validade_germinacao_do_lote",
+        "data_validade_germinacao_do_lote",
+        "validade_germinacao_do_lote",
         "validade_germinacao",
         "data_validade",
         "dt_validade",
         "data_de_validade",
         "vencimento",
+        "data_vencimento",
+        "validade_lote",
         "val",
     ],
     "data": [
