@@ -2631,11 +2631,11 @@ with aba2:
     janela_dias = p1.selectbox(
         "Janela de Giro (dias):",
         options=[15, 30, 45, 60, 90, 120, 180],
-        index=5 if arq_lista_cotacao is not None else 1,
+        index=5,
         help="Escolha 120 ou 180 dias para negociações de longo prazo com fornecedores.",
     )
     cobertura_desejada = p2.number_input("Cobertura Alvo (dias):", min_value=5, max_value=180, value=30)
-    lead_time = p3.number_input("Entrega / Lead (dias):", min_value=0, max_value=90, value=7)
+    lead_time = p3.number_input("Entrega / Lead (dias):", min_value=0, max_value=90, value=10)
     fator_sazonal = p4.slider("Ajuste Sazonal (%):", min_value=-50, max_value=200, value=0, step=5)
     filtro_busca = p5.text_input(
         "🔍 Fornecedor / Linha / Produto (use vírgula p/ vários):",
