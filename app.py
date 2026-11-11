@@ -542,26 +542,46 @@ def converter_numero_br(
     return pd.Series(valores_convertidos, index=serie.index, dtype=float)
 
 
-def converter_datas_deterministico(serie: pd.Series) -> pd.Series:
-    s_limpa = serie.fillna("").astype(str).str.strip()
-    s_limpa = s_limpa.replace(
-        {"": np.nan, "nan": np.nan, "None": np.nan, "NaT": np.nan, "0": np.nan, "0.0": np.nan}
-    )
-    anos_4d = s_limpa.str.extract(r"\b(\d{4})\b", expand=False)
-    anos_num = pd.to_numeric(anos_4d, errors="coerce")
-    mask_invalido = anos_num.notna() & ((anos_num < 1970) | (anos_num > 2150))
-    if mask_invalido.any():
-        s_limpa = s_limpa.mask(mask_invalido, np.nan)
+FORMATOS_DATA_ACEITOS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%y")
 
-    resultado = pd.Series(pd.NaT, index=serie.index, dtype="datetime64[ns]")
-    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%y"]:
-        faltantes = resultado.isna() & s_limpa.notna()
-        if not faltantes.any():
-            break
-        conv = pd.to_datetime(s_limpa.loc[faltantes], format=fmt, errors="coerce")
-        mask_ok = conv.notna() & (conv.dt.year >= 1970) & (conv.dt.year <= 2150)
-        resultado.loc[faltantes] = conv.where(mask_ok, pd.NaT).astype("datetime64[ns]")
-    return resultado
+
+def _parse_data_segura_py(valor, ano_min: int = 2020, ano_max: int = 2032):
+    if valor is None or pd.isna(valor):
+        return None
+    if isinstance(valor, (datetime, date, pd.Timestamp)):
+        return datetime(valor.year, valor.month, valor.day) if (ano_min <= valor.year <= ano_max) else None
+    s = str(valor).strip()
+    if not s or s.lower() in {"nan", "none", "nat", "<na>", "0", "0.0", "-", "--", "sem validade", "s/v"}:
+        return None
+    s_data = re.sub(r"\s+\d{1,2}:\d{2}(:\d{2})?.*$", "", s).strip()
+    m_ano = re.search(r"\b(\d{4})\b", s_data)
+    if m_ano:
+        ano_int = int(m_ano.group(1))
+        if ano_int < ano_min or ano_int > ano_max:
+            return None
+    for fmt in FORMATOS_DATA_ACEITOS:
+        try:
+            dt = datetime.strptime(s_data, fmt)
+            if ano_min <= dt.year <= ano_max:
+                return dt
+            return None
+        except ValueError:
+            continue
+    return None
+
+
+def formatar_validade_padrao(valor) -> str:
+    dt = _parse_data_segura_py(valor, ano_min=2020, ano_max=2032)
+    return dt.strftime("%d/%m/%Y") if dt is not None else ""
+
+
+def converter_datas_deterministico(serie: pd.Series) -> pd.Series:
+    if serie is None or serie.empty:
+        return pd.Series(dtype="datetime64[ns]")
+    unicos = serie.dropna().unique()
+    mapa = {val: _parse_data_segura_py(val, ano_min=2020, ano_max=2032) for val in unicos}
+    lista_dt = [mapa.get(v, None) if pd.notna(v) else None for v in serie]
+    return pd.to_datetime(pd.Series(lista_dt, index=serie.index, dtype="object"), errors="coerce").astype("datetime64[ns]")
 
 
 def restaurar_tipos(
@@ -576,6 +596,8 @@ def restaurar_tipos(
         if col not in COLUNAS_NUMERICAS:
             if col == "codigo":
                 df[col] = limpar_serie_codigo(df[col])
+            elif col == "validade":
+                df[col] = df[col].map(formatar_validade_padrao)
             else:
                 df[col] = limpar_serie_texto(df[col])
     codigos_ref = df["codigo"] if "codigo" in df.columns else None
