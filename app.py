@@ -543,22 +543,24 @@ def converter_numero_br(
 
 
 def converter_datas_deterministico(serie: pd.Series) -> pd.Series:
-    s_limpa = serie.fillna("").astype(str).str.strip().str.split(r"[ T]", regex=True).str[0]
+    s_limpa = serie.fillna("").astype(str).str.strip()
+    s_limpa = s_limpa.replace(
+        {"": np.nan, "nan": np.nan, "None": np.nan, "NaT": np.nan, "0": np.nan, "0.0": np.nan}
+    )
+    anos_4d = s_limpa.str.extract(r"\b(\d{4})\b", expand=False)
+    anos_num = pd.to_numeric(anos_4d, errors="coerce")
+    mask_invalido = anos_num.notna() & ((anos_num < 1970) | (anos_num > 2150))
+    if mask_invalido.any():
+        s_limpa = s_limpa.mask(mask_invalido, np.nan)
+
     resultado = pd.Series(pd.NaT, index=serie.index, dtype="datetime64[ns]")
-    formatos_explicitos = [
-        "%d/%m/%Y",
-        "%Y-%m-%d",
-        "%d-%m-%Y",
-        "%d/%m/%y",
-        "%Y/%m/%d",
-        "%d.%m.%Y",
-    ]
-    for fmt in formatos_explicitos:
-        faltantes = resultado.isna() & (s_limpa != "")
+    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%y"]:
+        faltantes = resultado.isna() & s_limpa.notna()
         if not faltantes.any():
             break
-        convertido = pd.to_datetime(s_limpa[faltantes], format=fmt, errors="coerce")
-        resultado.loc[faltantes] = convertido
+        conv = pd.to_datetime(s_limpa.loc[faltantes], format=fmt, errors="coerce")
+        mask_ok = conv.notna() & (conv.dt.year >= 1970) & (conv.dt.year <= 2150)
+        resultado.loc[faltantes] = conv.where(mask_ok, pd.NaT).astype("datetime64[ns]")
     return resultado
 
 
