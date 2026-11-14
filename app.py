@@ -41,8 +41,17 @@ st.markdown(
             linear-gradient(180deg, #0b0d14 0%, #0f131f 55%, #090b10 100%);
         color: #f8fafc;
     }
+    /* Remove a barra preta superior do Streamlit e garante espaçamento perfeito para o cabeçalho e logo */
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+        background-color: transparent !important;
+        backdrop-filter: none !important;
+    }
+    div[data-testid="stDecoration"] {
+        display: none !important;
+    }
     .block-container {
-        padding-top: 1.8rem !important;
+        padding-top: 3.6rem !important;
         padding-bottom: 2.5rem !important;
     }
     /* Cartões Bento Glassmorphism */
@@ -129,7 +138,14 @@ st.markdown(
         border: 1px solid rgba(196, 181, 253, 0.45) !important;
         box-shadow: 0 4px 18px rgba(124, 58, 237, 0.50) !important;
     }
-    div[data-baseweb="tab-highlight"] {
+    button[data-baseweb="tab"][aria-selected="true"] p,
+    button[data-baseweb="tab"][aria-selected="true"] span,
+    button[data-baseweb="tab"][aria-selected="true"] div {
+        color: #ffffff !important;
+        font-weight: 700 !important;
+    }
+    div[data-baseweb="tab-highlight"],
+    div[data-baseweb="tab-border"] {
         display: none !important;
     }
     /* Cartões de Métricas Nativos Estilizados */
@@ -1678,7 +1694,7 @@ def calcular_plano_promocional_fefo(
     df_estoque_ref: pd.DataFrame,
     df_custos_ref: pd.DataFrame,
     df_giro_ref: pd.DataFrame,
-    aliquota_impostos_pct: float = 8.0,
+    aliquota_impostos_pct: float = 0.0,
     margem_referencia_pct: float = 30.0,
     df_saidas_ref: pd.DataFrame = None,
 ) -> pd.DataFrame:
@@ -2798,11 +2814,11 @@ with aba_dash:
             meta_cobertura_bi = st.number_input(
                 "🎯 Meta Cobertura (dias):",
                 min_value=15,
-                max_value=180,
-                value=60,
+                max_value=240,
+                value=120,
                 step=15,
                 key="bi_meta_cob",
-                help="Acima desta cobertura (em dias de giro), o capital passa a ser monitorado como Excesso Liberável.",
+                help="Padrão de 120 dias. Acima desta cobertura (em dias de giro), o capital passa a ser monitorado como Excesso Liberável.",
             )
         with f_col4:
             lead_bi = st.number_input(
@@ -2849,6 +2865,8 @@ with aba_dash:
         else:
             df_bi["abc_giro"] = "Sem Giro"
 
+        teto_cobertura_longa_bi = max(180, int(meta_cobertura_bi) + 60)
+
         def _classificar_faixa_saude_bi(r):
             s_pos = float(r["saldo_pos"])
             g_dia = float(r["giro_dia"])
@@ -2861,9 +2879,9 @@ with aba_dash:
                 return f"1. Crítico / Ruptura (≤ {int(lead_bi)}d)"
             if aut <= float(meta_cobertura_bi):
                 return f"2. Saudável ({int(lead_bi)+1} a {int(meta_cobertura_bi)}d)"
-            if aut <= 180.0:
-                return f"3. Cobertura Longa ({int(meta_cobertura_bi)+1} a 180d)"
-            return "4. Excesso (> 180d)"
+            if aut <= float(teto_cobertura_longa_bi):
+                return f"3. Cobertura Longa ({int(meta_cobertura_bi)+1} a {teto_cobertura_longa_bi}d)"
+            return f"4. Excesso (> {teto_cobertura_longa_bi}d)"
 
         df_bi["faixa_saude"] = df_bi.apply(_classificar_faixa_saude_bi, axis=1)
         df_bi["estoque_alvo_val"] = df_bi["cmv_diario"] * float(meta_cobertura_bi)
@@ -3345,10 +3363,10 @@ with aba_dash:
                 "🏛️ Alíquota Média de Impostos s/ Venda (%):",
                 min_value=0.0,
                 max_value=35.0,
-                value=8.0,
+                value=0.0,
                 step=0.5,
                 key="bi_aliq_imposto_vendas",
-                help="Percentual médio de impostos sobre o faturamento (ICMS, PIS/COFINS, ST) para apurar o Lucro Líquido Real.",
+                help="Padrão 0% (maioria dos medicamentos veterinários isentos/monofásicos). Ajuste se desejar simular ICMS, PIS/COFINS ou ST.",
             )
 
         df_sai_escopo = (
@@ -4862,10 +4880,10 @@ with aba3:
                 "🏛️ Impostos s/ Venda (%):",
                 min_value=0.0,
                 max_value=35.0,
-                value=8.0,
+                value=0.0,
                 step=0.5,
                 key="fefo_aliq_imp",
-                help="Alíquota média estimada (ICMS, PIS/COFINS, ST) para calcular o Preço Piso de Equilíbrio e nunca sugerir promoção com prejuízo.",
+                help="Padrão 0% (maioria dos medicamentos isentos). Ajuste se desejar embutir ICMS, PIS/COFINS ou ST no Preço Piso.",
             )
         with c_p4:
             margem_ref_fefo = st.number_input(
