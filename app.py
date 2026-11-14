@@ -21,7 +21,7 @@ def agora_br() -> datetime:
 
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO DA PÁGINA E VISUAL LIQUID GLASS (ALTO CONTRASTE)
+# 1. CONFIGURAÇÃO DA PÁGINA E VISUAL SAAS DARK NEON BENTO UI (ALTO CONTRASTE)
 # ==============================================================================
 st.set_page_config(
     page_title="Esteio Rural — Inteligência de Estoque & Giro Sazonal",
@@ -32,56 +32,244 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    /* Fundo Obsidian Dark com luzes radiais suaves estilo Bento SaaS */
     .stApp {
-        background: radial-gradient(circle at 15% 15%, #0f2922 0%, #07120f 55%, #050a09 100%);
-        color: #f1f5f9;
+        background:
+            radial-gradient(circle at 12% 10%, rgba(124, 58, 237, 0.16) 0%, transparent 38%),
+            radial-gradient(circle at 88% 16%, rgba(16, 185, 129, 0.12) 0%, transparent 40%),
+            radial-gradient(circle at 50% 90%, rgba(59, 130, 246, 0.10) 0%, transparent 45%),
+            linear-gradient(180deg, #0b0d14 0%, #0f131f 55%, #090b10 100%);
+        color: #f8fafc;
     }
+    .block-container {
+        padding-top: 1.8rem !important;
+        padding-bottom: 2.5rem !important;
+    }
+    /* Cartões Bento Glassmorphism */
     .glass-card {
-        background: rgba(17, 37, 32, 0.72);
-        border: 1px solid rgba(52, 211, 153, 0.28);
-        border-radius: 14px;
+        background: linear-gradient(145deg, rgba(22, 27, 44, 0.88) 0%, rgba(15, 18, 30, 0.94) 100%);
+        border: 1px solid rgba(139, 92, 246, 0.26);
+        border-radius: 18px;
         padding: 18px 20px;
-        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-        backdrop-filter: blur(12px);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        backdrop-filter: blur(16px);
         margin-bottom: 14px;
+        transition: transform 0.18s ease, border-color 0.18s ease;
     }
+    .glass-card:hover {
+        border-color: rgba(16, 185, 129, 0.45);
+    }
+    /* Caixa de Status Superior */
     .status-box {
-        background: rgba(15, 34, 29, 0.85);
-        border: 1px solid rgba(52, 211, 153, 0.45);
-        border-radius: 14px;
-        padding: 14px 18px;
+        background: linear-gradient(135deg, rgba(22, 27, 44, 0.92) 0%, rgba(16, 22, 36, 0.96) 100%);
+        border: 1px solid rgba(45, 212, 191, 0.40);
+        border-radius: 16px;
+        padding: 12px 18px;
         text-align: left;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 18px rgba(16, 185, 129, 0.12);
     }
     .status-label {
-        font-size: 0.78rem;
+        font-size: 0.74rem;
         color: #94a3b8;
-        margin-bottom: 4px;
+        margin-bottom: 3px;
         font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
     }
     .status-value {
-        font-size: 1.35rem;
+        font-size: 1.22rem;
         font-weight: 800;
         color: #f8fafc;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    /* Pílulas de Tags */
     .pill-tag {
         display: inline-block;
-        background: rgba(20, 184, 166, 0.18);
-        border: 1px solid rgba(45, 212, 191, 0.4);
-        color: #5eead4;
-        padding: 2px 8px;
-        border-radius: 6px;
-        font-size: 0.76rem;
+        background: rgba(139, 92, 246, 0.16);
+        border: 1px solid rgba(167, 139, 250, 0.38);
+        color: #c4b5fd;
+        padding: 3px 9px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 600;
         font-family: monospace;
-        margin: 2px 3px 2px 0;
+        margin: 2px 4px 2px 0;
     }
+    /* Barra de Abas Estilo Segmented Pill Neon (Inspirado no modelo de UI) */
+    div[data-baseweb="tab-list"] {
+        background: rgba(18, 22, 36, 0.90) !important;
+        border: 1px solid rgba(148, 163, 184, 0.16) !important;
+        border-radius: 16px !important;
+        padding: 6px 8px !important;
+        gap: 6px !important;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45) !important;
+        margin-bottom: 18px !important;
+        flex-wrap: wrap !important;
+    }
+    button[data-baseweb="tab"] {
+        background: transparent !important;
+        border-radius: 11px !important;
+        padding: 9px 16px !important;
+        color: #94a3b8 !important;
+        font-weight: 600 !important;
+        font-size: 0.88rem !important;
+        border: 1px solid transparent !important;
+        transition: all 0.2s ease !important;
+    }
+    button[data-baseweb="tab"]:hover {
+        color: #f8fafc !important;
+        background: rgba(139, 92, 246, 0.12) !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background: linear-gradient(135deg, #7c3aed 0%, #6366f1 100%) !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        border: 1px solid rgba(196, 181, 253, 0.45) !important;
+        box-shadow: 0 4px 18px rgba(124, 58, 237, 0.50) !important;
+    }
+    div[data-baseweb="tab-highlight"] {
+        display: none !important;
+    }
+    /* Cartões de Métricas Nativos Estilizados */
     div[data-testid="stMetric"] {
-        background: rgba(17, 37, 32, 0.75);
-        border: 1px solid rgba(52, 211, 153, 0.25);
-        border-radius: 12px;
-        padding: 12px 16px;
+        background: linear-gradient(145deg, rgba(22, 27, 44, 0.90) 0%, rgba(14, 18, 30, 0.95) 100%);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-radius: 16px;
+        padding: 14px 18px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.40);
+    }
+    /* Botões Primários com Gradiente Roxo/Indigo Neon */
+    .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%) !important;
+        border: 1px solid rgba(196, 181, 253, 0.40) !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        border-radius: 12px !important;
+        box-shadow: 0 6px 20px rgba(124, 58, 237, 0.38) !important;
+        transition: all 0.2s ease !important;
+    }
+    .stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
+        transform: translateY(-1px) !important;
+        box-shadow: 0 8px 25px rgba(124, 58, 237, 0.58) !important;
+    }
+    /* Bento Hero Grid Customizada (Topo do Dashboard) */
+    .bento-grid {
+        display: grid;
+        grid-template-columns: 1.55fr 1.15fr 0.95fr 1.15fr;
+        gap: 16px;
+        margin-top: 8px;
+        margin-bottom: 18px;
+    }
+    @media (max-width: 1100px) {
+        .bento-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+    @media (max-width: 680px) {
+        .bento-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+    .bento-card {
+        position: relative;
+        overflow: hidden;
+        border-radius: 20px;
+        padding: 20px 22px;
+        background: linear-gradient(155deg, rgba(23, 28, 46, 0.95) 0%, rgba(13, 16, 28, 0.98) 100%);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        min-height: 168px;
+    }
+    .bento-card-emerald {
+        background:
+            radial-gradient(circle at 85% 85%, rgba(16, 185, 129, 0.22) 0%, transparent 55%),
+            linear-gradient(155deg, rgba(20, 31, 44, 0.96) 0%, rgba(11, 18, 26, 0.98) 100%);
+        border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .bento-card-purple {
+        background:
+            radial-gradient(circle at 85% 20%, rgba(139, 92, 246, 0.24) 0%, transparent 55%),
+            linear-gradient(155deg, rgba(26, 23, 48, 0.96) 0%, rgba(14, 14, 28, 0.98) 100%);
+        border: 1px solid rgba(139, 92, 246, 0.35);
+    }
+    .bento-card-amber {
+        background:
+            radial-gradient(circle at 50% 50%, rgba(249, 115, 22, 0.14) 0%, transparent 60%),
+            linear-gradient(155deg, rgba(25, 24, 38, 0.96) 0%, rgba(14, 15, 25, 0.98) 100%);
+        border: 1px solid rgba(249, 115, 22, 0.32);
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+    }
+    .bento-card-cyan {
+        background:
+            radial-gradient(circle at 90% 85%, rgba(6, 182, 212, 0.20) 0%, transparent 55%),
+            linear-gradient(155deg, rgba(20, 27, 45, 0.96) 0%, rgba(12, 17, 29, 0.98) 100%);
+        border: 1px solid rgba(6, 182, 212, 0.32);
+    }
+    .bento-title {
+        font-size: 0.82rem;
+        font-weight: 600;
+        color: #94a3b8;
+        letter-spacing: 0.02em;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+    }
+    .bento-big-val {
+        font-size: 1.85rem;
+        font-weight: 800;
+        color: #ffffff;
+        letter-spacing: -0.02em;
+        line-height: 1.15;
+        margin-bottom: 8px;
+    }
+    .bento-badge-green {
+        display: inline-flex;
+        align-items: center;
+        background: rgba(16, 185, 129, 0.18);
+        border: 1px solid rgba(16, 185, 129, 0.45);
+        color: #34d399;
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 3px 10px;
+        border-radius: 999px;
+        width: fit-content;
+    }
+    .bento-badge-purple {
+        display: inline-flex;
+        align-items: center;
+        background: rgba(139, 92, 246, 0.20);
+        border: 1px solid rgba(167, 139, 250, 0.45);
+        color: #c4b5fd;
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 3px 10px;
+        border-radius: 999px;
+        width: fit-content;
+    }
+    .bento-badge-amber {
+        display: inline-flex;
+        align-items: center;
+        background: rgba(245, 158, 11, 0.18);
+        border: 1px solid rgba(251, 191, 36, 0.45);
+        color: #fbbf24;
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 3px 10px;
+        border-radius: 999px;
+        width: fit-content;
+    }
+    .bento-sub {
+        font-size: 0.77rem;
+        color: #94a3b8;
+        margin-top: 6px;
     }
     </style>
     """,
@@ -150,6 +338,7 @@ if not verificar_autenticacao():
 # 2. FORMATAÇÃO BRASILEIRA (1.000,00), CENTRALIZAÇÃO E ESQUEMAS DE DADOS
 # ==============================================================================
 DIAS_MAX_HISTORICO = 180
+DIAS_PADRAO_SONECA_COMPRA = 15
 TAMANHO_LOTE_MIGRACAO = 4000
 LIMITE_COINCIDENCIA_CATALOGO = 80.0
 COLUNAS_NUMERICAS = {
@@ -159,15 +348,18 @@ COLUNAS_NUMERICAS = {
     "qtd_vendida",
     "qtd_entrada",
     "qtd_saida",
+    "valor_venda",
+    "qtd_comprada",
 }
 ESQUEMA_ABAS = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
     "historico": ["codigo", "saldo_geral", "data"],
     "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "data"],
-    "saidas_diarias": ["codigo", "descricao", "qtd_saida", "data"],
+    "saidas_diarias": ["codigo", "descricao", "qtd_saida", "valor_venda", "data"],
     "custos": ["codigo", "descricao", "custo_unitario"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
     "ocultos": ["codigo", "descricao", "data_ocultado"],
+    "pedidos_transito": ["codigo", "descricao", "qtd_comprada", "data_compra", "silenciar_ate"],
     "meta": ["chave", "valor"],
 }
 COLUNAS_OBRIGATORIAS_UPLOAD = {
@@ -178,16 +370,18 @@ COLUNAS_OBRIGATORIAS_UPLOAD = {
     "custos": ["codigo", "descricao", "custo_unitario"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
     "ocultos": ["codigo", "descricao"],
+    "pedidos_transito": ["codigo", "descricao"],
     "meta": ["chave", "valor"],
 }
 ORDEM_POSICIONAL_PADRAO = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
     "historico": ["codigo", "saldo_geral", "data"],
     "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "data"],
-    "saidas_diarias": ["codigo", "descricao", "qtd_saida", "data"],
+    "saidas_diarias": ["codigo", "descricao", "qtd_saida", "valor_venda", "data"],
     "custos": ["codigo", "descricao", "custo_unitario"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
     "ocultos": ["codigo", "descricao", "data_ocultado"],
+    "pedidos_transito": ["codigo", "descricao", "qtd_comprada", "data_compra", "silenciar_ate"],
     "meta": ["chave", "valor"],
 }
 MAPA_SINONIMOS = {
@@ -331,7 +525,26 @@ MAPA_SINONIMOS = {
         "qtd",
         "total_vendido",
     ],
+    "valor_venda": [
+        "valor_venda",
+        "valor_total_da_proposta",
+        "valor_total_proposta",
+        "vlr_total_da_proposta",
+        "vlr_total_proposta",
+        "valor_da_proposta",
+        "valor_proposta",
+        "valor_total_venda",
+        "valor_total",
+        "faturamento",
+        "receita",
+        "valor_liquido",
+        "total_venda",
+        "vlr_venda",
+    ],
     "data_ocultado": ["data_ocultado", "data", "ocultado_em"],
+    "qtd_comprada": ["qtd_comprada", "quantidade_comprada", "qtd_pedido", "sugestao_compra", "qtd"],
+    "data_compra": ["data_compra", "comprado_em", "data_pedido", "data"],
+    "silenciar_ate": ["silenciar_ate", "ocultar_ate", "expira_em", "valido_ate"],
     "chave": ["chave", "key", "parametro", "config"],
     "valor": ["valor", "value", "conteudo"],
 }
@@ -652,8 +865,17 @@ def estruturar_dataframe_bruto(
                 colunas_orig_usadas.add(encontrada)
                 alvos_encontrados.add(col_alvo)
                 break
+    if aba_esquema == "saidas_diarias" and "valor_venda" not in alvos_encontrados and df_orig.shape[1] >= 4:
+        col_4_cand = list(df_orig.columns)[3]
+        if col_4_cand not in colunas_orig_usadas and cols_norm.get(col_4_cand, "") not in MAPA_SINONIMOS["data"]:
+            renomear[col_4_cand] = "valor_venda"
+            colunas_orig_usadas.add(col_4_cand)
+            alvos_encontrados.add("valor_venda")
     if not exigir_colunas_obrigatorias:
-        ordem_padrao = ORDEM_POSICIONAL_PADRAO.get(aba_esquema, colunas_esperadas)
+        if aba_esquema == "saidas_diarias" and df_orig.shape[1] == 4 and "valor_venda" not in alvos_encontrados:
+            ordem_padrao = ["codigo", "descricao", "qtd_saida", "data"]
+        else:
+            ordem_padrao = ORDEM_POSICIONAL_PADRAO.get(aba_esquema, colunas_esperadas)
         cols_orig_lista = list(df_orig.columns)
         for idx_pos, col_alvo in enumerate(ordem_padrao):
             if col_alvo not in alvos_encontrados and idx_pos < len(cols_orig_lista):
@@ -678,8 +900,10 @@ def estruturar_dataframe_bruto(
         if col_alvo not in df.columns:
             if col_alvo in COLUNAS_NUMERICAS:
                 df[col_alvo] = 0.0
-            elif col_alvo in ("data", "data_ocultado"):
+            elif col_alvo in ("data", "data_ocultado", "data_compra"):
                 df[col_alvo] = hoje_br().strftime("%Y-%m-%d")
+            elif col_alvo == "silenciar_ate":
+                df[col_alvo] = (hoje_br() + timedelta(days=DIAS_PADRAO_SONECA_COMPRA)).strftime("%Y-%m-%d")
             else:
                 df[col_alvo] = ""
     df = df[colunas_esperadas].copy()
@@ -727,9 +951,75 @@ def padronizar_dataframe(
         df = df[df["saldo_geral"].abs() > 1e-9].copy()
     elif aba_esquema in ("entradas_diarias", "saidas_diarias"):
         df = df.drop_duplicates(subset=["codigo", "data"], keep="last")
-    elif aba_esquema in ("custos", "ocultos"):
+    elif aba_esquema in ("custos", "ocultos", "pedidos_transito"):
         df = df.drop_duplicates(subset=["codigo"], keep="last")
     return df.reset_index(drop=True)
+
+
+def depurar_pedidos_transito_auto_despertar(
+    df_transito: pd.DataFrame,
+    df_entradas: pd.DataFrame,
+) -> tuple[pd.DataFrame, list, list]:
+    """
+    Mantém apenas os itens em 'pedidos_transito' dentro do prazo de 15 dias e que ainda NÃO
+    tiveram entrada na planilha de Entradas (NF) em data >= data_compra (Auto-Despertar).
+    """
+    if df_transito is None or df_transito.empty:
+        return padronizar_dataframe(pd.DataFrame(), "pedidos_transito"), [], []
+    df_t = padronizar_dataframe(df_transito, "pedidos_transito")
+    if df_t.empty:
+        return df_t, [], []
+
+    hoje_iso = hoje_br().strftime("%Y-%m-%d")
+    dt_comp_s = converter_datas_deterministico(df_t["data_compra"])
+    dt_sil_s = converter_datas_deterministico(df_t["silenciar_ate"])
+
+    datas_compra_iso = []
+    datas_sil_iso = []
+    for idx_r, r_t in df_t.iterrows():
+        dc = dt_comp_s.loc[idx_r]
+        ds = dt_sil_s.loc[idx_r]
+        dc_iso = dc.strftime("%Y-%m-%d") if pd.notna(dc) else hoje_iso
+        if pd.notna(ds):
+            ds_iso = ds.strftime("%Y-%m-%d")
+        else:
+            dt_base_c = dc if pd.notna(dc) else pd.Timestamp(hoje_br())
+            ds_iso = (dt_base_c + pd.Timedelta(days=DIAS_PADRAO_SONECA_COMPRA)).strftime("%Y-%m-%d")
+        datas_compra_iso.append(dc_iso)
+        datas_sil_iso.append(ds_iso)
+
+    df_t["data_compra"] = datas_compra_iso
+    df_t["silenciar_ate"] = datas_sil_iso
+
+    mapa_ult_ent = {}
+    if df_entradas is not None and not df_entradas.empty and "codigo" in df_entradas.columns and "data" in df_entradas.columns:
+        df_e_pos = df_entradas[df_entradas["qtd_entrada"] > 0].copy()
+        if not df_e_pos.empty:
+            dt_e = converter_datas_deterministico(df_e_pos["data"])
+            df_e_pos["_dt_iso"] = dt_e.dt.strftime("%Y-%m-%d").fillna("")
+            df_e_pos = df_e_pos[df_e_pos["_dt_iso"] != ""]
+            if not df_e_pos.empty:
+                mapa_ult_ent = df_e_pos.groupby("codigo")["_dt_iso"].max().to_dict()
+
+    cods_despertados_nf = []
+    cods_expirados_15d = []
+    indices_manter = []
+
+    for idx_r, r_t in df_t.iterrows():
+        cod = str(r_t["codigo"]).strip()
+        dc_iso = str(r_t["data_compra"]).strip()
+        ds_iso = str(r_t["silenciar_ate"]).strip()
+        ult_ent_iso = mapa_ult_ent.get(cod, "")
+        if ult_ent_iso and ult_ent_iso >= dc_iso:
+            cods_despertados_nf.append(cod)
+            continue
+        if ds_iso < hoje_iso:
+            cods_expirados_15d.append(cod)
+            continue
+        indices_manter.append(idx_r)
+
+    df_ativos = df_t.loc[indices_manter].reset_index(drop=True)
+    return df_ativos, cods_despertados_nf, cods_expirados_15d
 
 
 def podar_historico_180_dias(df_hist: pd.DataFrame, nome_aba: str = "historico") -> pd.DataFrame:
@@ -971,11 +1261,14 @@ def gravar_aba_incremental_por_data_gsheets(
             df_mesmo_dia = df_base_existente[df_base_existente["data"] == data_ref_str].copy()
             if not df_mesmo_dia.empty:
                 df_unido = pd.concat([df_mesmo_dia, df_novo_dia], ignore_index=True)
-                df_novo_dia = df_unido.groupby("codigo", as_index=False).agg(
-                    descricao=("descricao", "last"),
-                    **{col_qtd: (col_qtd, "sum")},
-                    data=("data", "last"),
-                )
+                agg_inc = {
+                    "descricao": ("descricao", "last"),
+                    col_qtd: (col_qtd, "sum"),
+                }
+                if "valor_venda" in df_unido.columns:
+                    agg_inc["valor_venda"] = ("valor_venda", "sum")
+                agg_inc["data"] = ("data", "last")
+                df_novo_dia = df_unido.groupby("codigo", as_index=False).agg(**agg_inc)
     df_novo_padrao = (
         compactar_estoque_para_historico(df_novo_dia)
         if nome_aba == "historico"
@@ -1053,6 +1346,13 @@ def carregar_estado_completo() -> dict:
     df_cus = ler_aba_bruta_gsheets(planilha, "custos")
     df_base = ler_aba_bruta_gsheets(planilha, "base_inicial")
     df_ocul = ler_aba_bruta_gsheets(planilha, "ocultos")
+    df_trans_bruto = ler_aba_bruta_gsheets(planilha, "pedidos_transito")
+    df_trans, cods_desp_nf, cods_exp_15d = depurar_pedidos_transito_auto_despertar(df_trans_bruto, df_ent)
+    if len(df_trans) != len(df_trans_bruto):
+        try:
+            gravar_aba_pequena_gsheets(planilha, "pedidos_transito", df_trans, permitir_vazio=True)
+        except Exception:
+            pass
     df_meta = ler_aba_bruta_gsheets(planilha, "meta")
     dias_base = 87
     ult_att = "Sincronizado via Nuvem"
@@ -1071,6 +1371,9 @@ def carregar_estado_completo() -> dict:
         "custos": df_cus,
         "base_inicial": df_base,
         "ocultos": df_ocul,
+        "pedidos_transito": df_trans,
+        "despertados_nf_recente": cods_desp_nf,
+        "expirados_15d_recente": cods_exp_15d,
         "dias_base": dias_base,
         "ultima_atualizacao": ult_att,
     }
@@ -1093,8 +1396,8 @@ def _formatar_e_centralizar_aba_openpyxl(ws):
         titulo_norm = normalizar_chave_coluna(titulo)
         ws.cell(row=1, column=col_idx).alignment = alin_centro
         ws.cell(row=1, column=col_idx).font = fonte_cab
-        eh_esquerda = any(p in titulo_norm for p in ["descricao", "diagnostico"])
-        eh_moeda = any(p in titulo_norm for p in ["custo", "valor", "capital", "total_compra", "total_do_item", "total_estimado"]) and "pct" not in titulo_norm and "variacao" not in titulo_norm
+        eh_esquerda = any(p in titulo_norm for p in ["descricao", "diagnostico", "acao_ia", "mecanica", "status_margem", "departamento"])
+        eh_moeda = any(p in titulo_norm for p in ["custo", "valor", "capital", "preco", "recuperavel", "faturamento", "cmv", "imposto", "lucro", "compras_nf", "total_compra", "total_do_item", "total_estimado"]) and "pct" not in titulo_norm and "variacao" not in titulo_norm and "cresc" not in titulo_norm
         eh_pct = "%" in titulo or "pct" in titulo_norm or "variacao" in titulo_norm
         maior_tam = max(len(titulo), 12)
         for row_idx in range(2, max_row + 1):
@@ -1132,6 +1435,7 @@ def gerar_excel_banco_dados(estado: dict) -> bytes:
         estado.get("custos", pd.DataFrame()).to_excel(writer, sheet_name="custos", index=False)
         estado.get("base_inicial", pd.DataFrame()).to_excel(writer, sheet_name="base_inicial", index=False)
         estado.get("ocultos", pd.DataFrame()).to_excel(writer, sheet_name="ocultos", index=False)
+        estado.get("pedidos_transito", pd.DataFrame()).to_excel(writer, sheet_name="pedidos_transito", index=False)
         df_meta_bkp.to_excel(writer, sheet_name="meta", index=False)
     buffer_xlsx.seek(0)
     wb = load_workbook(buffer_xlsx)
@@ -1344,36 +1648,369 @@ def ler_lista_produtos_cotacao(arquivo) -> pd.DataFrame:
     return df
 
 
-def calcular_tabela_curva_abc(df_estoque_ref: pd.DataFrame, df_custos_ref: pd.DataFrame) -> pd.DataFrame:
-    if df_estoque_ref is None or df_estoque_ref.empty or df_custos_ref is None or df_custos_ref.empty:
+
+MAPA_DEPARTAMENTOS_SIAGRI = {
+    "50": "50 - Veterinária & Reprodução",
+    "70": "70 - Ferragens, Lonas & Selaria",
+    "26": "26 - Nutrição & Matéria-Prima (MP)",
+    "90": "90 - Rações, Milho & Grãos",
+    "60": "60 - Máquinas, Pulv. & EPIs",
+    "20": "20 - Domissanitários & Defensivos",
+    "11": "11 - Hidráulica, Tubos & Parafusos",
+    "12": "12 - Bombas, Boias & Conexões",
+    "13": "13 - Botinas, Calçados & Vestuário",
+    "15": "15 - Óleos, Graxas & Lubrificantes",
+    "80": "80 - Arames, Cordoalhas & Cercas",
+    "30": "30 - Adubos, Sementes & Agrícola",
+    "10": "10 - Inseticidas & Desinfetantes",
+    "16": "16 - Linha Pet & Aves",
+}
+
+
+def identificar_departamento_sku(codigo: str) -> str:
+    cod_s = str(codigo).strip()
+    pref = cod_s[:2] if len(cod_s) >= 2 else cod_s
+    return MAPA_DEPARTAMENTOS_SIAGRI.get(pref, f"Outros ({pref or 'S/C'})")
+
+
+
+def calcular_plano_promocional_fefo(
+    df_estoque_ref: pd.DataFrame,
+    df_custos_ref: pd.DataFrame,
+    df_giro_ref: pd.DataFrame,
+    aliquota_impostos_pct: float = 8.0,
+    margem_referencia_pct: float = 30.0,
+    df_saidas_ref: pd.DataFrame = None,
+) -> pd.DataFrame:
+    if df_estoque_ref is None or df_estoque_ref.empty:
         return pd.DataFrame()
-    df_abc = (
-        df_estoque_ref.groupby("codigo", as_index=False)
-        .agg(descricao=("descricao", "first"), saldo_geral=("saldo_geral", "first"))
-        .merge(df_custos_ref[["codigo", "custo_unitario"]], on="codigo", how="left")
+    df_f = df_estoque_ref[df_estoque_ref["saldo_lote"] > 0].copy()
+    if df_f.empty:
+        return pd.DataFrame()
+
+    if df_custos_ref is not None and not df_custos_ref.empty:
+        df_f = df_f.merge(df_custos_ref[["codigo", "custo_unitario"]], on="codigo", how="left")
+        df_f["custo_unitario"] = df_f["custo_unitario"].fillna(0.0)
+    else:
+        df_f["custo_unitario"] = 0.0
+
+    if df_giro_ref is not None and not df_giro_ref.empty and "giro_ponderado" in df_giro_ref.columns:
+        mapa_giro = dict(zip(df_giro_ref["codigo"], df_giro_ref["giro_ponderado"].clip(lower=0.0)))
+    else:
+        mapa_giro = {}
+    df_f["giro_diario"] = df_f["codigo"].map(mapa_giro).fillna(0.0)
+
+    # Se já houver preço médio praticado nas saídas (quando coluna valor_venda estiver presente), aproveita-o
+    mapa_preco_real = {}
+    if (
+        df_saidas_ref is not None
+        and not df_saidas_ref.empty
+        and "valor_venda" in df_saidas_ref.columns
+        and "qtd_saida" in df_saidas_ref.columns
+    ):
+        df_s_val = df_saidas_ref[(df_saidas_ref["qtd_saida"] > 0) & (df_saidas_ref["valor_venda"] > 0)].copy()
+        if not df_s_val.empty:
+            soma_s = df_s_val.groupby("codigo", as_index=False).agg(
+                tot_q=("qtd_saida", "sum"),
+                tot_v=("valor_venda", "sum"),
+            )
+            soma_s["p_unit"] = soma_s["tot_v"] / soma_s["tot_q"]
+            mapa_preco_real = dict(zip(soma_s["codigo"], soma_s["p_unit"]))
+
+    df_f["dt_validade"] = converter_datas_deterministico(df_f["validade"])
+    hoje_ts = pd.Timestamp(hoje_br())
+    df_f["dias_para_vencer"] = (df_f["dt_validade"] - hoje_ts).dt.days
+    df_f["valor_em_risco"] = df_f["saldo_lote"] * df_f["custo_unitario"]
+
+    def _classificar_faixa_fefo(dias):
+        if pd.isna(dias):
+            return "⚪ Sem Data de Validade"
+        if dias < 0:
+            return "🔴 1. Vencido"
+        if dias <= 30:
+            return "🟠 2. Crítico (0 a 30 dias)"
+        if dias <= 60:
+            return "🟡 3. Atenção (31 a 60 dias)"
+        if dias <= 90:
+            return "🔵 4. Preventivo (61 a 90 dias)"
+        return "🟢 5. Seguro (> 90 dias)"
+
+    df_f["status_fefo"] = df_f["dias_para_vencer"].apply(_classificar_faixa_fefo)
+
+    # Ordena por código e data de validade crescente para simular a fila real FEFO (apenas lotes não vencidos entram na fila de venda)
+    df_f["_ord_dias"] = df_f["dias_para_vencer"].fillna(999999.0)
+    df_f = df_f.sort_values(["codigo", "_ord_dias", "lote"], ascending=[True, True, True]).reset_index(drop=True)
+    df_f["_saldo_vendavel"] = [
+        float(sl) if (pd.notna(dv) and float(dv) >= 0) else 0.0
+        for sl, dv in zip(df_f["saldo_lote"], df_f["dias_para_vencer"])
+    ]
+    df_f["acum_lote_fefo"] = df_f.groupby("codigo")["_saldo_vendavel"].cumsum()
+    df_f["saldo_lotes_anteriores"] = (df_f["acum_lote_fefo"] - df_f["_saldo_vendavel"]).clip(lower=0.0)
+
+    fator_imposto = max(1.0 - (float(aliquota_impostos_pct) / 100.0), 0.10)
+    fator_margem_ref = max(1.0 - (float(margem_referencia_pct) / 100.0), 0.15)
+
+    sobra_proj_list = []
+    cap_sobra_list = []
+    preco_atual_list = []
+    preco_piso_list = []
+    preco_promo_list = []
+    desc_sug_list = []
+    margem_liq_promo_list = []
+    meta_giro_promo_list = []
+    diagnostico_escala_list = []
+    mecanica_ia_list = []
+    precisa_promo_list = []
+
+    for _, r in df_f.iterrows():
+        cod = str(r["codigo"]).strip()
+        saldo_l = float(r["saldo_lote"])
+        saldo_ant = float(r["saldo_lotes_anteriores"])
+        custo_u = float(r["custo_unitario"])
+        giro_d = float(r["giro_diario"])
+        dias_v = r["dias_para_vencer"]
+
+        preco_piso = (custo_u / fator_imposto) if custo_u > 0 else 0.0
+        preco_est = mapa_preco_real.get(cod, 0.0)
+        if preco_est <= 0 and custo_u > 0:
+            preco_est = max(custo_u / fator_margem_ref, preco_piso * 1.15)
+
+        if pd.isna(dias_v):
+            sobra_p = 0.0
+            cap_sobra = 0.0
+            precisa_p = False
+            diag_txt = "⚪ Sem Validade Cadastrada"
+            mec_txt = "Conferir data física no lote"
+            desc_pct = 0.0
+            preco_promo = preco_est
+            meta_giro_p = giro_d
+        elif float(dias_v) < 0:
+            sobra_p = saldo_l
+            cap_sobra = sobra_p * custo_u
+            precisa_p = True
+            diag_txt = "🔴 Vencido (Bloquear Venda)"
+            mec_txt = "🚫 Segregar no depósito / Solicitar troca ou baixa"
+            desc_pct = 0.0
+            preco_promo = 0.0
+            meta_giro_p = 0.0
+        else:
+            d_pos = max(float(dias_v), 0.0)
+            venda_ate_venc = d_pos * giro_d
+            absorcao_lote = min(saldo_l, max(0.0, venda_ate_venc - saldo_ant))
+            sobra_p = max(0.0, round(saldo_l - absorcao_lote, 2))
+            cap_sobra = sobra_p * custo_u
+            meta_giro_p = (saldo_l + saldo_ant) / max(d_pos, 1.0)
+
+            if sobra_p < 0.5 or d_pos > 120:
+                precisa_p = False
+                if d_pos <= 90:
+                    diag_txt = "🟢 Escoa no Giro Normal"
+                    mec_txt = "✅ Manter Preço Cheio (Giro atual absorve o lote)"
+                else:
+                    diag_txt = "🟢 Prazo Seguro (> 120d)"
+                    mec_txt = "✅ Venda normal no balcão"
+                desc_pct = 0.0
+                preco_promo = preco_est
+            else:
+                precisa_p = True
+                if d_pos <= 30:
+                    diag_txt = f"🔥 Sobra {formatar_qtd_br(sobra_p)} un. (Urgente ≤30d)"
+                    alvo_p = max(preco_piso * 1.02, preco_est * 0.76) if preco_est > 0 else 0.0
+                    mec_txt = (
+                        "🔥 Queima Balcão / Kit Lote Fechado (Piso + 2%)"
+                        if saldo_l >= 6
+                        else "🔥 Liquidação Imediata de Balcão (Piso + 2%)"
+                    )
+                elif d_pos <= 60:
+                    diag_txt = f"🟠 Sobra {formatar_qtd_br(sobra_p)} un. (Atenção 31-60d)"
+                    alvo_p = max(preco_piso * 1.06, preco_est * 0.82) if preco_est > 0 else 0.0
+                    mec_txt = (
+                        "⚡ Promoção Leve 4 Pague 3 / Atacado (-18%)"
+                        if saldo_l >= 6
+                        else "⚡ Desconto Progressivo no Balcão (-15% a -18%)"
+                    )
+                elif d_pos <= 90:
+                    diag_txt = f"🟡 Sobra {formatar_qtd_br(sobra_p)} un. (Preventivo 61-90d)"
+                    alvo_p = max(preco_piso * 1.10, preco_est * 0.88) if preco_est > 0 else 0.0
+                    mec_txt = "🎯 Combo Fazendeiro / Campanha WhatsApp (-12%)"
+                else:
+                    diag_txt = f"🔵 Sobra {formatar_qtd_br(sobra_p)} un. (91-120d)"
+                    alvo_p = max(preco_piso * 1.14, preco_est * 0.92) if preco_est > 0 else 0.0
+                    mec_txt = "📢 Foco Equipe de Vendas (-8%)"
+
+                preco_promo = min(alvo_p, preco_est) if preco_est > 0 else 0.0
+                desc_pct = (
+                    max(0.0, ((preco_est - preco_promo) / preco_est) * 100.0)
+                    if preco_est > 0
+                    else 0.0
+                )
+
+        if preco_promo > 0 and custo_u > 0:
+            imposto_r = preco_promo * (float(aliquota_impostos_pct) / 100.0)
+            lucro_liq_u = preco_promo - imposto_r - custo_u
+            mg_liq_pct = (lucro_liq_u / preco_promo) * 100.0
+        else:
+            mg_liq_pct = 0.0
+
+        sobra_proj_list.append(sobra_p)
+        cap_sobra_list.append(cap_sobra)
+        preco_atual_list.append(round(preco_est, 2))
+        preco_piso_list.append(round(preco_piso, 2))
+        preco_promo_list.append(round(preco_promo, 2))
+        desc_sug_list.append(round(desc_pct, 1))
+        margem_liq_promo_list.append(round(mg_liq_pct, 1))
+        meta_giro_promo_list.append(round(meta_giro_p, 2))
+        diagnostico_escala_list.append(diag_txt)
+        mecanica_ia_list.append(mec_txt)
+        precisa_promo_list.append(precisa_p)
+
+    df_f["sobra_projetada"] = sobra_proj_list
+    df_f["capital_sobra"] = cap_sobra_list
+    df_f["preco_atual_est"] = preco_atual_list
+    df_f["preco_piso_imposto"] = preco_piso_list
+    df_f["preco_promo_sug"] = preco_promo_list
+    df_f["desconto_sug_pct"] = desc_sug_list
+    df_f["margem_liq_promo_pct"] = margem_liq_promo_list
+    df_f["meta_giro_dia"] = meta_giro_promo_list
+    df_f["diagnostico_giro_fefo"] = diagnostico_escala_list
+    df_f["mecanica_ia"] = mecanica_ia_list
+    df_f["precisa_promocao"] = precisa_promo_list
+    df_f["eh_mp"] = (
+        df_f["descricao"].astype(str).str.strip().str.upper().str.startswith("MP ")
+        | df_f["codigo"].astype(str).str.startswith("26")
     )
-    df_abc["custo_unitario"] = df_abc["custo_unitario"].fillna(0.0)
+    return df_f.drop(columns=["_ord_dias", "_saldo_vendavel"]).reset_index(drop=True)
+
+
+def gerar_textos_campanha_promocional_fefo(
+    codigo: str,
+    descricao: str,
+    lote: str,
+    validade: str,
+    dias_vencer: int,
+    saldo_lote: float,
+    sobra_proj: float,
+    custo_unit: float,
+    preco_de: float,
+    preco_por: float,
+    preco_piso: float,
+    desconto_pct: float,
+    aliquota_imp_pct: float,
+    mecanica_sugerida: str,
+    meta_giro_dia: float,
+) -> tuple[str, str]:
+    economia_un = max(0.0, preco_de - preco_por)
+    economia_lote_3 = economia_un * 3.0
+    receita_total_lote = saldo_lote * preco_por
+    imposto_total_lote = receita_total_lote * (aliquota_imp_pct / 100.0)
+    custo_total_lote = saldo_lote * custo_unit
+    resultado_liq_lote = receita_total_lote - imposto_total_lote - custo_total_lote
+    margem_liq_pct = ((resultado_liq_lote / receita_total_lote) * 100.0) if receita_total_lote > 0 else 0.0
+
+    txt_whatsapp_cliente = (
+        f"🌾 *OPORTUNIDADE ESPECIAL ESTEIO RURAL — LOTE PROMOCIONAL!* 🌾\n\n"
+        f"📦 *{descricao}*\n"
+        f"✅ Lote selecionado p/ giro rápido (Validade: *{validade or 'Consultar'}* — *{formatar_qtd_br(saldo_lote)} un.* disponíveis)\n\n"
+        f"💰 De: ~{formatar_moeda_br(preco_de)}~\n"
+        f"🔥 *Por apenas: {formatar_moeda_br(preco_por)} à vista!* (*-{formatar_num_br(desconto_pct, 1)}%* de desconto)\n"
+        f"📉 Economia imediata de *{formatar_moeda_br(economia_un)} por unidade* "
+        f"(levando 3 un., você economiza *{formatar_moeda_br(economia_lote_3)}*)!\n\n"
+        f"⚡ *Condição válida exclusivamente enquanto durar este lote ({formatar_qtd_br(saldo_lote)} unidades).*\n"
+        f"📲 Responda aqui no WhatsApp ou fale com nossos vendedores no balcão para reservar o seu!"
+    )
+
+    txt_briefing_equipe = (
+        f"🎯 *META DE ESCOAMENTO FEFO — EQUIPE DE VENDAS ESTEIO RURAL*\n"
+        f"• *Produto:* [{codigo}] {descricao}\n"
+        f"• *Lote Prioritário:* {lote or 'S/L'}  |  *Validade:* {validade or '-'} ({dias_vencer} dias restantes)\n"
+        f"• *Saldo no Lote:* {formatar_qtd_br(saldo_lote)} un.  |  *Sobra Projetada s/ Ação:* {formatar_qtd_br(sobra_proj)} un.\n"
+        f"• *Mecânica Recomendada:* {mecanica_sugerida}\n"
+        f"• *Preço Tabela:* {formatar_moeda_br(preco_de)}  ➔  *Preço Promocional:* {formatar_moeda_br(preco_por)} (-{formatar_num_br(desconto_pct, 1)}%)\n"
+        f"• *Piso Mínimo (Custo C1 + {formatar_num_br(aliquota_imp_pct, 1)}% Impostos):* {formatar_moeda_br(preco_piso)} "
+        f"(Margem líquida na promoção: {formatar_pct_br(margem_liq_pct, 1)})\n"
+        f"• *Meta da Equipe:* Vender pelo menos *{formatar_num_br(meta_giro_dia, 1)} un./dia* para zerar o lote antes do vencimento "
+        f"e recuperar *{formatar_moeda_br(receita_total_lote)}* em caixa!"
+    )
+    return txt_whatsapp_cliente, txt_briefing_equipe
+
+
+def calcular_tabela_curva_abc(
+    df_estoque_ref: pd.DataFrame,
+    df_custos_ref: pd.DataFrame,
+    incluir_zerados: bool = False,
+    df_catalogo_extra: pd.DataFrame = None,
+) -> pd.DataFrame:
+    if (df_estoque_ref is None or df_estoque_ref.empty) and (df_catalogo_extra is None or df_catalogo_extra.empty):
+        return pd.DataFrame()
+    if df_estoque_ref is not None and not df_estoque_ref.empty:
+        df_est_sku = df_estoque_ref.groupby("codigo", as_index=False).agg(
+            descricao=("descricao", "first"),
+            saldo_geral=("saldo_geral", "first"),
+        )
+    else:
+        df_est_sku = pd.DataFrame(columns=["codigo", "descricao", "saldo_geral"])
+
+    if incluir_zerados and df_catalogo_extra is not None and not df_catalogo_extra.empty:
+        df_cat_limpo = (
+            df_catalogo_extra[["codigo", "descricao"]]
+            .dropna(subset=["codigo"])
+            .drop_duplicates(subset=["codigo"], keep="first")
+        )
+        cods_ja_no_est = set(df_est_sku["codigo"].unique())
+        df_faltantes = df_cat_limpo[~df_cat_limpo["codigo"].isin(cods_ja_no_est)].copy()
+        if not df_faltantes.empty:
+            df_faltantes["saldo_geral"] = 0.0
+            df_est_sku = pd.concat([df_est_sku, df_faltantes[["codigo", "descricao", "saldo_geral"]]], ignore_index=True)
+
+    if df_custos_ref is not None and not df_custos_ref.empty:
+        df_abc = df_est_sku.merge(df_custos_ref[["codigo", "custo_unitario"]], on="codigo", how="left")
+        df_abc["custo_unitario"] = df_abc["custo_unitario"].fillna(0.0)
+    else:
+        df_abc = df_est_sku.copy()
+        df_abc["custo_unitario"] = 0.0
+
     df_abc["valor_estoque"] = df_abc["saldo_geral"].clip(lower=0.0) * df_abc["custo_unitario"]
-    df_abc = (
+    df_pos = (
         df_abc[df_abc["valor_estoque"] > 0]
         .sort_values(["valor_estoque", "codigo"], ascending=[False, True])
         .copy()
     )
-    total_fin = float(df_abc["valor_estoque"].sum())
-    if total_fin <= 0:
+    total_fin = float(df_pos["valor_estoque"].sum()) if not df_pos.empty else 0.0
+    if total_fin > 0:
+        part_exata = (df_pos["valor_estoque"] / total_fin) * 100.0
+        acum_exato = (df_pos["valor_estoque"].cumsum() / total_fin) * 100.0
+        acum_anterior = acum_exato - part_exata
+        df_pos["part_pct"] = part_exata.round(2)
+        df_pos["acum_pct"] = acum_exato.round(2)
+        df_pos["classe_abc_curta"] = acum_anterior.apply(
+            lambda p: "Classe A" if p < 80.0 else ("Classe B" if p < 95.0 else "Classe C")
+        )
+        df_pos["classe_abc"] = acum_anterior.apply(
+            lambda p: "Classe A (Até 80%)" if p < 80.0 else ("Classe B (80% a 95%)" if p < 95.0 else "Classe C (95% a 100%)")
+        )
+    elif not incluir_zerados:
         return pd.DataFrame()
-    part_exata = (df_abc["valor_estoque"] / total_fin) * 100.0
-    acum_exato = (df_abc["valor_estoque"].cumsum() / total_fin) * 100.0
-    acum_anterior = acum_exato - part_exata
-    df_abc["part_pct"] = part_exata.round(2)
-    df_abc["acum_pct"] = acum_exato.round(2)
-    df_abc["classe_abc_curta"] = acum_anterior.apply(
-        lambda p: "Classe A" if p < 80.0 else ("Classe B" if p < 95.0 else "Classe C")
+
+    if not incluir_zerados:
+        return df_pos.reset_index(drop=True)
+
+    df_zero = (
+        df_abc[df_abc["valor_estoque"] <= 0]
+        .sort_values(["saldo_geral", "custo_unitario", "descricao"], ascending=[False, False, True])
+        .copy()
     )
-    df_abc["classe_abc"] = acum_anterior.apply(
-        lambda p: "Classe A (Até 80%)" if p < 80.0 else ("Classe B (80% a 95%)" if p < 95.0 else "Classe C (95% a 100%)")
-    )
-    return df_abc.reset_index(drop=True)
+    if not df_zero.empty:
+        df_zero["part_pct"] = 0.0
+        df_zero["acum_pct"] = 100.0 if total_fin > 0 else 0.0
+        df_zero["classe_abc_curta"] = "Sem Saldo/Custo"
+        df_zero["classe_abc"] = [
+            "⚪ Saldo Zerado (R$ 0,00)" if float(sg) <= 0 else "⚪ Sem Custo no ERP (R$ 0,00)"
+            for sg in df_zero["saldo_geral"]
+        ]
+        df_final_abc = pd.concat([df_pos, df_zero], ignore_index=True)
+    else:
+        df_final_abc = df_pos
+    return df_final_abc.reset_index(drop=True)
 
 
 def validar_estrutura_e_coincidencia_codigos(
@@ -1610,11 +2247,14 @@ def processar_planilha_movimento_diario(
                 parcelas_str += "+..."
             soma_r = float(sub_r[col_qtd].sum())
             exemplos_repetidos.append(f"SKU {cod_r} ({parcelas_str} = {formatar_qtd_br(soma_r)})")
-    df_agrupado = df.groupby("codigo", as_index=False).agg(
-        descricao=("descricao", "last"),
-        **{col_qtd: (col_qtd, "sum")},
-        data=("data", "last"),
-    )
+    agg_mov = {
+        "descricao": ("descricao", "last"),
+        col_qtd: (col_qtd, "sum"),
+    }
+    if "valor_venda" in df.columns:
+        agg_mov["valor_venda"] = ("valor_venda", "sum")
+    agg_mov["data"] = ("data", "last")
+    df_agrupado = df.groupby("codigo", as_index=False).agg(**agg_mov)
     df_agrupado = df_agrupado[df_agrupado[col_qtd] > 0].copy()
     if df_agrupado.empty:
         raise ValueError(
@@ -1623,9 +2263,11 @@ def processar_planilha_movimento_diario(
         )
     df_final = padronizar_dataframe(df_agrupado, nome_aba)
     soma_qtd = float(df_final[col_qtd].sum())
+    soma_valor_venda = float(df_final["valor_venda"].sum()) if "valor_venda" in df_final.columns else 0.0
     return df_final, {
         "total_itens": len(df_final),
         "soma_qtd": soma_qtd,
+        "soma_valor_venda": soma_valor_venda,
         "data_iso": data_iso,
         "taxa_coincidencia": taxa_coincidencia,
         "qtd_codigos_repetidos": qtd_codigos_repetidos,
@@ -1984,16 +2626,31 @@ conectado_nuvem = planilha_gsheets is not None
 col_titulo, col_status = st.columns([3.4, 1.2])
 with col_titulo:
     st.markdown(
-        "## 🌾 Esteio Rural — Inteligência de Estoque & Giro Sazonal"
+        """
+        <div style="display:flex; align-items:center; gap:14px; padding-top:4px;">
+            <div style="background:linear-gradient(135deg,#7c3aed 0%,#10b981 100%); width:46px; height:46px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:1.55rem; box-shadow:0 6px 20px rgba(124,58,237,0.40);">
+                🌾
+            </div>
+            <div>
+                <div style="font-size:1.55rem; font-weight:800; color:#f8fafc; letter-spacing:-0.02em; line-height:1.15;">
+                    Esteio Rural <span style="font-weight:400; color:#94a3b8;">| Torre de Controle & Giro Sazonal</span>
+                </div>
+                <div style="font-size:0.82rem; color:#94a3b8; margin-top:2px;">
+                    Engenharia de Estoque, Curva ABC Cruzada, Radar FEFO e Sugestão Inteligente de Compras
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 with col_status:
     texto_status = (
-        "☁️ Google Sheets (Online)" if conectado_nuvem else "❌ Sem Conexão"
+        "🟢 Google Sheets Online" if conectado_nuvem else "❌ Sem Conexão"
     )
     st.markdown(
         f"""
         <div class="status-box">
-            <div class="status-label">Status do Banco de Dados (100% Nuvem)</div>
+            <div class="status-label">Banco de Dados 100% Nuvem</div>
             <div class="status-value" title="{texto_status}">{texto_status}</div>
         </div>
         """,
@@ -2028,8 +2685,10 @@ df_saidas_bruto = estado["saidas_diarias"]
 df_custos = estado["custos"]
 df_base_vendas = estado["base_inicial"]
 df_ocultos = estado["ocultos"]
+df_pedidos_transito = estado.get("pedidos_transito", pd.DataFrame(columns=ESQUEMA_ABAS["pedidos_transito"]))
 dias_base_atual = int(estado.get("dias_base", 87))
 codigos_ocultos = set(df_ocultos["codigo"].unique()) if not df_ocultos.empty else set()
+codigos_em_transito = set(df_pedidos_transito["codigo"].unique()) if not df_pedidos_transito.empty else set()
 mostrar_ocultos_temp = False
 if len(codigos_ocultos) > 0:
     col_aviso_oc, col_toggle_oc = st.columns([2.8, 1.2])
@@ -2058,18 +2717,977 @@ else:
 
 
 # ==============================================================================
-# 7. NAVEGAÇÃO POR ABAS (100% NUVEM)
+# 7. NAVEGAÇÃO POR ABAS (100% NUVEM — DASHBOARD EM 1º E IMPORTAÇÃO EM ÚLTIMO)
 # ==============================================================================
-aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs(
+aba_dash, aba2, aba3, aba4, aba5, aba6, aba1 = st.tabs(
     [
-        "📥 1. Importação & Backup",
+        "📊 1. Dashboard Executivo (Power BI)",
         "🛒 2. Sugestão de Compras & Cotação",
-        "⏳ 3. Radar de Validades (FEFO)",
-        "📊 4. Curva ABC Financeira",
+        "⏳ 3. Radar FEFO & Promoções IA",
+        "📈 4. Curva ABC Financeira",
         "🔍 5. Auditoria de ERP",
         f"👁️‍🗨️ 6. Ocultar Produtos ({formatar_num_br(len(codigos_ocultos))})",
+        "📥 7. Importação & Backup",
     ]
 )
+
+# ------------------------------------------------------------------------------
+# ABA 1 (NOVA): DASHBOARD EXECUTIVO ESTILO POWER BI (TOMADA DE DECISÃO)
+# ------------------------------------------------------------------------------
+with aba_dash:
+    st.markdown("### 📊 Torre de Controle Executiva — Inteligência de Estoque & Capital (Power BI)")
+    st.caption(
+        "Visão gerencial consolidada para tomada de decisão: Saúde do Capital Imobilizado, Matriz Cruzada 2D (Estoque × Giro), "
+        "Nível de Serviço dos Campeões de Venda, Risco FEFO Dinâmico e Fluxo Diário de Compras vs. Saídas."
+    )
+    if df_estoque.empty and df_base_vendas_rel.empty:
+        st.info("Importe as planilhas de Estoque e Custos na Aba 7 (Importação & Backup) para ativar o Dashboard Executivo.")
+    else:
+        f_col1, f_col2, f_col3, f_col4 = st.columns([1.3, 1.8, 1.0, 1.0])
+        with f_col1:
+            visao_operacional_bi = st.selectbox(
+                "🏢 Escopo Operacional:",
+                options=[
+                    "🏢 Tudo Consolidado (Loja + Fábrica)",
+                    "🏪 Apenas Loja Comercial (Varejo)",
+                    "🏭 Apenas Fábrica / Matéria-Prima (MP)",
+                ],
+                index=0,
+                key="bi_escopo_op",
+            )
+        df_bi_base, dias_hist_bi, peso_hist_bi = calcular_motor_giro_sazonal(
+            df_estoque=df_estoque,
+            df_historico=df_historico,
+            df_base_vendas=df_base_vendas_rel,
+            df_custos=df_custos_rel,
+            dias_base_atual=dias_base_atual,
+            janela_dias=120,
+            incluir_sem_estoque=True,
+            df_entradas=df_entradas,
+            df_saidas=df_saidas,
+        )
+        df_bi = df_bi_base.copy()
+        if not df_custos_rel.empty:
+            df_bi = df_bi.merge(df_custos_rel[["codigo", "custo_unitario"]], on="codigo", how="left")
+            df_bi["custo_unitario"] = df_bi["custo_unitario"].fillna(0.0)
+        else:
+            df_bi["custo_unitario"] = 0.0
+
+        df_bi["eh_mp"] = (
+            df_bi["descricao"].astype(str).str.strip().str.upper().str.startswith("MP ")
+            | df_bi["codigo"].astype(str).str.startswith("26")
+        )
+        if visao_operacional_bi.startswith("🏪"):
+            df_bi = df_bi[~df_bi["eh_mp"]].copy()
+        elif visao_operacional_bi.startswith("🏭"):
+            df_bi = df_bi[df_bi["eh_mp"]].copy()
+
+        df_bi["departamento"] = df_bi["codigo"].map(identificar_departamento_sku)
+        opcoes_depto_bi = sorted(df_bi["departamento"].unique())
+        with f_col2:
+            deptos_sel_bi = st.multiselect(
+                "📂 Filtrar Departamento / Linha (vazio = Todos):",
+                options=opcoes_depto_bi,
+                default=[],
+                key="bi_deptos_sel",
+            )
+        if deptos_sel_bi:
+            df_bi = df_bi[df_bi["departamento"].isin(deptos_sel_bi)].copy()
+
+        with f_col3:
+            meta_cobertura_bi = st.number_input(
+                "🎯 Meta Cobertura (dias):",
+                min_value=15,
+                max_value=180,
+                value=60,
+                step=15,
+                key="bi_meta_cob",
+                help="Acima desta cobertura (em dias de giro), o capital passa a ser monitorado como Excesso Liberável.",
+            )
+        with f_col4:
+            lead_bi = st.number_input(
+                "🚚 Prazo Entrega Alerta (dias):",
+                min_value=1,
+                max_value=60,
+                value=10,
+                step=1,
+                key="bi_lead_alerta",
+                help="Itens com giro cuja autonomia atual seja menor ou igual a este prazo entram em alerta de Ruptura.",
+            )
+
+        df_bi["saldo_pos"] = df_bi["saldo_atual"].clip(lower=0.0)
+        df_bi["valor_estoque"] = df_bi["saldo_pos"] * df_bi["custo_unitario"]
+        df_bi["giro_dia"] = df_bi["giro_ponderado"].clip(lower=0.0)
+        df_bi["cmv_diario"] = df_bi["giro_dia"] * df_bi["custo_unitario"]
+        df_bi["cmv_mensal"] = df_bi["cmv_diario"] * 30.0
+        df_bi["autonomia_dias"] = (
+            (df_bi["saldo_pos"] / df_bi["giro_dia"].replace(0.0, float("nan")))
+            .fillna(9999.0)
+            .round(1)
+        )
+
+        # Classificação ABC Dupla: ABC de Estoque (Patrimônio) vs. ABC de Giro (CMV Mensal)
+        df_bi = df_bi.sort_values(["valor_estoque", "codigo"], ascending=[False, True]).reset_index(drop=True)
+        tot_cap_bi = float(df_bi["valor_estoque"].sum())
+        if tot_cap_bi > 0:
+            acum_cap_ant = (df_bi["valor_estoque"].cumsum() - df_bi["valor_estoque"]) / tot_cap_bi * 100.0
+            df_bi["abc_estoque"] = [
+                "Sem Estoque" if v <= 0 else ("A" if a < 80.0 else ("B" if a < 95.0 else "C"))
+                for v, a in zip(df_bi["valor_estoque"], acum_cap_ant)
+            ]
+        else:
+            df_bi["abc_estoque"] = "Sem Estoque"
+
+        df_bi = df_bi.sort_values(["cmv_mensal", "codigo"], ascending=[False, True]).reset_index(drop=True)
+        tot_cmv_bi = float(df_bi["cmv_mensal"].sum())
+        if tot_cmv_bi > 0:
+            acum_cmv_ant = (df_bi["cmv_mensal"].cumsum() - df_bi["cmv_mensal"]) / tot_cmv_bi * 100.0
+            df_bi["abc_giro"] = [
+                "Sem Giro" if v <= 0 else ("A" if a < 80.0 else ("B" if a < 95.0 else "C"))
+                for v, a in zip(df_bi["cmv_mensal"], acum_cmv_ant)
+            ]
+        else:
+            df_bi["abc_giro"] = "Sem Giro"
+
+        def _classificar_faixa_saude_bi(r):
+            s_pos = float(r["saldo_pos"])
+            g_dia = float(r["giro_dia"])
+            aut = float(r["autonomia_dias"])
+            if s_pos <= 0:
+                return "0. Zerado"
+            if g_dia <= 0:
+                return "5. Estoque Parado (Sem Giro)"
+            if aut <= float(lead_bi):
+                return f"1. Crítico / Ruptura (≤ {int(lead_bi)}d)"
+            if aut <= float(meta_cobertura_bi):
+                return f"2. Saudável ({int(lead_bi)+1} a {int(meta_cobertura_bi)}d)"
+            if aut <= 180.0:
+                return f"3. Cobertura Longa ({int(meta_cobertura_bi)+1} a 180d)"
+            return "4. Excesso (> 180d)"
+
+        df_bi["faixa_saude"] = df_bi.apply(_classificar_faixa_saude_bi, axis=1)
+        df_bi["estoque_alvo_val"] = df_bi["cmv_diario"] * float(meta_cobertura_bi)
+        df_bi["capital_liberavel"] = [
+            max(0.0, float(v) - float(alv)) if float(g) > 0 else float(v)
+            for v, alv, g in zip(df_bi["valor_estoque"], df_bi["estoque_alvo_val"], df_bi["giro_dia"])
+        ]
+
+        # Cálculo de Risco FEFO Dinâmico (lotes que vencem em até 90d vs. giro)
+        cods_escopo_bi = set(df_bi["codigo"].unique())
+        df_lotes_bi = df_estoque[
+            (df_estoque["codigo"].isin(cods_escopo_bi)) & (df_estoque["saldo_lote"] > 0)
+        ].copy()
+        vlr_fefo_90d = 0.0
+        vlr_sobra_fefo_90d = 0.0
+        if not df_lotes_bi.empty:
+            df_lotes_bi["dt_val"] = converter_datas_deterministico(df_lotes_bi["validade"])
+            hoje_ts_bi = pd.Timestamp(hoje_br())
+            df_lotes_bi["dias_venc"] = (df_lotes_bi["dt_val"] - hoje_ts_bi).dt.days
+            df_lotes_bi = df_lotes_bi.merge(
+                df_bi[["codigo", "custo_unitario", "giro_dia"]], on="codigo", how="left"
+            ).fillna({"custo_unitario": 0.0, "giro_dia": 0.0})
+            df_lotes_bi["valor_lote"] = df_lotes_bi["saldo_lote"] * df_lotes_bi["custo_unitario"]
+            lotes_ate_90 = df_lotes_bi[df_lotes_bi["dias_venc"].notna() & (df_lotes_bi["dias_venc"] <= 90)].copy()
+            if not lotes_ate_90.empty:
+                vlr_fefo_90d = float(lotes_ate_90["valor_lote"].sum())
+                lotes_ate_90 = lotes_ate_90.sort_values(["codigo", "dias_venc"])
+                lotes_ate_90["_sl_vendavel"] = [
+                    float(sl) if float(dv) >= 0 else 0.0
+                    for sl, dv in zip(lotes_ate_90["saldo_lote"], lotes_ate_90["dias_venc"])
+                ]
+                lotes_ate_90["acum_lote"] = lotes_ate_90.groupby("codigo")["_sl_vendavel"].cumsum()
+                lotes_ate_90["antes_lote"] = (lotes_ate_90["acum_lote"] - lotes_ate_90["_sl_vendavel"]).clip(lower=0.0)
+                lotes_ate_90["consumo_ate_venc"] = lotes_ate_90["dias_venc"].clip(lower=0.0) * lotes_ate_90["giro_dia"]
+                lotes_ate_90["cap_absorcao"] = (lotes_ate_90["consumo_ate_venc"] - lotes_ate_90["antes_lote"]).clip(lower=0.0)
+                lotes_ate_90["qtd_sobra"] = [
+                    float(sl) if float(dv) < 0 else max(0.0, float(sl) - float(cap))
+                    for sl, dv, cap in zip(lotes_ate_90["saldo_lote"], lotes_ate_90["dias_venc"], lotes_ate_90["cap_absorcao"])
+                ]
+                vlr_sobra_fefo_90d = float((lotes_ate_90["qtd_sobra"] * lotes_ate_90["custo_unitario"]).sum())
+
+        # Indicadores de Nível de Serviço da Curva A de Giro (descontando itens já comprados em trânsito)
+        df_giro_a = df_bi[df_bi["abc_giro"] == "A"]
+        qtd_giro_a = len(df_giro_a)
+        mask_rup_a_bi = ((df_giro_a["saldo_pos"] <= 0) | (df_giro_a["autonomia_dias"] <= float(lead_bi))) & (~df_giro_a["codigo"].isin(codigos_em_transito))
+        qtd_giro_a_ruptura = int(mask_rup_a_bi.sum())
+        nivel_servico_a_pct = ((qtd_giro_a - qtd_giro_a_ruptura) / max(qtd_giro_a, 1)) * 100.0 if qtd_giro_a > 0 else 100.0
+        dio_global = (tot_cap_bi / (tot_cmv_bi / 30.0)) if tot_cmv_bi > 0 else 0.0
+        tot_liberavel_bi = float(df_bi["capital_liberavel"].sum())
+        skus_ativos_pos = int((df_bi["saldo_pos"] > 0).sum())
+
+        falsos_c_count = int(((df_bi["abc_giro"] == "A") & (df_bi["abc_estoque"].isin(["C", "Sem Estoque"])) & (~df_bi["codigo"].isin(codigos_em_transito))).sum())
+        elefantes_count = int(((df_bi["abc_estoque"] == "A") & (df_bi["abc_giro"].isin(["C", "Sem Giro"]))).sum())
+        pct_liberavel_bi = (tot_liberavel_bi / max(tot_cap_bi, 1.0)) * 100.0 if tot_cap_bi > 0 else 0.0
+        score_ring = max(0.0, min(100.0, nivel_servico_a_pct))
+        cor_ring = "#10b981" if score_ring >= 90.0 else ("#f97316" if score_ring >= 75.0 else "#ef4444")
+        dash_offset = 251.2 * (1.0 - (score_ring / 100.0))
+
+        # Painel Bento UI Dark Neon (Inspirado no Design de Referência)
+        st.markdown(
+            f"""
+            <div class="bento-grid">
+                <div class="bento-card bento-card-emerald">
+                    <div>
+                        <div class="bento-title">
+                            <span>💰 PATRIMÔNIO EM ESTOQUE</span>
+                            <span style="background:rgba(255,255,255,0.06); padding:2px 8px; border-radius:8px; font-size:0.72rem;">{formatar_num_br(skus_ativos_pos)} SKUs ativos</span>
+                        </div>
+                        <div class="bento-big-val">{formatar_moeda_br(tot_cap_bi)}</div>
+                        <div class="bento-badge-green">🔄 Giro Mensal (CMV): {formatar_moeda_br(tot_cmv_bi)}</div>
+                    </div>
+                    <div style="margin-top:10px; display:flex; align-items:flex-end; justify-content:space-between;">
+                        <span class="bento-sub">Cobertura Global: <strong style="color:#f8fafc;">{formatar_num_br(dio_global, 0)} dias</strong></span>
+                        <svg width="120" height="36" viewBox="0 0 120 36" fill="none">
+                            <path d="M2 30 C25 28, 35 14, 58 18 C80 22, 92 6, 116 4" stroke="#10b981" stroke-width="3" stroke-linecap="round"/>
+                            <circle cx="116" cy="4" r="4" fill="#34d399" />
+                        </svg>
+                    </div>
+                </div>
+                <div class="bento-card bento-card-purple">
+                    <div>
+                        <div class="bento-title">
+                            <span>🔓 CAIXA DESTRAVÁVEL</span>
+                            <span style="color:#c4b5fd;">Meta ≤ {int(meta_cobertura_bi)}d</span>
+                        </div>
+                        <div class="bento-big-val">{formatar_moeda_br(tot_liberavel_bi)}</div>
+                        <div class="bento-badge-purple">⚡ {formatar_pct_br(pct_liberavel_bi, 1)} do capital total</div>
+                    </div>
+                    <div class="bento-sub">
+                        Excesso acima de {int(meta_cobertura_bi)}d + itens sem saída em 90d
+                    </div>
+                </div>
+                <div class="bento-card bento-card-amber">
+                    <div style="position:relative; width:104px; height:104px; display:flex; align-items:center; justify-content:center;">
+                        <svg width="104" height="104" viewBox="0 0 100 100" style="transform:rotate(-90deg);">
+                            <circle cx="50" cy="50" r="40" stroke="rgba(148,163,184,0.16)" stroke-width="9" fill="none"/>
+                            <circle cx="50" cy="50" r="40" stroke="{cor_ring}" stroke-width="9" fill="none"
+                                stroke-dasharray="251.2" stroke-dashoffset="{dash_offset:.1f}" stroke-linecap="round"/>
+                        </svg>
+                        <div style="position:absolute; text-align:center;">
+                            <div style="font-size:1.35rem; font-weight:800; color:#ffffff; line-height:1.05;">{formatar_num_br(score_ring, 0)}%</div>
+                            <div style="font-size:0.65rem; color:#94a3b8; font-weight:600;">Curva A</div>
+                        </div>
+                    </div>
+                    <div style="font-size:0.76rem; color:#e2e8f0; font-weight:700; margin-top:6px;">
+                        Disponibilidade Líderes ({formatar_num_br(qtd_giro_a - qtd_giro_a_ruptura)}/{formatar_num_br(qtd_giro_a)})
+                    </div>
+                </div>
+                <div class="bento-card bento-card-cyan">
+                    <div>
+                        <div class="bento-title">
+                            <span>⏳ RISCO FEFO REAL (≤ 90D)</span>
+                            <span style="color:#38bdf8;">Sobra Projetada</span>
+                        </div>
+                        <div class="bento-big-val">{formatar_moeda_br(vlr_sobra_fefo_90d)}</div>
+                        <div class="bento-badge-amber">🔥 {formatar_num_br(falsos_c_count)} Rupturas A  |  🐘 {formatar_num_br(elefantes_count)} Elefantes</div>
+                    </div>
+                    <div class="bento-sub">
+                        Total em lotes ≤ 90d: <strong style="color:#f8fafc;">{formatar_moeda_br(vlr_fefo_90d)}</strong> (descontando giro)
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("---")
+        g_col1, g_col2 = st.columns(2)
+        with g_col1:
+            st.markdown("#### 1. Saúde do Capital Imobilizado por Autonomia de Giro")
+            df_ativos_bi = df_bi[df_bi["saldo_pos"] > 0].copy()
+            if not df_ativos_bi.empty:
+                res_saude_bi = (
+                    df_ativos_bi.groupby("faixa_saude", as_index=False)
+                    .agg(
+                        SKUs=("codigo", "count"),
+                        Capital=("valor_estoque", "sum"),
+                        CMV_Mensal=("cmv_mensal", "sum"),
+                    )
+                    .sort_values("faixa_saude")
+                )
+                res_saude_bi["% Capital"] = (res_saude_bi["Capital"] / max(tot_cap_bi, 1.0)) * 100.0
+                st.bar_chart(
+                    res_saude_bi.set_index("faixa_saude")[["Capital"]],
+                    use_container_width=True,
+                    height=260,
+                )
+                df_saude_exib = res_saude_bi.rename(
+                    columns={
+                        "faixa_saude": "Faixa de Saúde (Autonomia)",
+                        "Capital": "Capital Imobilizado (R$)",
+                        "CMV_Mensal": "Giro Mensal CMV (R$)",
+                    }
+                )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_saude_exib,
+                        formatadores={
+                            "SKUs": formatar_num_br,
+                            "Capital Imobilizado (R$)": formatar_moeda_br,
+                            "Giro Mensal CMV (R$)": formatar_moeda_br,
+                            "% Capital": lambda x: formatar_pct_br(x, 1),
+                        },
+                        colunas_esquerda=["Faixa de Saúde (Autonomia)"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("Nenhum item com saldo positivo no filtro atual.")
+
+        with g_col2:
+            st.markdown("#### 2. Capital Imobilizado vs. Giro Mensal (CMV) por Departamento")
+            res_depto_bi = (
+                df_bi.groupby("departamento", as_index=False)
+                .agg(
+                    SKUs=("codigo", lambda s: int((df_bi.loc[s.index, "saldo_pos"] > 0).sum())),
+                    Capital=("valor_estoque", "sum"),
+                    CMV_Mensal=("cmv_mensal", "sum"),
+                )
+                .sort_values("Capital", ascending=False)
+            )
+            res_depto_bi = res_depto_bi[(res_depto_bi["Capital"] > 0) | (res_depto_bi["CMV_Mensal"] > 0)].copy()
+            if not res_depto_bi.empty:
+                res_depto_bi["Cobertura (Dias)"] = [
+                    round(c / (m / 30.0), 0) if m > 0 else 999.0
+                    for c, m in zip(res_depto_bi["Capital"], res_depto_bi["CMV_Mensal"])
+                ]
+                st.bar_chart(
+                    res_depto_bi.set_index("departamento")[["Capital", "CMV_Mensal"]],
+                    use_container_width=True,
+                    height=260,
+                )
+                df_dep_exib = res_depto_bi.rename(
+                    columns={
+                        "departamento": "Departamento / Linha",
+                        "SKUs": "SKUs c/ Saldo",
+                        "Capital": "Capital Atual (R$)",
+                        "CMV_Mensal": "Giro Mensal CMV (R$)",
+                    }
+                )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_dep_exib,
+                        formatadores={
+                            "SKUs c/ Saldo": formatar_num_br,
+                            "Capital Atual (R$)": formatar_moeda_br,
+                            "Giro Mensal CMV (R$)": formatar_moeda_br,
+                            "Cobertura (Dias)": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else f"{formatar_num_br(x, 0)}d",
+                        },
+                        colunas_esquerda=["Departamento / Linha"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        st.markdown("---")
+        st.markdown("#### 3. Matriz Estratégica 2D (ABC de Estoque × ABC de Giro) & Listas de Ação Imediata")
+        m_col1, m_col2 = st.columns([1.15, 1.85])
+        with m_col1:
+            quadrantes_bi = [
+                (
+                    "🏆 Campeões Saudáveis (Est. A/B × Giro A)",
+                    df_bi["abc_estoque"].isin(["A", "B"]) & (df_bi["abc_giro"] == "A"),
+                    "Manter reposição contínua",
+                ),
+                (
+                    "🔥 Falsos Classe C / Ruptura Líderes (Est. C/Zero × Giro A)",
+                    df_bi["abc_estoque"].isin(["C", "Sem Estoque"]) & (df_bi["abc_giro"] == "A"),
+                    "Compra imediata (perdendo venda)",
+                ),
+                (
+                    "🐘 Elefantes Brancos (Est. A × Giro C/Sem Giro)",
+                    (df_bi["abc_estoque"] == "A") & df_bi["abc_giro"].isin(["C", "Sem Giro"]),
+                    "Travar compra e promocionar",
+                ),
+                (
+                    "📦 Giro Intermediário Equilibrado (Giro B)",
+                    df_bi["abc_giro"] == "B",
+                    "Reposição regular conforme cobertura",
+                ),
+                (
+                    "💤 Cauda Longa s/ Giro (Est. B/C × Sem Giro)",
+                    df_bi["abc_estoque"].isin(["B", "C"]) & (df_bi["abc_giro"] == "Sem Giro"),
+                    "Liquidar gradualmente no balcão",
+                ),
+            ]
+            linhas_quad = []
+            for nome_q, mask_q, acao_q in quadrantes_bi:
+                sub_q = df_bi[mask_q]
+                linhas_quad.append(
+                    {
+                        "Quadrante Estratégico": nome_q,
+                        "SKUs": len(sub_q),
+                        "Capital (R$)": float(sub_q["valor_estoque"].sum()),
+                        "CMV Mensal (R$)": float(sub_q["cmv_mensal"].sum()),
+                        "Ação Recomendada": acao_q,
+                    }
+                )
+            df_quad_exib = pd.DataFrame(linhas_quad)
+            st.dataframe(
+                estilizar_tabela_br(
+                    df_quad_exib,
+                    formatadores={
+                        "SKUs": formatar_num_br,
+                        "Capital (R$)": formatar_moeda_br,
+                        "CMV Mensal (R$)": formatar_moeda_br,
+                    },
+                    colunas_esquerda=["Quadrante Estratégico", "Ação Recomendada"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with m_col2:
+            sub_tab1, sub_tab2, sub_tab3 = st.tabs(
+                [
+                    f"🔥 Top Campeões em Ruptura / Alerta ({formatar_num_br(qtd_giro_a_ruptura)})",
+                    f"🐘 Top Elefantes Brancos Est. A ({formatar_num_br(elefantes_count)})",
+                    "💰 Top 30 Oportunidades de Destravar Caixa",
+                ]
+            )
+            with sub_tab1:
+                df_rup_a = (
+                    df_bi[(df_bi["abc_giro"] == "A") & ((df_bi["saldo_pos"] <= 0) | (df_bi["autonomia_dias"] <= float(lead_bi))) & (~df_bi["codigo"].isin(codigos_em_transito))]
+                    .sort_values("cmv_mensal", ascending=False)
+                    .head(30)
+                )
+                if df_rup_a.empty:
+                    st.success("✅ Todos os produtos da Curva A de Giro estão com cobertura acima do prazo de entrega!")
+                else:
+                    df_rup_exib = df_rup_a[
+                        ["codigo", "descricao", "saldo_atual", "autonomia_dias", "abc_estoque", "cmv_mensal", "custo_unitario"]
+                    ].rename(
+                        columns={
+                            "codigo": "Código",
+                            "descricao": "Descrição",
+                            "saldo_atual": "Saldo Atual",
+                            "autonomia_dias": "Autonomia (d)",
+                            "abc_estoque": "ABC Est.",
+                            "cmv_mensal": "Giro CMV/Mês (R$)",
+                            "custo_unitario": "Custo Unit. (R$)",
+                        }
+                    )
+                    st.dataframe(
+                        estilizar_tabela_br(
+                            df_rup_exib,
+                            formatadores={
+                                "Saldo Atual": formatar_qtd_br,
+                                "Autonomia (d)": lambda x: "Zerado" if pd.notna(x) and float(x) <= 0 else formatar_num_br(x, 1),
+                                "Giro CMV/Mês (R$)": formatar_moeda_br,
+                                "Custo Unit. (R$)": formatar_moeda_br,
+                            },
+                            colunas_esquerda=["Descrição"],
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=250,
+                    )
+            with sub_tab2:
+                df_elef = (
+                    df_bi[(df_bi["abc_estoque"] == "A") & (df_bi["abc_giro"].isin(["C", "Sem Giro"]))]
+                    .sort_values("valor_estoque", ascending=False)
+                    .head(30)
+                )
+                if df_elef.empty:
+                    st.success("✅ Nenhum item Classe A de estoque está parado ou com giro C!")
+                else:
+                    df_elef_exib = df_elef[
+                        ["codigo", "descricao", "saldo_atual", "custo_unitario", "valor_estoque", "abc_giro", "cmv_mensal"]
+                    ].rename(
+                        columns={
+                            "codigo": "Código",
+                            "descricao": "Descrição",
+                            "saldo_atual": "Saldo Atual",
+                            "custo_unitario": "Custo Unit. (R$)",
+                            "valor_estoque": "Capital Parado (R$)",
+                            "abc_giro": "ABC Giro",
+                            "cmv_mensal": "Giro CMV/Mês (R$)",
+                        }
+                    )
+                    st.dataframe(
+                        estilizar_tabela_br(
+                            df_elef_exib,
+                            formatadores={
+                                "Saldo Atual": formatar_qtd_br,
+                                "Custo Unit. (R$)": formatar_moeda_br,
+                                "Capital Parado (R$)": formatar_moeda_br,
+                                "Giro CMV/Mês (R$)": formatar_moeda_br,
+                            },
+                            colunas_esquerda=["Descrição"],
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=250,
+                    )
+            with sub_tab3:
+                df_dest = (
+                    df_bi[df_bi["capital_liberavel"] > 0]
+                    .sort_values("capital_liberavel", ascending=False)
+                    .head(30)
+                )
+                df_dest_exib = df_dest[
+                    ["codigo", "descricao", "saldo_atual", "autonomia_dias", "valor_estoque", "capital_liberavel"]
+                ].rename(
+                    columns={
+                        "codigo": "Código",
+                        "descricao": "Descrição",
+                        "saldo_atual": "Saldo Atual",
+                        "autonomia_dias": "Autonomia (d)",
+                        "valor_estoque": "Estoque Atual (R$)",
+                        "capital_liberavel": f"Excesso >{int(meta_cobertura_bi)}d (R$)",
+                    }
+                )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_dest_exib,
+                        formatadores={
+                            "Saldo Atual": formatar_qtd_br,
+                            "Autonomia (d)": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else formatar_num_br(x, 1),
+                            "Estoque Atual (R$)": formatar_moeda_br,
+                            f"Excesso >{int(meta_cobertura_bi)}d (R$)": formatar_moeda_br,
+                        },
+                        colunas_esquerda=["Descrição"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=250,
+                )
+
+        st.markdown("---")
+        st.markdown("#### 4. Evolução do Patrimônio Diário e Balanço de Entradas (NFs) vs. Saídas (CMV e Faturamento)")
+        ev_col1, ev_col2 = st.columns(2)
+        mapa_custo_bi = dict(zip(df_custos_rel["codigo"], df_custos_rel["custo_unitario"])) if not df_custos_rel.empty else {}
+        with ev_col1:
+            if not df_historico.empty and "data" in df_historico.columns:
+                df_h_bi = df_historico[df_historico["codigo"].isin(cods_escopo_bi)].copy()
+                if not df_h_bi.empty:
+                    df_h_bi["custo_u"] = df_h_bi["codigo"].map(mapa_custo_bi).fillna(0.0)
+                    df_h_bi["val_dia"] = df_h_bi["saldo_geral"].clip(lower=0.0) * df_h_bi["custo_u"]
+                    evol_pat = (
+                        df_h_bi.groupby("data", as_index=False)
+                        .agg(Patrimonio_Estoque=("val_dia", "sum"), SKUs_Ativos=("codigo", "nunique"))
+                        .sort_values("data")
+                    )
+                    st.line_chart(
+                        evol_pat.set_index("data")[["Patrimonio_Estoque"]],
+                        use_container_width=True,
+                        height=230,
+                    )
+            else:
+                st.info("Histórico diário ainda sem datas suficientes para o gráfico de evolução.")
+        with ev_col2:
+            frames_fluxo = []
+            if not df_entradas.empty and "data" in df_entradas.columns:
+                df_e_bi = df_entradas[df_entradas["codigo"].isin(cods_escopo_bi)].copy()
+                if not df_e_bi.empty:
+                    df_e_bi["val_ent"] = df_e_bi["qtd_entrada"] * df_e_bi["codigo"].map(mapa_custo_bi).fillna(0.0)
+                    frames_fluxo.append(df_e_bi.groupby("data", as_index=False)["val_ent"].sum())
+            if not df_saidas.empty and "data" in df_saidas.columns:
+                df_s_bi = df_saidas[df_saidas["codigo"].isin(cods_escopo_bi)].copy()
+                if not df_s_bi.empty:
+                    df_s_bi["val_sai"] = df_s_bi["qtd_saida"] * df_s_bi["codigo"].map(mapa_custo_bi).fillna(0.0)
+                    frames_fluxo.append(df_s_bi.groupby("data", as_index=False)["val_sai"].sum())
+            if frames_fluxo:
+                datas_flx = sorted(
+                    list(
+                        (set(df_entradas["data"].unique()) if not df_entradas.empty else set())
+                        | (set(df_saidas["data"].unique()) if not df_saidas.empty else set())
+                    )
+                )
+                df_flx = pd.DataFrame({"data": [d for d in datas_flx if str(d).strip()]})
+                if not df_entradas.empty:
+                    df_e_bi = df_entradas[df_entradas["codigo"].isin(cods_escopo_bi)].copy()
+                    df_e_bi["Entradas_NF_Custo"] = df_e_bi["qtd_entrada"] * df_e_bi["codigo"].map(mapa_custo_bi).fillna(0.0)
+                    df_flx = df_flx.merge(df_e_bi.groupby("data", as_index=False)["Entradas_NF_Custo"].sum(), on="data", how="left")
+                else:
+                    df_flx["Entradas_NF_Custo"] = 0.0
+                if not df_saidas.empty:
+                    df_s_bi = df_saidas[df_saidas["codigo"].isin(cods_escopo_bi)].copy()
+                    df_s_bi["Saidas_CMV_Custo"] = df_s_bi["qtd_saida"] * df_s_bi["codigo"].map(mapa_custo_bi).fillna(0.0)
+                    df_s_bi["Faturamento_Vendas"] = (
+                        df_s_bi["valor_venda"].fillna(0.0) if "valor_venda" in df_s_bi.columns else 0.0
+                    )
+                    df_flx = df_flx.merge(
+                        df_s_bi.groupby("data", as_index=False).agg(
+                            Saidas_CMV_Custo=("Saidas_CMV_Custo", "sum"),
+                            Faturamento_Vendas=("Faturamento_Vendas", "sum"),
+                        ),
+                        on="data",
+                        how="left",
+                    )
+                else:
+                    df_flx["Saidas_CMV_Custo"] = 0.0
+                    df_flx["Faturamento_Vendas"] = 0.0
+                df_flx = df_flx.fillna(0.0).sort_values("data")
+                cols_chart_flx = (
+                    ["Entradas_NF_Custo", "Saidas_CMV_Custo", "Faturamento_Vendas"]
+                    if float(df_flx["Faturamento_Vendas"].sum()) > 0
+                    else ["Entradas_NF_Custo", "Saidas_CMV_Custo"]
+                )
+                st.bar_chart(
+                    df_flx.set_index("data")[cols_chart_flx],
+                    use_container_width=True,
+                    height=230,
+                )
+            else:
+                st.info("Importe planilhas de Entradas e Saídas na Aba 7 para visualizar o fluxo financeiro diário.")
+
+        st.markdown("---")
+        st.markdown("#### 5. Resultado Comercial Real: Faturamento, Margem Líquida Pós-Impostos & Comparativo Mês a Mês")
+        st.caption(
+            "Cruza o **Valor Total da Proposta** (4ª coluna da planilha de Saídas/Vendas) com o **Custo Unitário C1** e desconta "
+            "a alíquota estimada de impostos sobre vendas (**ICMS, PIS/COFINS, ST**) para revelar a margem real deixada por produto, departamento e mês."
+        )
+        imp_col1, imp_col2 = st.columns([1.2, 2.8])
+        with imp_col1:
+            aliq_imp_dash = st.number_input(
+                "🏛️ Alíquota Média de Impostos s/ Venda (%):",
+                min_value=0.0,
+                max_value=35.0,
+                value=8.0,
+                step=0.5,
+                key="bi_aliq_imposto_vendas",
+                help="Percentual médio de impostos sobre o faturamento (ICMS, PIS/COFINS, ST) para apurar o Lucro Líquido Real.",
+            )
+
+        df_sai_escopo = (
+            df_saidas[df_saidas["codigo"].isin(cods_escopo_bi)].copy()
+            if (df_saidas is not None and not df_saidas.empty)
+            else pd.DataFrame()
+        )
+        df_ent_escopo = (
+            df_entradas[df_entradas["codigo"].isin(cods_escopo_bi)].copy()
+            if (df_entradas is not None and not df_entradas.empty)
+            else pd.DataFrame()
+        )
+
+        if df_sai_escopo.empty and df_ent_escopo.empty:
+            st.info(
+                "💡 Importe suas planilhas de **Saídas / Vendas Diárias** (com a 4ª coluna `Valor Total da Proposta`) na Aba 7 "
+                "para destravar a auditoria de Faturamento Bruto, Margem Líquida Pós-Impostos e o Comparativo Mês a Mês!"
+            )
+        else:
+            if not df_sai_escopo.empty:
+                if "valor_venda" not in df_sai_escopo.columns:
+                    df_sai_escopo["valor_venda"] = 0.0
+                df_sai_escopo["custo_u"] = df_sai_escopo["codigo"].map(mapa_custo_bi).fillna(0.0)
+                df_sai_escopo["cmv_total"] = df_sai_escopo["qtd_saida"] * df_sai_escopo["custo_u"]
+                df_sai_escopo["fat_bruto"] = df_sai_escopo["valor_venda"].fillna(0.0)
+                df_sai_escopo["imposto_est"] = df_sai_escopo["fat_bruto"] * (float(aliq_imp_dash) / 100.0)
+                df_sai_escopo["lucro_bruto"] = df_sai_escopo["fat_bruto"] - df_sai_escopo["cmv_total"]
+                df_sai_escopo["lucro_liquido"] = df_sai_escopo["fat_bruto"] - df_sai_escopo["imposto_est"] - df_sai_escopo["cmv_total"]
+                df_sai_escopo["mes_ano"] = df_sai_escopo["data"].astype(str).str.slice(0, 7)
+            else:
+                df_sai_escopo = pd.DataFrame(
+                    columns=["codigo", "descricao", "qtd_saida", "valor_venda", "data", "custo_u", "cmv_total", "fat_bruto", "imposto_est", "lucro_bruto", "lucro_liquido", "mes_ano"]
+                )
+
+            if not df_ent_escopo.empty:
+                df_ent_escopo["custo_u"] = df_ent_escopo["codigo"].map(mapa_custo_bi).fillna(0.0)
+                df_ent_escopo["compras_nf_custo"] = df_ent_escopo["qtd_entrada"] * df_ent_escopo["custo_u"]
+                df_ent_escopo["mes_ano"] = df_ent_escopo["data"].astype(str).str.slice(0, 7)
+            else:
+                df_ent_escopo = pd.DataFrame(columns=["codigo", "descricao", "qtd_entrada", "data", "custo_u", "compras_nf_custo", "mes_ano"])
+
+            df_sai_com_fat = df_sai_escopo[df_sai_escopo["fat_bruto"] > 0].copy()
+            fat_total_periodo = float(df_sai_com_fat["fat_bruto"].sum())
+            cmv_das_vendas_fat = float(df_sai_com_fat["cmv_total"].sum())
+            imp_total_periodo = float(df_sai_com_fat["imposto_est"].sum())
+            lucro_bruto_periodo = fat_total_periodo - cmv_das_vendas_fat
+            lucro_liq_periodo = fat_total_periodo - imp_total_periodo - cmv_das_vendas_fat
+            margem_bruta_pct = ((lucro_bruto_periodo / fat_total_periodo) * 100.0) if fat_total_periodo > 0 else 0.0
+            margem_liq_pct = ((lucro_liq_periodo / fat_total_periodo) * 100.0) if fat_total_periodo > 0 else 0.0
+            markup_medio_pct = (((fat_total_periodo / cmv_das_vendas_fat) - 1.0) * 100.0) if cmv_das_vendas_fat > 0 else 0.0
+
+            with imp_col2:
+                if fat_total_periodo > 0:
+                    st.info(
+                        f"📈 **Resumo Faturado no Período:** Receita Bruta: **{formatar_moeda_br(fat_total_periodo)}**  |  "
+                        f"CMV (C1): **{formatar_moeda_br(cmv_das_vendas_fat)}**  |  "
+                        f"Impostos ({formatar_num_br(aliq_imp_dash, 1)}%): **{formatar_moeda_br(imp_total_periodo)}**  |  "
+                        f"Lucro Líquido Real: **{formatar_moeda_br(lucro_liq_periodo)} ({formatar_pct_br(margem_liq_pct, 1)})**"
+                    )
+                else:
+                    st.warning(
+                        "ℹ️ As saídas registradas neste filtro ainda não possuem a 4ª coluna (`Valor Total da Proposta` > R$ 0,00). "
+                        "Ao subir planilhas como `Saida venda 12-11-2026.xlsx` na Aba 7, o faturamento e as margens aparecerão aqui automaticamente!"
+                    )
+
+            rm1, rm2, rm3, rm4, rm5 = st.columns(5)
+            rm1.metric(
+                "💵 Faturamento Bruto",
+                formatar_moeda_br(fat_total_periodo),
+                f"{formatar_num_br(df_sai_com_fat['data'].nunique() if not df_sai_com_fat.empty else 0)} dia(s) c/ receita",
+            )
+            rm2.metric(
+                "📦 CMV das Vendas (C1)",
+                formatar_moeda_br(cmv_das_vendas_fat),
+                f"Markup médio: +{formatar_num_br(markup_medio_pct, 1)}%",
+            )
+            rm3.metric(
+                "🏷️ Lucro Bruto Comercial",
+                formatar_moeda_br(lucro_bruto_periodo),
+                f"Margem Bruta: {formatar_pct_br(margem_bruta_pct, 1)}",
+            )
+            rm4.metric(
+                f"🏛️ Impostos ({formatar_num_br(aliq_imp_dash, 1)}%)",
+                formatar_moeda_br(imp_total_periodo),
+                "ICMS + PIS/COFINS + ST",
+            )
+            rm5.metric(
+                "💎 Lucro Líquido Real",
+                formatar_moeda_br(lucro_liq_periodo),
+                f"Margem Líq.: {formatar_pct_br(margem_liq_pct, 1)}",
+                delta_color="normal" if lucro_liq_periodo >= 0 else "inverse",
+            )
+
+            tab_mom, tab_sku_lucro, tab_sku_alerta = st.tabs(
+                [
+                    "📅 Comparativo Mês a Mês (Compras NF × CMV × Faturamento × Lucro)",
+                    "🏆 Top Produtos Campeões de Lucro Líquido",
+                    "⚠️ Auditoria de Margem Baixa ou Negativa Pós-Impostos",
+                ]
+            )
+
+            with tab_mom:
+                meses_todos = sorted(
+                    list(
+                        (set(df_sai_escopo["mes_ano"].unique()) if not df_sai_escopo.empty else set())
+                        | (set(df_ent_escopo["mes_ano"].unique()) if not df_ent_escopo.empty else set())
+                    )
+                )
+                meses_todos = [m for m in meses_todos if str(m).strip() and len(str(m).strip()) >= 7]
+                if not meses_todos:
+                    st.info("Ainda não há meses registrados em Entradas ou Saídas.")
+                else:
+                    df_mom = pd.DataFrame({"mes_ano": meses_todos})
+                    if not df_ent_escopo.empty:
+                        grp_e_m = df_ent_escopo.groupby("mes_ano", as_index=False).agg(
+                            compras_nf=("compras_nf_custo", "sum"),
+                            qtd_ent=("qtd_entrada", "sum"),
+                        )
+                        df_mom = df_mom.merge(grp_e_m, on="mes_ano", how="left")
+                    else:
+                        df_mom["compras_nf"] = 0.0
+                        df_mom["qtd_ent"] = 0.0
+
+                    if not df_sai_escopo.empty:
+                        grp_s_m = df_sai_escopo.groupby("mes_ano", as_index=False).agg(
+                            dias_mov=("data", "nunique"),
+                            qtd_sai=("qtd_saida", "sum"),
+                            cmv_sai=("cmv_total", "sum"),
+                            faturamento=("fat_bruto", "sum"),
+                            impostos=("imposto_est", "sum"),
+                            lucro_bruto=("lucro_bruto", "sum"),
+                            lucro_liq=("lucro_liquido", "sum"),
+                        )
+                        df_mom = df_mom.merge(grp_s_m, on="mes_ano", how="left")
+                    else:
+                        for c_z in ["dias_mov", "qtd_sai", "cmv_sai", "faturamento", "impostos", "lucro_bruto", "lucro_liq"]:
+                            df_mom[c_z] = 0.0
+
+                    df_mom = df_mom.fillna(0.0).sort_values("mes_ano").reset_index(drop=True)
+                    df_mom["margem_bruta_pct"] = [
+                        ((lb / ft) * 100.0) if ft > 0 else 0.0
+                        for lb, ft in zip(df_mom["lucro_bruto"], df_mom["faturamento"])
+                    ]
+                    df_mom["margem_liq_pct"] = [
+                        ((ll / ft) * 100.0) if ft > 0 else 0.0
+                        for ll, ft in zip(df_mom["lucro_liq"], df_mom["faturamento"])
+                    ]
+                    base_cresc = df_mom["faturamento"] if float(df_mom["faturamento"].sum()) > 0 else df_mom["cmv_sai"]
+                    cresc_vals = [0.0]
+                    for idx_m in range(1, len(df_mom)):
+                        ant_v = float(base_cresc.iloc[idx_m - 1])
+                        at_v = float(base_cresc.iloc[idx_m])
+                        cresc_vals.append((((at_v - ant_v) / ant_v) * 100.0) if ant_v > 0 else 0.0)
+                    df_mom["cresc_mom_pct"] = cresc_vals
+
+                    df_mom_exib = df_mom.rename(
+                        columns={
+                            "mes_ano": "Mês/Ano",
+                            "dias_mov": "Dias c/ Saída",
+                            "compras_nf": "Compras NF a Custo (R$)",
+                            "cmv_sai": "CMV das Saídas (R$)",
+                            "faturamento": "Faturamento Bruto (R$)",
+                            "impostos": "Impostos Est. (R$)",
+                            "lucro_bruto": "Lucro Bruto (R$)",
+                            "lucro_liq": "Lucro Líquido Real (R$)",
+                            "margem_bruta_pct": "Margem Bruta (%)",
+                            "margem_liq_pct": "Margem Líquida (%)",
+                            "cresc_mom_pct": "Evolução Mês a Mês (%)",
+                        }
+                    )[
+                        [
+                            "Mês/Ano",
+                            "Dias c/ Saída",
+                            "Compras NF a Custo (R$)",
+                            "CMV das Saídas (R$)",
+                            "Faturamento Bruto (R$)",
+                            "Impostos Est. (R$)",
+                            "Lucro Bruto (R$)",
+                            "Lucro Líquido Real (R$)",
+                            "Margem Bruta (%)",
+                            "Margem Líquida (%)",
+                            "Evolução Mês a Mês (%)",
+                        ]
+                    ]
+                    st.dataframe(
+                        estilizar_tabela_br(
+                            df_mom_exib,
+                            formatadores={
+                                "Dias c/ Saída": formatar_num_br,
+                                "Compras NF a Custo (R$)": formatar_moeda_br,
+                                "CMV das Saídas (R$)": formatar_moeda_br,
+                                "Faturamento Bruto (R$)": formatar_moeda_br,
+                                "Impostos Est. (R$)": formatar_moeda_br,
+                                "Lucro Bruto (R$)": formatar_moeda_br,
+                                "Lucro Líquido Real (R$)": formatar_moeda_br,
+                                "Margem Bruta (%)": lambda x: formatar_pct_br(x, 1),
+                                "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
+                                "Evolução Mês a Mês (%)": lambda x: "-" if (pd.isna(x) or float(x) == 0.0) else formatar_pct_br(x, 1, com_sinal=True),
+                            },
+                            colunas_esquerda=[],
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            with tab_sku_lucro:
+                if df_sai_com_fat.empty:
+                    st.info("Importe uma planilha de Saídas com a 4ª coluna (`Valor Total da Proposta`) para ver o ranking de lucro por produto.")
+                else:
+                    grp_sku_fat = (
+                        df_sai_com_fat.groupby("codigo", as_index=False)
+                        .agg(
+                            descricao=("descricao", "last"),
+                            qtd_vendida=("qtd_saida", "sum"),
+                            custo_u=("custo_u", "last"),
+                            cmv_total=("cmv_total", "sum"),
+                            faturamento=("fat_bruto", "sum"),
+                            impostos=("imposto_est", "sum"),
+                            lucro_bruto=("lucro_bruto", "sum"),
+                            lucro_liq=("lucro_liquido", "sum"),
+                        )
+                    )
+                    grp_sku_fat["preco_medio_venda"] = grp_sku_fat["faturamento"] / grp_sku_fat["qtd_vendida"].replace(0.0, float("nan"))
+                    grp_sku_fat["margem_bruta_pct"] = (grp_sku_fat["lucro_bruto"] / grp_sku_fat["faturamento"]) * 100.0
+                    grp_sku_fat["margem_liq_pct"] = (grp_sku_fat["lucro_liq"] / grp_sku_fat["faturamento"]) * 100.0
+                    top_lucro_df = grp_sku_fat.sort_values("lucro_liq", ascending=False).head(50).reset_index(drop=True)
+                    top_lucro_exib = top_lucro_df.rename(
+                        columns={
+                            "codigo": "Código",
+                            "descricao": "Descrição",
+                            "qtd_vendida": "Qtd. Vendida",
+                            "custo_u": "Custo Unit. C1 (R$)",
+                            "preco_medio_venda": "Preço Médio Venda (R$)",
+                            "faturamento": "Faturamento (R$)",
+                            "cmv_total": "CMV Total (R$)",
+                            "impostos": "Impostos Est. (R$)",
+                            "lucro_liq": "Lucro Líquido Real (R$)",
+                            "margem_bruta_pct": "Margem Bruta (%)",
+                            "margem_liq_pct": "Margem Líquida (%)",
+                        }
+                    )[
+                        [
+                            "Código",
+                            "Descrição",
+                            "Qtd. Vendida",
+                            "Custo Unit. C1 (R$)",
+                            "Preço Médio Venda (R$)",
+                            "Faturamento (R$)",
+                            "CMV Total (R$)",
+                            "Impostos Est. (R$)",
+                            "Lucro Líquido Real (R$)",
+                            "Margem Bruta (%)",
+                            "Margem Líquida (%)",
+                        ]
+                    ]
+                    st.dataframe(
+                        estilizar_tabela_br(
+                            top_lucro_exib,
+                            formatadores={
+                                "Qtd. Vendida": formatar_qtd_br,
+                                "Custo Unit. C1 (R$)": formatar_moeda_br,
+                                "Preço Médio Venda (R$)": formatar_moeda_br,
+                                "Faturamento (R$)": formatar_moeda_br,
+                                "CMV Total (R$)": formatar_moeda_br,
+                                "Impostos Est. (R$)": formatar_moeda_br,
+                                "Lucro Líquido Real (R$)": formatar_moeda_br,
+                                "Margem Bruta (%)": lambda x: formatar_pct_br(x, 1),
+                                "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
+                            },
+                            colunas_esquerda=["Descrição"],
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=300,
+                    )
+                    st.download_button(
+                        label="📥 Baixar Ranking Completo de Rentabilidade por Produto (.xlsx)",
+                        data=gerar_excel_relatorio(top_lucro_exib, "Rentabilidade_SKUs"),
+                        file_name=f"Rentabilidade_Real_Esteio_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_rentabilidade_skus_bi",
+                    )
+
+            with tab_sku_alerta:
+                if df_sai_com_fat.empty:
+                    st.info("Importe uma planilha de Saídas com a 4ª coluna (`Valor Total da Proposta`) para auditar margens comprimidas.")
+                else:
+                    df_alerta_mg = grp_sku_fat[(grp_sku_fat["custo_u"] > 0) & (grp_sku_fat["margem_liq_pct"] < 10.0)].sort_values(
+                        "lucro_liq", ascending=True
+                    ).reset_index(drop=True)
+                    if df_alerta_mg.empty:
+                        st.success(f"✅ Excelente! Nenhum produto vendido com custo cadastrado teve margem líquida inferior a 10% (após descontar {formatar_num_br(aliq_imp_dash, 1)}% de impostos).")
+                    else:
+                        df_alerta_mg["status_margem"] = [
+                            "🔴 Prejuízo Líquido (Abaixo de Custo + Impostos)" if float(m) < 0.0 else "🟠 Margem Comprimida (< 10% Líq.)"
+                            for m in df_alerta_mg["margem_liq_pct"]
+                        ]
+                        df_alerta_exib = df_alerta_mg.rename(
+                            columns={
+                                "codigo": "Código",
+                                "descricao": "Descrição",
+                                "status_margem": "Status de Margem",
+                                "qtd_vendida": "Qtd. Vendida",
+                                "custo_u": "Custo Unit. C1 (R$)",
+                                "preco_medio_venda": "Preço Praticado (R$)",
+                                "faturamento": "Faturamento (R$)",
+                                "lucro_liq": "Resultado Líquido (R$)",
+                                "margem_liq_pct": "Margem Líquida (%)",
+                            }
+                        )[
+                            [
+                                "Código",
+                                "Descrição",
+                                "Status de Margem",
+                                "Qtd. Vendida",
+                                "Custo Unit. C1 (R$)",
+                                "Preço Praticado (R$)",
+                                "Faturamento (R$)",
+                                "Resultado Líquido (R$)",
+                                "Margem Líquida (%)",
+                            ]
+                        ]
+                        st.dataframe(
+                            estilizar_tabela_br(
+                                df_alerta_exib,
+                                formatadores={
+                                    "Qtd. Vendida": formatar_qtd_br,
+                                    "Custo Unit. C1 (R$)": formatar_moeda_br,
+                                    "Preço Praticado (R$)": formatar_moeda_br,
+                                    "Faturamento (R$)": formatar_moeda_br,
+                                    "Resultado Líquido (R$)": formatar_moeda_br,
+                                    "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
+                                },
+                                colunas_esquerda=["Descrição", "Status de Margem"],
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=280,
+                        )
 
 # ------------------------------------------------------------------------------
 # ABA 1: CENTRAL DE IMPORTAÇÃO SEGURA E DOWNLOAD DO BANCO DE DADOS
@@ -2142,10 +3760,11 @@ with aba1:
         st.markdown(
             """
             <div class="glass-card">
-                <strong>3. Saídas / Vendas por Data (3 colunas)</strong><br><br>
+                <strong>3. Saídas / Vendas por Data (3 ou 4 col.)</strong><br><br>
                 <span class="pill-tag">Código</span>
                 <span class="pill-tag">Descrição</span>
-                <span class="pill-tag">Quantidade</span>
+                <span class="pill-tag">Qtd.</span>
+                <span class="pill-tag">Valor Proposta (Opc.)</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2468,9 +4087,14 @@ with aba1:
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
                         )
                         modo_sai_str = "somadas ao dia" if somar_saidas_mesmo_dia else "gravadas"
+                        str_fat_sai = (
+                            f" | Faturamento Bruto: {formatar_moeda_br(info_sai['soma_valor_venda'])}"
+                            if info_sai.get("soma_valor_venda", 0.0) > 0
+                            else ""
+                        )
                         mensagens_auditoria_upload.append(
                             f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['total_itens'])} SKUs {modo_sai_str} "
-                            f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.)."
+                            f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.{str_fat_sai})."
                         )
                         if info_sai.get("qtd_codigos_repetidos", 0) > 0:
                             teve_alerta = True
@@ -2540,6 +4164,20 @@ with aba1:
                             df_atual_memoria=df_entradas_bruto,
                         )
                         abas_ja_gravadas.append("entradas_diarias")
+                        if not df_pedidos_transito.empty:
+                            df_ent_comb_temp = pd.concat([df_entradas_bruto, novas_entradas], ignore_index=True)
+                            df_trans_pos_nf, cods_desp_sync, _ = depurar_pedidos_transito_auto_despertar(
+                                df_pedidos_transito, df_ent_comb_temp
+                            )
+                            if cods_desp_sync:
+                                gravar_aba_pequena_gsheets(
+                                    planilha_gsheets, "pedidos_transito", df_trans_pos_nf, permitir_vazio=True
+                                )
+                                abas_ja_gravadas.append("pedidos_transito")
+                                mensagens_auditoria_upload.append(
+                                    f"🔔 **Auto-Despertar ('Já Comprei'):** {formatar_num_br(len(cods_desp_sync))} produto(s) "
+                                    f"que estavam ocultos em trânsito chegaram nesta NF de Entrada e voltaram automaticamente ao painel!"
+                                )
                     if novas_saidas is not None:
                         gravar_aba_incremental_por_data_gsheets(
                             planilha_gsheets,
@@ -2614,9 +4252,19 @@ with aba1:
 with aba2:
     st.markdown("### 🛒 Sugestão de Compras, Radar de Ruptura, Pico Sazonal & Cotação")
     st.caption(
-        "Cruza automaticamente Estoque + Entradas (NF) + Saídas/Vendas por data (capturando itens que entram e vendem no mesmo dia "
-        "e consumo de fabricação de ração), destaca Ruptura Iminente e Pico Sazonal, e exporta a planilha de cotação com fórmulas vivas."
+        "Cruza automaticamente Estoque + Entradas (NF) + Saídas/Vendas por data, destaca Ruptura Iminente e Pico Sazonal, "
+        "permite marcar produtos como **'Já Comprei'** (ocultando-os por 15 dias com **Auto-Despertar** assim que entrarem na NF) "
+        "e exporta a planilha de cotação com fórmulas vivas."
     )
+    if "msg_transito_aba2" in st.session_state:
+        st.success(st.session_state.pop("msg_transito_aba2"))
+    desp_rec = estado.get("despertados_nf_recente", [])
+    if desp_rec:
+        st.info(
+            f"🔔 **Auto-Despertar Automático:** **{formatar_num_br(len(desp_rec))} produto(s)** que estavam ocultos em "
+            f"*'Já Comprei'* apareceram em planilha recente de **Entradas (NF)** e voltaram automaticamente ao monitoramento!"
+        )
+
     with st.expander("📋 Importar Planilha de Produtos para Cotação Direcionada (Opcional)", expanded=False):
         arq_lista_cotacao = st.file_uploader(
             "Subir planilha com Código e Nome dos produtos (.xlsx, .xls ou .csv)",
@@ -2642,7 +4290,7 @@ with aba2:
         placeholder="Ex: tigre  |  roda d'água, gaxeta  |  joelho 25",
         help="Busca inteligente: ignora acentos/apóstrofos (encontra RODA D'AGUA, RODA DAGUA e RODA D AGUA), aceita palavras fora de ordem e múltiplos termos separados por vírgula.",
     )
-    c_op1, c_op2, c_op3, c_op4 = st.columns(4)
+    c_op1, c_op2, c_op3, c_op4, c_op5 = st.columns(5)
     with c_op1:
         incluir_zerados_com_giro = st.checkbox(
             "Incluir Saldo = 0 c/ giro",
@@ -2666,6 +4314,19 @@ with aba2:
             value=False,
             help="Filtra somente os produtos que tiveram queda brusca recente para você conferir se foi venda real ou ajuste no Siagri.",
         )
+    with c_op5:
+        mostrar_comprados_transito = st.checkbox(
+            f"🚚 Mostrar 'Já Comprei' ({formatar_num_br(len(codigos_em_transito))})",
+            value=False,
+            help="Por padrão, produtos marcados como 'Já Comprei' ficam ocultos por 15 dias (ou até aparecerem na planilha de Entradas NF). Marque para exibi-los na tabela.",
+        )
+
+    mapa_silenciar_ate = (
+        dict(zip(df_pedidos_transito["codigo"], df_pedidos_transito["silenciar_ate"]))
+        if not df_pedidos_transito.empty
+        else {}
+    )
+
     df_est_fonte = df_estoque_bruto if arq_lista_cotacao is not None else df_estoque
     df_hist_fonte = df_historico_bruto if arq_lista_cotacao is not None else df_historico
     df_ent_fonte = df_entradas_bruto if arq_lista_cotacao is not None else df_entradas
@@ -2673,7 +4334,7 @@ with aba2:
     df_base_fonte = df_base_vendas if arq_lista_cotacao is not None else df_base_vendas_rel
     df_custos_fonte = df_custos if arq_lista_cotacao is not None else df_custos_rel
     if df_est_fonte.empty and df_base_fonte.empty and arq_lista_cotacao is None:
-        st.info("Importe a Planilha de Estoque na Aba 1 para calcular o giro e as sugestões de compra.")
+        st.info("Importe a Planilha de Estoque na Aba 7 (Importação & Backup) para calcular o giro e as sugestões de compra.")
     else:
         df_base_giro, dias_hist_janela, peso_hist = calcular_motor_giro_sazonal(
             df_estoque=df_est_fonte,
@@ -2737,6 +4398,11 @@ with aba2:
                 f"**não foram encontrados** em nenhuma base do ERP (Estoque, Custos ou Vendas) e aparecem "
                 f"com saldo 0: {lista_str}{sufixo}. Verifique se os códigos estão corretos antes de fechar o pedido."
             )
+
+        # Oculta produtos marcados como 'Já Comprei / Em Trânsito' (15 dias ou até NF de Entrada)
+        if codigos_em_transito and (not mostrar_comprados_transito) and (arq_lista_cotacao is None):
+            df_calc = df_calc[~df_calc["codigo"].isin(codigos_em_transito)].copy()
+
         fator_mult = 1.0 + (fator_sazonal / 100.0)
         df_calc["giro_diario"] = (df_calc["giro_ponderado"] * fator_mult).clip(lower=0.0)
         df_calc["giro_diario_sem_pico"] = (df_calc["giro_ponderado_sem_pico"] * fator_mult).clip(lower=0.0)
@@ -2772,8 +4438,13 @@ with aba2:
 
         def _avaliar_ruptura_pico_e_sugestao(r):
             cod = str(r["codigo"])
+            prefixo_tr = ""
+            if cod in mapa_silenciar_ate:
+                dt_s_fmt = pd.to_datetime(mapa_silenciar_ate[cod], format="%Y-%m-%d", errors="coerce")
+                str_ate = dt_s_fmt.strftime("%d/%m") if pd.notna(dt_s_fmt) else str(mapa_silenciar_ate[cod])
+                prefixo_tr = f"🚚 JÁ COMPRADO (Até {str_ate}) | "
             if cod not in cods_conhecidos_erp:
-                return False, False, "⚠️ Não Cadastrado no ERP", 0.0
+                return False, False, prefixo_tr + "⚠️ Não Cadastrado no ERP", 0.0
             queda_pico = float(r.get("queda_pico_recente", 0.0))
             saldo_antes = float(r.get("saldo_antes_pico", 0.0))
             saldo_at = float(r.get("saldo_atual", 0.0))
@@ -2814,32 +4485,39 @@ with aba2:
             if eh_pico and eh_ruptura:
                 aut_str = "Zerado" if saldo_at <= 0 else f"{formatar_num_br(autonomia, 1)}d"
                 txt_alerta = (
-                    f"🔥 Ruptura ({aut_str}) + 🚨 Pico: -{formatar_qtd_br(queda_pico)} un. ({dt_pico})"
+                    prefixo_tr + f"🔥 Ruptura ({aut_str}) + 🚨 Pico: -{formatar_qtd_br(queda_pico)} un. ({dt_pico})"
                 )
                 return True, True, txt_alerta, sug_ref
             if eh_pico:
                 txt_alerta = (
-                    f"🚨 Pico: -{formatar_qtd_br(queda_pico)} un. ({dt_pico}) | "
+                    prefixo_tr + f"🚨 Pico: -{formatar_qtd_br(queda_pico)} un. ({dt_pico}) | "
                     f"Padrão: {formatar_qtd_br(sug_padrao)}"
                 )
                 return True, False, txt_alerta, sug_ref
             if eh_ruptura:
                 if saldo_at <= 0:
-                    txt_alerta = f"🔥 Ruptura: Zerado c/ Giro (Entrega: {lead_time}d)"
+                    txt_alerta = prefixo_tr + f"🔥 Ruptura: Zerado c/ Giro (Entrega: {lead_time}d)"
                 else:
-                    txt_alerta = f"🔥 Ruptura: Dura {formatar_num_br(autonomia, 1)}d (≤ {lead_time}d Entrega)"
-                return False, True, txt_alerta, sug_padrao
+                    txt_alerta = prefixo_tr + f"🔥 Ruptura: Dura {formatar_num_br(autonomia, 1)}d (≤ {lead_time}d Entrega)"
+                return False, True, txt_alerta, sug_ref
             if alerta_nf:
-                return False, False, alerta_nf, sug_padrao
+                return False, False, prefixo_tr + alerta_nf, sug_padrao
             if saida_ult > 0:
-                return False, False, f"✔️ -{formatar_qtd_br(saida_ult)} un. ({dt_ult})", sug_padrao
-            return False, False, "➖ Sem saída recente", sug_padrao
+                return False, False, prefixo_tr + f"✔️ -{formatar_qtd_br(saida_ult)} un. ({dt_ult})", sug_padrao
+            return False, False, prefixo_tr + "➖ Sem saída recente", sug_padrao
 
-        res_analise = df_calc.apply(_avaliar_ruptura_pico_e_sugestao, axis=1)
-        df_calc["tem_pico"] = [x[0] for x in res_analise]
-        df_calc["tem_ruptura"] = [x[1] for x in res_analise]
-        df_calc["alerta_saida_recente"] = [x[2] for x in res_analise]
-        df_calc["sugestao_reforcada"] = [x[3] for x in res_analise]
+        if not df_calc.empty:
+            res_analise = df_calc.apply(_avaliar_ruptura_pico_e_sugestao, axis=1)
+            df_calc["tem_pico"] = [x[0] for x in res_analise]
+            df_calc["tem_ruptura"] = [x[1] for x in res_analise]
+            df_calc["alerta_saida_recente"] = [x[2] for x in res_analise]
+            df_calc["sugestao_reforcada"] = [x[3] for x in res_analise]
+        else:
+            df_calc["tem_pico"] = pd.Series(dtype=bool)
+            df_calc["tem_ruptura"] = pd.Series(dtype=bool)
+            df_calc["alerta_saida_recente"] = pd.Series(dtype=str)
+            df_calc["sugestao_reforcada"] = pd.Series(dtype=float)
+
         if usar_sugestao_reforcada_pico:
             df_calc["sugestao_compra"] = df_calc["sugestao_reforcada"]
         else:
@@ -2851,7 +4529,7 @@ with aba2:
             s = re.sub(r"[^a-z0-9]+", " ", s).strip()
             return s
 
-        if filtro_busca and filtro_busca.strip():
+        if filtro_busca and filtro_busca.strip() and not df_calc.empty:
             grupos_busca = [
                 _canonizar_texto_busca(g)
                 for g in re.split(r"[;,]+", filtro_busca)
@@ -2869,10 +4547,10 @@ with aba2:
                         mask_grp = mask_grp & serie_alvo.str.contains(re.escape(pal), na=False)
                     mask_total = mask_total | mask_grp
                 df_calc = df_calc[mask_total].copy()
-        qtd_total_ruptura = int(df_calc["tem_ruptura"].sum())
-        qtd_total_picos = int(df_calc["tem_pico"].sum())
-        qtd_nf_pendente = int((df_calc["alerta_nf_nao_refletida"] != "").sum())
-        if qtd_total_ruptura > 0 or qtd_total_picos > 0 or qtd_nf_pendente > 0:
+        qtd_total_ruptura = int(df_calc["tem_ruptura"].sum()) if not df_calc.empty else 0
+        qtd_total_picos = int(df_calc["tem_pico"].sum()) if not df_calc.empty else 0
+        qtd_nf_pendente = int((df_calc["alerta_nf_nao_refletida"] != "").sum()) if not df_calc.empty else 0
+        if qtd_total_ruptura > 0 or qtd_total_picos > 0 or qtd_nf_pendente > 0 or len(codigos_em_transito) > 0:
             partes_aviso = []
             if qtd_total_ruptura > 0:
                 partes_aviso.append(
@@ -2882,16 +4560,20 @@ with aba2:
                 partes_aviso.append(
                     f"🚨 **{formatar_num_br(qtd_total_picos)} produto(s) com Saída Fora do Padrão (Pico)**"
                 )
+            if len(codigos_em_transito) > 0:
+                partes_aviso.append(
+                    f"🚚 **{formatar_num_br(len(codigos_em_transito))} produto(s) oculto(s) em 'Já Comprei'** (15d ou até NF)"
+                )
             if qtd_nf_pendente > 0:
                 partes_aviso.append(
-                    f"⏳ **{formatar_num_br(qtd_nf_pendente)} produto(s) com NF de Entrada sem reflexo no saldo seguinte** (consumo protegido contra inflação)"
+                    f"⏳ **{formatar_num_br(qtd_nf_pendente)} produto(s) com NF de Entrada sem reflexo no saldo seguinte**"
                 )
             st.info(" | ".join(partes_aviso))
         if filtrar_apenas_ruptura:
             df_calc = df_calc[df_calc["tem_ruptura"] == True].copy()
         if filtrar_apenas_picos:
             df_calc = df_calc[df_calc["tem_pico"] == True].copy()
-        if arq_lista_cotacao is None:
+        if arq_lista_cotacao is None and not df_calc.empty:
             df_calc["_inv_ord"] = df_calc["sugestao_compra"] * df_calc["custo_unitario"]
             df_compras = df_calc.sort_values(
                 ["tem_ruptura", "tem_pico", "_inv_ord", "descricao"],
@@ -2932,179 +4614,665 @@ with aba2:
             help="Quantidade de itens listados em Ruptura Iminente e Saída de Pico.",
         )
         m4.metric(
-            "Peso Histórico vs Base",
-            f"{int(round(peso_hist * 100))}% Hist. / {int(round((1 - peso_hist) * 100))}% Base",
-            help=f"Calculado sobre {dias_hist_janela} dia(s) corridos na janela de {janela_dias} dias.",
+            "🚚 Em Trânsito ('Já Comprei')",
+            f"{formatar_num_br(len(codigos_em_transito))} SKUs (15d / Auto-NF)",
+            help=f"Produtos ocultos temporariamente por {DIAS_PADRAO_SONECA_COMPRA} dias ou até entrarem na NF.",
         )
-        df_exibicao_aba2 = pd.DataFrame(
+
+        col_sel_tudo_c, col_dica_c = st.columns([1.4, 2.6])
+        with col_sel_tudo_c:
+            marcar_todos_compra_aba2 = st.checkbox(
+                f"Selecionar todos os {formatar_num_br(len(df_compras))} itens listados abaixo como 'Já Comprei'",
+                value=False,
+                key="chk_todos_ja_comprei_aba2",
+            )
+        with col_dica_c:
+            st.caption(
+                "💡 **Dica rápida:** Clique na caixinha **'🛒 Já Comprei?'** (1ª coluna da tabela) nos produtos que você acabou de pedir ao fornecedor "
+                "e confirme no botão abaixo da tabela para ocultá-los por **15 dias** (eles voltam sozinhos assim que entrarem na NF)."
+            )
+
+        df_editor_aba2 = pd.DataFrame(
             {
+                "ja_comprei": [bool(marcar_todos_compra_aba2)] * len(df_compras),
                 "Código": df_compras["codigo"].values,
                 "Descrição": df_compras["descricao"].values,
                 "Saída Recente & Alerta": df_compras["alerta_saida_recente"].values,
-                "Saldo Atual": df_compras["saldo_atual"].values,
-                "Vencido ou vencendo (≤60d)": df_compras["vencendo_60d"].values,
-                "Giro Médio/Dia": df_compras["giro_diario"].values,
-                "Autonomia (Dias)": df_compras["autonomia_dias"].values,
-                "Sugestão Sistema": df_compras["sugestao_compra"].values,
-                "Último Custo ERP (R$)": df_compras["custo_unitario"].values,
-                "Total Estimado (R$)": total_item_s.values,
+                "Saldo Atual": [formatar_qtd_br(v) for v in df_compras["saldo_atual"].values],
+                "Vencido ou vencendo (≤60d)": [formatar_qtd_br(v) for v in df_compras["vencendo_60d"].values],
+                "Giro Médio/Dia": [
+                    formatar_num_br(v, 3) if (pd.notna(v) and 0 < float(v) < 0.05) else formatar_num_br(v, 2)
+                    for v in df_compras["giro_diario"].values
+                ],
+                "Autonomia (Dias)": [
+                    "Sem Giro" if (pd.notna(v) and float(v) >= 999.0) else formatar_num_br(v, 1)
+                    for v in df_compras["autonomia_dias"].values
+                ],
+                "Sugestão Sistema": [formatar_qtd_br(v) for v in df_compras["sugestao_compra"].values],
+                "Último Custo ERP (R$)": [formatar_moeda_br(v) for v in df_compras["custo_unitario"].values],
+                "Total Estimado (R$)": [formatar_moeda_br(v) for v in total_item_s.values],
             }
         )
-        st.dataframe(
-            estilizar_tabela_br(
-                df_exibicao_aba2,
-                formatadores={
-                    "Saldo Atual": formatar_qtd_br,
-                    "Vencido ou vencendo (≤60d)": formatar_qtd_br,
-                    "Giro Médio/Dia": lambda x: formatar_num_br(x, 3) if (pd.notna(x) and 0 < float(x) < 0.05) else formatar_num_br(x, 2),
-                    "Autonomia (Dias)": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else formatar_num_br(x, 1),
-                    "Sugestão Sistema": formatar_qtd_br,
-                    "Último Custo ERP (R$)": formatar_moeda_br,
-                    "Total Estimado (R$)": formatar_moeda_br,
-                },
-                colunas_esquerda=["Descrição"],
-            ),
+
+        ed_compras_aba2 = st.data_editor(
+            df_editor_aba2,
             use_container_width=True,
             hide_index=True,
             height=450,
+            key="editor_ja_comprei_aba2",
+            disabled=[
+                "Código",
+                "Descrição",
+                "Saída Recente & Alerta",
+                "Saldo Atual",
+                "Vencido ou vencendo (≤60d)",
+                "Giro Médio/Dia",
+                "Autonomia (Dias)",
+                "Sugestão Sistema",
+                "Último Custo ERP (R$)",
+                "Total Estimado (R$)",
+            ],
+            column_config={
+                "ja_comprei": st.column_config.CheckboxColumn(
+                    "🛒 Já Comprei?",
+                    help="Marque este produto para ocultá-lo da lista e dos alertas por 15 dias (ou até a NF de Entrada chegar)",
+                    default=False,
+                ),
+            },
         )
-        if not df_completo_13_cols.empty:
-            st.download_button(
-                label="📥 Baixar Planilha de Sugestão & Cotação (.xlsx com 13 Colunas Centralizadas e Fórmulas Vivas)",
-                data=gerar_excel_com_formulas_cotacao(df_completo_13_cols),
-                file_name=f"Cotacao_Compras_Esteio_{janela_dias}d_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+        indices_marcados_compra = ed_compras_aba2.index[ed_compras_aba2["ja_comprei"] == True].tolist()
+        qtd_marcados_compra = len(indices_marcados_compra)
+
+        b_act_col1, b_act_col2 = st.columns([1.3, 1.3])
+        with b_act_col1:
+            if st.button(
+                f"🚚 Ocultar Marcados como 'Já Comprei' por 15 dias ({formatar_num_br(qtd_marcados_compra)} selecionado(s))",
                 type="primary",
                 use_container_width=True,
+                disabled=(qtd_marcados_compra == 0),
+            ):
+                with st.spinner("Registrando pedido em trânsito no Google Sheets..."):
+                    try:
+                        hoje_str_c = hoje_br().strftime("%Y-%m-%d")
+                        sil_ate_str_c = (hoje_br() + timedelta(days=DIAS_PADRAO_SONECA_COMPRA)).strftime("%Y-%m-%d")
+                        df_sel_c = df_compras.iloc[indices_marcados_compra].copy()
+                        novos_transito = pd.DataFrame(
+                            {
+                                "codigo": df_sel_c["codigo"].values,
+                                "descricao": df_sel_c["descricao"].values,
+                                "qtd_comprada": df_sel_c["sugestao_compra"].values,
+                                "data_compra": hoje_str_c,
+                                "silenciar_ate": sil_ate_str_c,
+                            }
+                        )
+                        df_trans_atualizado = (
+                            pd.concat([df_pedidos_transito, novos_transito], ignore_index=True)
+                            .drop_duplicates(subset=["codigo"], keep="last")
+                            .reset_index(drop=True)
+                        )
+                        gravar_aba_pequena_gsheets(
+                            planilha_gsheets, "pedidos_transito", df_trans_atualizado, permitir_vazio=True
+                        )
+                        st.session_state.pop("bkp_db_xlsx_bytes", None)
+                        st.session_state.pop("backup_zip_bytes", None)
+                        carregar_estado_completo.clear()
+                        st.session_state["msg_transito_aba2"] = (
+                            f"✅ {formatar_num_br(qtd_marcados_compra)} produto(s) marcado(s) como 'Já Comprei'! "
+                            f"Eles ficarão ocultos por {DIAS_PADRAO_SONECA_COMPRA} dias (até {(hoje_br() + timedelta(days=DIAS_PADRAO_SONECA_COMPRA)).strftime('%d/%m/%Y')}) "
+                            f"ou despertarão automaticamente assim que aparecerem na planilha de Entradas (NF)."
+                        )
+                        st.rerun()
+                    except Exception as e_tr:
+                        st.error(f"❌ Erro ao salvar produtos em trânsito: {e_tr}")
+
+        with b_act_col2:
+            if not df_completo_13_cols.empty:
+                st.download_button(
+                    label="📥 Baixar Planilha de Sugestão & Cotação (.xlsx com 13 Colunas e Fórmulas Vivas)",
+                    data=gerar_excel_com_formulas_cotacao(df_completo_13_cols),
+                    file_name=f"Cotacao_Compras_Esteio_{janela_dias}d_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+    with st.expander(
+        f"🚚 Gerenciar Produtos Marcados como 'Já Comprei / Em Trânsito' ({formatar_num_br(len(df_pedidos_transito))} ativo(s) — 15 dias ou até NF)",
+        expanded=False,
+    ):
+        if df_pedidos_transito.empty:
+            st.success("Nenhum produto está silenciado como 'Já Comprei' no momento.")
+        else:
+            st.caption(
+                "Estes produtos foram marcados como comprados e estão temporariamente silenciados na Aba 2. "
+                "Eles voltam sozinhos após 15 dias ou assim que o código entrar numa planilha de Entradas (NF) na Aba 7. "
+                "Se marcou algum por engano, selecione abaixo para devolvê-lo imediatamente:"
             )
+            df_tr_view = df_pedidos_transito.copy()
+            hoje_ts_tr = pd.Timestamp(hoje_br())
+            dt_sil_tr = converter_datas_deterministico(df_tr_view["silenciar_ate"])
+            dt_comp_tr = converter_datas_deterministico(df_tr_view["data_compra"])
+            dias_rest_tr = (dt_sil_tr - hoje_ts_tr).dt.days.fillna(0).astype(int)
+            df_tr_view[" data_compra_fmt"] = dt_comp_tr.dt.strftime("%d/%m/%Y").fillna(df_tr_view["data_compra"])
+            df_tr_view["silenciar_ate_fmt"] = dt_sil_tr.dt.strftime("%d/%m/%Y").fillna(df_tr_view["silenciar_ate"])
+            df_tr_view["dias_restantes"] = [f"{max(int(d), 0)} dia(s)" for d in dias_rest_tr]
+
+            df_tr_ed_input = pd.DataFrame(
+                {
+                    "devolver": [False] * len(df_tr_view),
+                    "Código": df_tr_view["codigo"].values,
+                    "Descrição": df_tr_view["descricao"].values,
+                    "Qtd. Sugerida na Compra": [formatar_qtd_br(v) for v in df_tr_view["qtd_comprada"].values],
+                    "Marcado em": df_tr_view[" data_compra_fmt"].values,
+                    "Oculto até (15d)": df_tr_view["silenciar_ate_fmt"].values,
+                    "Prazo Restante": df_tr_view["dias_restantes"].values,
+                }
+            )
+            ed_transito_gestao = st.data_editor(
+                df_tr_ed_input,
+                hide_index=True,
+                use_container_width=True,
+                key="editor_gestao_transito_aba2",
+                disabled=[
+                    "Código",
+                    "Descrição",
+                    "Qtd. Sugerida na Compra",
+                    "Marcado em",
+                    "Oculto até (15d)",
+                    "Prazo Restante",
+                ],
+                column_config={
+                    "devolver": st.column_config.CheckboxColumn(
+                        "Devolver?",
+                        help="Marque para remover do modo 'Já Comprei' e voltar a exibir na lista de compras",
+                        default=False,
+                    )
+                },
+            )
+            sel_devolver_tr = ed_transito_gestao[ed_transito_gestao["devolver"] == True]
+            bt_tr1, bt_tr2 = st.columns(2)
+            with bt_tr1:
+                btn_dev_marcados = st.button(
+                    f"↩️ Devolver Marcados para Lista de Compras ({formatar_num_br(len(sel_devolver_tr))})",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=sel_devolver_tr.empty,
+                )
+            with bt_tr2:
+                btn_dev_todos = st.button(
+                    "🔄 Devolver Todos os Itens em Trânsito",
+                    use_container_width=True,
+                )
+            if btn_dev_marcados or btn_dev_todos:
+                with st.spinner("Atualizando lista de trânsito no Google Sheets..."):
+                    try:
+                        if btn_dev_todos:
+                            df_tr_restante = padronizar_dataframe(pd.DataFrame(), "pedidos_transito")
+                        else:
+                            cods_dev = set(sel_devolver_tr["Código"].unique())
+                            df_tr_restante = df_pedidos_transito[~df_pedidos_transito["codigo"].isin(cods_dev)].copy()
+                        gravar_aba_pequena_gsheets(
+                            planilha_gsheets, "pedidos_transito", df_tr_restante, permitir_vazio=True
+                        )
+                        st.session_state.pop("bkp_db_xlsx_bytes", None)
+                        st.session_state.pop("backup_zip_bytes", None)
+                        carregar_estado_completo.clear()
+                        st.session_state["msg_transito_aba2"] = "✅ Produto(s) devolvido(s) para a lista ativa de compras!"
+                        st.rerun()
+                    except Exception as e_dev:
+                        st.error(f"❌ Erro ao devolver produtos: {e_dev}")
 
 # ------------------------------------------------------------------------------
-# ABA 3: RADAR DE VALIDADES (FEFO DETERMINÍSTICO E CENTRALIZADO)
+# ABA 3: RADAR DE VALIDADES (FEFO) & CONSULTOR IA DE PROMOÇÕES ANTI-PERDA
 # ------------------------------------------------------------------------------
 with aba3:
-    st.markdown("### ⏳ Radar de Validades — Gestão FEFO (Primeiro que Vence, Primeiro que Sai)")
+    st.markdown("### ⏳ Radar de Validades (FEFO) & Consultor Inteligente de Promoções")
+    st.caption(
+        "Cruza a validade de cada lote com o **Giro Diário Real** do produto para descobrir quais lotes vão escoar sozinhos "
+        "e quais deixarão **sobra no vencimento**, sugerindo descontos progressivos protegidos contra impostos (ICMS, PIS/COFINS, ST) "
+        "e gerando o texto comercial pronto para WhatsApp e para a equipe de vendas."
+    )
     if df_estoque.empty:
-        st.info("Importe a Planilha de Estoque na Aba 1 para monitorar os lotes e validades.")
+        st.info("Importe a Planilha de Estoque na Aba 7 (Importação & Backup) para monitorar os lotes e validades.")
     else:
-        df_fefo = df_estoque[df_estoque["saldo_lote"] > 0].copy()
-        if not df_custos.empty:
-            df_fefo = df_fefo.merge(df_custos[["codigo", "custo_unitario"]], on="codigo", how="left")
-            df_fefo["custo_unitario"] = df_fefo["custo_unitario"].fillna(0.0)
-        else:
-            df_fefo["custo_unitario"] = 0.0
-        df_fefo["dt_validade"] = converter_datas_deterministico(df_fefo["validade"])
-        hoje_ts = pd.Timestamp(hoje_br())
-        df_fefo["dias_para_vencer"] = (df_fefo["dt_validade"] - hoje_ts).dt.days
-        df_fefo["valor_em_risco"] = df_fefo["saldo_lote"] * df_fefo["custo_unitario"]
-
-        def classificar_fefo(dias):
-            if pd.isna(dias):
-                return "⚪ Sem Data de Validade"
-            if dias < 0:
-                return "🔴 1. Vencido"
-            if dias <= 30:
-                return "🟠 2. Crítico (0 a 30 dias)"
-            if dias <= 60:
-                return "🟡 3. Atenção (31 a 60 dias)"
-            if dias <= 90:
-                return "🔵 4. Preventivo (61 a 90 dias)"
-            return "🟢 5. Seguro (> 90 dias)"
-
-        df_fefo["status_fefo"] = df_fefo["dias_para_vencer"].apply(classificar_fefo)
-        v1, v2, v3, v4 = st.columns(4)
-        vlr_vencido = df_fefo.loc[df_fefo["status_fefo"] == "🔴 1. Vencido", "valor_em_risco"].sum()
-        vlr_30d = df_fefo.loc[df_fefo["status_fefo"] == "🟠 2. Crítico (0 a 30 dias)", "valor_em_risco"].sum()
-        vlr_60d = df_fefo.loc[df_fefo["status_fefo"] == "🟡 3. Atenção (31 a 60 dias)", "valor_em_risco"].sum()
-        vlr_90d = df_fefo.loc[df_fefo["status_fefo"] == "🔵 4. Preventivo (61 a 90 dias)", "valor_em_risco"].sum()
-        v1.metric("🔴 Vencidos", formatar_moeda_br(vlr_vencido))
-        v2.metric("🟠 Vencendo em 30 dias", formatar_moeda_br(vlr_30d))
-        v3.metric("🟡 Vencendo em 31-60 dias", formatar_moeda_br(vlr_60d))
-        v4.metric("🔵 Vencendo em 61-90 dias", formatar_moeda_br(vlr_90d))
-        opcoes_status = sorted(df_fefo["status_fefo"].unique())
-        padrao_status = [s for s in opcoes_status if not s.startswith("🟢")] or opcoes_status
-        filtro_status = st.multiselect(
-            "Filtrar faixas de vencimento:",
-            options=opcoes_status,
-            default=padrao_status,
-        )
-        df_fefo_view = df_fefo[df_fefo["status_fefo"].isin(filtro_status)].sort_values(
-            "dias_para_vencer", ascending=True
-        )
-        df_fefo_exibicao = df_fefo_view[
-            [
-                "status_fefo",
-                "codigo",
-                "descricao",
-                "lote",
-                "validade",
-                "dias_para_vencer",
-                "saldo_geral",
-                "saldo_lote",
-                "valor_em_risco",
-            ]
-        ].rename(
-            columns={
-                "status_fefo": "Faixa FEFO",
-                "codigo": "Código",
-                "descricao": "Descrição",
-                "lote": "Código do Lote",
-                "validade": "Validade",
-                "dias_para_vencer": "Dias p/ Vencer",
-                "saldo_geral": "Saldo Geral (SKU)",
-                "saldo_lote": "Saldo do Lote",
-                "valor_em_risco": "Capital no Lote (R$)",
-            }
-        )
-        st.dataframe(
-            estilizar_tabela_br(
-                df_fefo_exibicao,
-                formatadores={
-                    "Dias p/ Vencer": lambda x: "-" if pd.isna(x) else formatar_num_br(x, 0),
-                    "Saldo Geral (SKU)": formatar_qtd_br,
-                    "Saldo do Lote": formatar_qtd_br,
-                    "Capital no Lote (R$)": formatar_moeda_br,
-                },
-                colunas_esquerda=["Descrição"],
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-        if not df_fefo_exibicao.empty:
-            st.download_button(
-                label="📥 Baixar Relatório FEFO (.xlsx)",
-                data=gerar_excel_relatorio(df_fefo_exibicao, "Radar_FEFO"),
-                file_name=f"Radar_Validades_FEFO_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        c_p1, c_p2, c_p3, c_p4 = st.columns([1.2, 1.1, 1.1, 1.4])
+        with c_p1:
+            escopo_fefo = st.selectbox(
+                "🏢 Escopo de Produtos:",
+                options=[
+                    "🏪 Apenas Loja Varejo (Ocultar MP Fábrica)",
+                    "🏢 Todos os Produtos (Loja + Fábrica MP)",
+                    "🏭 Apenas Fábrica / Matéria-Prima (MP)",
+                ],
+                index=0,
+                key="fefo_escopo_sel",
+                help="Por padrão foca nos produtos de prateleira/varejo onde cabem promoções comerciais.",
+            )
+        with c_p2:
+            janela_giro_fefo = st.selectbox(
+                "📊 Janela de Giro Base:",
+                options=[30, 60, 90, 120, 180],
+                index=3,
+                key="fefo_janela_giro",
+                help="Período usado para calcular a velocidade de venda diária de cada produto até a data de vencimento.",
+            )
+        with c_p3:
+            aliquota_imp_fefo = st.number_input(
+                "🏛️ Impostos s/ Venda (%):",
+                min_value=0.0,
+                max_value=35.0,
+                value=8.0,
+                step=0.5,
+                key="fefo_aliq_imp",
+                help="Alíquota média estimada (ICMS, PIS/COFINS, ST) para calcular o Preço Piso de Equilíbrio e nunca sugerir promoção com prejuízo.",
+            )
+        with c_p4:
+            margem_ref_fefo = st.number_input(
+                "🏷️ Margem Comercial Padrão (%):",
+                min_value=10.0,
+                max_value=65.0,
+                value=28.0,
+                step=1.0,
+                key="fefo_margem_ref",
+                help="Usada para estimar o preço normal de prateleira quando o produto ainda não possui venda faturada registrada.",
             )
 
+        df_giro_fefo_base, _, _ = calcular_motor_giro_sazonal(
+            df_estoque=df_estoque,
+            df_historico=df_historico,
+            df_base_vendas=df_base_vendas_rel,
+            df_custos=df_custos_rel,
+            dias_base_atual=dias_base_atual,
+            janela_dias=int(janela_giro_fefo),
+            incluir_sem_estoque=False,
+            df_entradas=df_entradas,
+            df_saidas=df_saidas,
+        )
+
+        df_fefo = calcular_plano_promocional_fefo(
+            df_estoque_ref=df_estoque,
+            df_custos_ref=df_custos_rel,
+            df_giro_ref=df_giro_fefo_base,
+            aliquota_impostos_pct=float(aliquota_imp_fefo),
+            margem_referencia_pct=float(margem_ref_fefo),
+            df_saidas_ref=df_saidas,
+        )
+
+        if escopo_fefo.startswith("🏪"):
+            df_fefo = df_fefo[~df_fefo["eh_mp"]].copy()
+        elif escopo_fefo.startswith("🏭"):
+            df_fefo = df_fefo[df_fefo["eh_mp"]].copy()
+
+        if df_fefo.empty:
+            st.success("Nenhum lote ativo encontrado para o filtro selecionado.")
+        else:
+            v1, v2, v3, v4, v5 = st.columns(5)
+            vlr_vencido = float(df_fefo.loc[df_fefo["status_fefo"] == "🔴 1. Vencido", "valor_em_risco"].sum())
+            vlr_30d = float(df_fefo.loc[df_fefo["status_fefo"] == "🟠 2. Crítico (0 a 30 dias)", "valor_em_risco"].sum())
+            vlr_60d = float(df_fefo.loc[df_fefo["status_fefo"] == "🟡 3. Atenção (31 a 60 dias)", "valor_em_risco"].sum())
+            vlr_90d = float(df_fefo.loc[df_fefo["status_fefo"] == "🔵 4. Preventivo (61 a 90 dias)", "valor_em_risco"].sum())
+            df_sobra_ate_90 = df_fefo[
+                df_fefo["dias_para_vencer"].notna()
+                & (df_fefo["dias_para_vencer"] >= 0)
+                & (df_fefo["dias_para_vencer"] <= 90)
+                & (df_fefo["sobra_projetada"] >= 0.5)
+            ]
+            vlr_sobra_real_90d = float(df_sobra_ate_90["capital_sobra"].sum())
+            qtd_lotes_acao = int(len(df_sobra_ate_90))
+
+            v1.metric("🔴 Vencidos (< 0d)", formatar_moeda_br(vlr_vencido))
+            v2.metric("🟠 Crítico (0 a 30d)", formatar_moeda_br(vlr_30d))
+            v3.metric("🟡 Atenção (31 a 60d)", formatar_moeda_br(vlr_60d))
+            v4.metric("🔵 Preventivo (61 a 90d)", formatar_moeda_br(vlr_90d))
+            v5.metric(
+                "🤖 Sobra Real p/ Promocionar (≤90d)",
+                formatar_moeda_br(vlr_sobra_real_90d),
+                f"{formatar_num_br(qtd_lotes_acao)} lote(s) não escoam sozinhos",
+                delta_color="inverse" if qtd_lotes_acao > 0 else "normal",
+            )
+
+            f_f1, f_f2, f_f3 = st.columns([1.8, 1.2, 1.2])
+            opcoes_status = sorted(df_fefo["status_fefo"].unique())
+            padrao_status = [s for s in opcoes_status if not s.startswith("🟢")] or opcoes_status
+            with f_f1:
+                filtro_status = st.multiselect(
+                    "Filtrar faixas de vencimento:",
+                    options=opcoes_status,
+                    default=padrao_status,
+                )
+            with f_f2:
+                busca_fefo = st.text_input(
+                    "🔍 Buscar produto ou lote:",
+                    placeholder="Ex: roboforte, prontostrep...",
+                    key="fefo_busca_txt",
+                )
+            with f_f3:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                apenas_com_sobra_fefo = st.checkbox(
+                    "🔥 Apenas lotes que NÃO escoam no giro",
+                    value=False,
+                    key="chk_apenas_sobra_fefo",
+                    help="Oculta os lotes cujo giro diário normal já vai consumir todo o estoque antes do vencimento.",
+                )
+
+            df_fefo_view = df_fefo[df_fefo["status_fefo"].isin(filtro_status)].copy()
+            if apenas_com_sobra_fefo:
+                df_fefo_view = df_fefo_view[df_fefo_view["precisa_promocao"] == True].copy()
+            if busca_fefo and busca_fefo.strip():
+                t_b_fefo = busca_fefo.lower().strip()
+                df_fefo_view = df_fefo_view[
+                    df_fefo_view["codigo"].str.lower().str.contains(t_b_fefo, na=False, regex=False)
+                    | df_fefo_view["descricao"].str.lower().str.contains(t_b_fefo, na=False, regex=False)
+                    | df_fefo_view["lote"].str.lower().str.contains(t_b_fefo, na=False, regex=False)
+                ].copy()
+
+            df_fefo_view = df_fefo_view.sort_values(
+                ["dias_para_vencer", "capital_sobra"], ascending=[True, False]
+            ).reset_index(drop=True)
+
+            df_fefo_exibicao = df_fefo_view[
+                [
+                    "status_fefo",
+                    "codigo",
+                    "descricao",
+                    "lote",
+                    "validade",
+                    "dias_para_vencer",
+                    "saldo_lote",
+                    "giro_diario",
+                    "sobra_projetada",
+                    "diagnostico_giro_fefo",
+                    "mecanica_ia",
+                    "preco_piso_imposto",
+                    "preco_promo_sug",
+                    "desconto_sug_pct",
+                    "valor_em_risco",
+                    "capital_sobra",
+                ]
+            ].rename(
+                columns={
+                    "status_fefo": "Faixa FEFO",
+                    "codigo": "Código",
+                    "descricao": "Descrição",
+                    "lote": "Lote",
+                    "validade": "Validade",
+                    "dias_para_vencer": "Dias p/ Vencer",
+                    "saldo_lote": "Saldo Lote",
+                    "giro_diario": "Giro/Dia",
+                    "sobra_projetada": "Sobra no Venc.",
+                    "diagnostico_giro_fefo": "Diagnóstico de Escoamento",
+                    "mecanica_ia": "Ação IA & Mecânica Sugerida",
+                    "preco_piso_imposto": "Piso (Custo+Imp.)",
+                    "preco_promo_sug": "Preço Promo Sug.",
+                    "desconto_sug_pct": "Desc. Sug.",
+                    "valor_em_risco": "Capital Lote (R$)",
+                    "capital_sobra": "Capital em Sobra (R$)",
+                }
+            )
+            st.dataframe(
+                estilizar_tabela_br(
+                    df_fefo_exibicao,
+                    formatadores={
+                        "Dias p/ Vencer": lambda x: "-" if pd.isna(x) else formatar_num_br(x, 0),
+                        "Saldo Lote": formatar_qtd_br,
+                        "Giro/Dia": lambda x: formatar_num_br(x, 3) if (pd.notna(x) and 0 < float(x) < 0.05) else formatar_num_br(x, 2),
+                        "Sobra no Venc.": formatar_qtd_br,
+                        "Piso (Custo+Imp.)": formatar_moeda_br,
+                        "Preço Promo Sug.": lambda x: "-" if (pd.isna(x) or float(x) <= 0) else formatar_moeda_br(x),
+                        "Desc. Sug.": lambda x: "-" if (pd.isna(x) or float(x) <= 0) else f"-{formatar_pct_br(x, 1)}",
+                        "Capital Lote (R$)": formatar_moeda_br,
+                        "Capital em Sobra (R$)": formatar_moeda_br,
+                    },
+                    colunas_esquerda=["Descrição", "Diagnóstico de Escoamento", "Ação IA & Mecânica Sugerida"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=390,
+            )
+            if not df_fefo_exibicao.empty:
+                st.download_button(
+                    label="📥 Baixar Relatório FEFO & Plano de Promoções IA (.xlsx)",
+                    data=gerar_excel_relatorio(df_fefo_exibicao, "Radar_FEFO_Promocoes"),
+                    file_name=f"Radar_FEFO_Promocoes_Esteio_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            st.markdown("---")
+            st.markdown("#### 🤖 Simulador Interativo de Promoção & Gerador de Campanhas (WhatsApp / Equipe de Vendas)")
+            st.caption(
+                "Selecione abaixo qualquer lote crítico para ajustar o preço promocional respeitando o **Piso Tributário (Custo C1 + ICMS/PIS/COFINS/ST)** "
+                "e gerar instantaneamente a mensagem para clientes no WhatsApp e a meta diária para os vendedores no balcão."
+            )
+            df_candidatos_sim = df_fefo[
+                df_fefo["dias_para_vencer"].notna()
+                & (df_fefo["dias_para_vencer"] >= 0)
+                & (df_fefo["dias_para_vencer"] <= 120)
+            ].sort_values(["precisa_promocao", "capital_sobra", "dias_para_vencer"], ascending=[False, False, True]).reset_index(drop=True)
+
+            if df_candidatos_sim.empty:
+                st.info("Não há lotes vencendo nos próximos 120 dias para simular promoções.")
+            else:
+                opcoes_lote_sim = [
+                    f"[{r['codigo']}] {r['descricao']} — Lote: {r['lote'] or 'S/L'} | Vence em {int(r['dias_para_vencer'])}d ({r['validade']}) | "
+                    f"Saldo: {formatar_qtd_br(r['saldo_lote'])} un. | Sobra Projetada: {formatar_qtd_br(r['sobra_projetada'])} un. ({formatar_moeda_br(r['capital_sobra'])})"
+                    for _, r in df_candidatos_sim.iterrows()
+                ]
+                idx_lote_escolhido = st.selectbox(
+                    "🎯 Escolha o lote para simular a promoção e gerar os textos:",
+                    options=range(len(opcoes_lote_sim)),
+                    format_func=lambda i: opcoes_lote_sim[i],
+                    key="sel_lote_sim_fefo",
+                )
+                lote_sel = df_candidatos_sim.iloc[int(idx_lote_escolhido)]
+                cod_sim = str(lote_sel["codigo"])
+                desc_sim = str(lote_sel["descricao"])
+                lote_cod_sim = str(lote_sel["lote"])
+                val_sim = str(lote_sel["validade"])
+                dias_v_sim = int(lote_sel["dias_para_vencer"])
+                saldo_l_sim = float(lote_sel["saldo_lote"])
+                sobra_p_sim = float(lote_sel["sobra_projetada"])
+                custo_u_sim = float(lote_sel["custo_unitario"])
+                piso_imp_sim = float(lote_sel["preco_piso_imposto"])
+                preco_base_padrao = max(float(lote_sel["preco_atual_est"]), custo_u_sim * 1.25, 1.0)
+                desc_sug_padrao = float(lote_sel["desconto_sug_pct"]) if float(lote_sel["desconto_sug_pct"]) > 0 else 15.0
+
+                s_col1, s_col2, s_col3 = st.columns(3)
+                with s_col1:
+                    preco_tabela_input = st.number_input(
+                        "💵 Preço Normal de Venda no Balcão (R$):",
+                        min_value=0.01,
+                        max_value=100000.0,
+                        value=float(round(preco_base_padrao, 2)),
+                        step=1.0,
+                        key=f"p_tab_sim_{cod_sim}_{lote_cod_sim}",
+                    )
+                with s_col2:
+                    desconto_aplicado_pct = st.slider(
+                        "🏷️ Desconto Promocional a Aplicar (%):",
+                        min_value=0.0,
+                        max_value=60.0,
+                        value=float(min(max(desc_sug_padrao, 0.0), 60.0)),
+                        step=1.0,
+                        key=f"desc_sim_{cod_sim}_{lote_cod_sim}",
+                    )
+                preco_por_calculado = round(preco_tabela_input * (1.0 - (desconto_aplicado_pct / 100.0)), 2)
+                with s_col3:
+                    preco_por_final = st.number_input(
+                        "🔥 Preço Promocional Final ('Por R$'):",
+                        min_value=0.01,
+                        max_value=100000.0,
+                        value=float(max(preco_por_calculado, 0.01)),
+                        step=0.50,
+                        key=f"p_por_sim_{cod_sim}_{lote_cod_sim}_{desconto_aplicado_pct}",
+                    )
+
+                desc_efetivo_pct = max(0.0, ((preco_tabela_input - preco_por_final) / max(preco_tabela_input, 0.01)) * 100.0)
+                imposto_un_sim = preco_por_final * (float(aliquota_imp_fefo) / 100.0)
+                lucro_liq_un_sim = preco_por_final - imposto_un_sim - custo_u_sim
+                margem_liq_sim_pct = ((lucro_liq_un_sim / preco_por_final) * 100.0) if preco_por_final > 0 else 0.0
+                caixa_recuperado_total = saldo_l_sim * preco_por_final
+                lucro_liq_total_lote = saldo_l_sim * lucro_liq_un_sim
+
+                sm1, sm2, sm3, sm4 = st.columns(4)
+                sm1.metric(
+                    "Preço Piso (Custo + Impostos)",
+                    formatar_moeda_br(piso_imp_sim),
+                    f"Custo C1: {formatar_moeda_br(custo_u_sim)}",
+                )
+                sm2.metric(
+                    "Preço Promo ('Por R$')",
+                    formatar_moeda_br(preco_por_final),
+                    f"-{formatar_num_br(desc_efetivo_pct, 1)}% s/ tabela",
+                )
+                sm3.metric(
+                    "Margem Líquida Pós-Impostos",
+                    formatar_pct_br(margem_liq_sim_pct, 1),
+                    f"{formatar_moeda_br(lucro_liq_un_sim)} livres/un.",
+                    delta_color="normal" if lucro_liq_un_sim >= 0 else "inverse",
+                )
+                sm4.metric(
+                    "Caixa Total Recuperado no Lote",
+                    formatar_moeda_br(caixa_recuperado_total),
+                    f"Resultado Líq.: {formatar_moeda_br(lucro_liq_total_lote)}",
+                )
+
+                if preco_por_final < piso_imp_sim and custo_u_sim > 0:
+                    st.warning(
+                        f"⚠️ **Alerta Tributário:** O preço promocional escolhido (**{formatar_moeda_br(preco_por_final)}**) está abaixo do "
+                        f"**Piso de Equilíbrio com Impostos ({formatar_moeda_br(piso_imp_sim)})**, gerando perda líquida de "
+                        f"**{formatar_moeda_br(abs(lucro_liq_un_sim))} por unidade** após descontar {formatar_num_br(aliquota_imp_fefo, 1)}% de impostos. "
+                        f"Use apenas se o objetivo for desova de emergência para evitar perda de 100% no vencimento!"
+                    )
+
+                txt_wpp_cli, txt_brief_eq = gerar_textos_campanha_promocional_fefo(
+                    codigo=cod_sim,
+                    descricao=desc_sim,
+                    lote=lote_cod_sim,
+                    validade=val_sim,
+                    dias_vencer=dias_v_sim,
+                    saldo_lote=saldo_l_sim,
+                    sobra_proj=sobra_p_sim,
+                    custo_unit=custo_u_sim,
+                    preco_de=preco_tabela_input,
+                    preco_por=preco_por_final,
+                    preco_piso=piso_imp_sim,
+                    desconto_pct=desc_efetivo_pct,
+                    aliquota_imp_pct=float(aliquota_imp_fefo),
+                    mecanica_sugerida=str(lote_sel["mecanica_ia"]),
+                    meta_giro_dia=float(lote_sel["meta_giro_dia"]),
+                )
+
+                col_msg1, col_msg2 = st.columns(2)
+                with col_msg1:
+                    st.markdown("##### 📲 1. Mensagem Pronta para WhatsApp (Clientes / Fazendeiros)")
+                    st.code(txt_wpp_cli, language="markdown")
+                with col_msg2:
+                    st.markdown("##### 🎯 2. Briefing de Meta para Equipe de Vendas (Balcão / Interno)")
+                    st.code(txt_brief_eq, language="markdown")
+
 # ------------------------------------------------------------------------------
-# ABA 4: CURVA ABC FINANCEIRA (UNIFICADA E CENTRALIZADA)
+# ABA 4: CURVA ABC FINANCEIRA (UNIFICADA, CENTRALIZADA E C/ OPÇÃO DE ZERADOS)
 # ------------------------------------------------------------------------------
 with aba4:
-    st.markdown("### 📊 Curva ABC Financeira (Pareto 80 / 15 / 5)")
-    if df_estoque.empty or df_custos.empty:
-        st.info("Importe a Planilha de Estoque e a Planilha de Custos na Aba 1 para gerar a Curva ABC Financeira.")
+    st.markdown("### 📈 Curva ABC Financeira (Pareto 80 / 15 / 5)")
+    st.caption(
+        "Classificação financeira do capital imobilizado na prateleira (80% Classe A, 15% Classe B e 5% Classe C). "
+        "Marque a opção abaixo quando quiser visualizar também os itens do catálogo com saldo zerado ou sem custo (ex: linha completa de um fornecedor)."
+    )
+    if df_estoque.empty and df_custos_rel.empty:
+        st.info("Importe a Planilha de Estoque e a Planilha de Custos na Aba 7 (Importação & Backup) para gerar a Curva ABC Financeira.")
     else:
-        df_abc = calcular_tabela_curva_abc(df_estoque, df_custos)
+        col_f_abc1, col_f_abc2 = st.columns([2.2, 1.3])
+        with col_f_abc1:
+            busca_abc = st.text_input(
+                "🔍 Pesquisar Fornecedor / Linha / Produto (use vírgula p/ vários):",
+                placeholder="Ex: matsuda  |  ouro fino, ceva  |  505084",
+                key="busca_curva_abc",
+            )
+        with col_f_abc2:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            incluir_zerados_abc = st.checkbox(
+                "⚪ Incluir itens com Saldo = 0 ou Sem Custo (R$ 0,00)",
+                value=False,
+                key="chk_incluir_zerados_abc",
+                help="Desmarcado por padrão (mostra apenas produtos com valor financeiro > R$ 0,00). Quando marcado, exibe também os itens zerados do catálogo mantendo o cálculo de 80/15/5% intacto.",
+            )
+
+        frames_cat_abc = []
+        for df_src_abc in [df_estoque, df_entradas, df_saidas, df_base_vendas_rel, df_custos_rel]:
+            if df_src_abc is not None and not df_src_abc.empty and "codigo" in df_src_abc.columns and "descricao" in df_src_abc.columns:
+                frames_cat_abc.append(df_src_abc[["codigo", "descricao"]])
+        df_cat_extra_abc = (
+            pd.concat(frames_cat_abc, ignore_index=True).drop_duplicates(subset=["codigo"], keep="first")
+            if frames_cat_abc
+            else pd.DataFrame(columns=["codigo", "descricao"])
+        )
+
+        df_abc = calcular_tabela_curva_abc(
+            df_estoque,
+            df_custos_rel,
+            incluir_zerados=incluir_zerados_abc,
+            df_catalogo_extra=df_cat_extra_abc,
+        )
         if not df_abc.empty:
             total_fin = float(df_abc["valor_estoque"].sum())
             qtd_classe_a = int((df_abc["classe_abc_curta"] == "Classe A").sum())
-            qtd_classe_bc = int((df_abc["classe_abc_curta"] != "Classe A").sum())
-            a1, a2, a3 = st.columns(3)
+            qtd_classe_bc = int(df_abc["classe_abc_curta"].isin(["Classe B", "Classe C"]).sum())
+            qtd_sem_saldo_custo = int((df_abc["classe_abc_curta"] == "Sem Saldo/Custo").sum())
+
+            a1, a2, a3, a4 = st.columns(4)
             a1.metric("Capital Total Imobilizado", formatar_moeda_br(total_fin))
             a2.metric("Itens Classe A (80% do Valor)", f"{formatar_num_br(qtd_classe_a)} SKUs")
-            a3.metric("Itens Classe B + C", f"{formatar_num_br(qtd_classe_bc)} SKUs")
-            busca_abc = st.text_input(
-                "🔍 Pesquisar produto visível (Código ou Nome):",
-                key="busca_curva_abc",
+            a3.metric("Itens Classe B + C (20% do Valor)", f"{formatar_num_br(qtd_classe_bc)} SKUs")
+            a4.metric(
+                "Itens Zerados / Sem Custo",
+                f"{formatar_num_br(qtd_sem_saldo_custo)} SKUs" if incluir_zerados_abc else "Ocultos (Marque acima)",
             )
+
             df_abc_filtrado = df_abc.copy()
-            if busca_abc:
-                termo_abc = busca_abc.lower().strip()
-                df_abc_filtrado = df_abc_filtrado[
-                    df_abc_filtrado["codigo"].str.lower().str.contains(termo_abc, na=False, regex=False)
-                    | df_abc_filtrado["descricao"].str.lower().str.contains(termo_abc, na=False, regex=False)
-                ].copy()
+            if busca_abc and busca_abc.strip():
+                def _norm_abc_txt(txt: str) -> str:
+                    s = unicodedata.normalize("NFKD", str(txt)).encode("ASCII", "ignore").decode("utf-8").lower()
+                    s = re.sub(r"\bd[\s'\-]*agua\b", "dagua", s)
+                    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+                grupos_abc = [_norm_abc_txt(g) for g in re.split(r"[;,]+", busca_abc) if _norm_abc_txt(g)]
+                if grupos_abc:
+                    alvo_s_abc = (df_abc_filtrado["codigo"].astype(str) + " " + df_abc_filtrado["descricao"].astype(str)).map(_norm_abc_txt)
+                    mask_busca_abc = pd.Series(False, index=df_abc_filtrado.index)
+                    for grp in grupos_abc:
+                        m_g = pd.Series(True, index=df_abc_filtrado.index)
+                        for pal in grp.split():
+                            m_g = m_g & alvo_s_abc.str.contains(re.escape(pal), na=False)
+                        mask_busca_abc = mask_busca_abc | m_g
+                    df_abc_filtrado = df_abc_filtrado[mask_busca_abc].copy()
+
+                if not incluir_zerados_abc:
+                    df_abc_com_z = calcular_tabela_curva_abc(
+                        df_estoque,
+                        df_custos_rel,
+                        incluir_zerados=True,
+                        df_catalogo_extra=df_cat_extra_abc,
+                    )
+                    if not df_abc_com_z.empty:
+                        alvo_z = (df_abc_com_z["codigo"].astype(str) + " " + df_abc_com_z["descricao"].astype(str)).map(_norm_abc_txt)
+                        m_z_tot = pd.Series(False, index=df_abc_com_z.index)
+                        for grp in grupos_abc:
+                            m_g = pd.Series(True, index=df_abc_com_z.index)
+                            for pal in grp.split():
+                                m_g = m_g & alvo_z.str.contains(re.escape(pal), na=False)
+                            m_z_tot = m_z_tot | m_g
+                        qtd_ocultos_zero_busca = int(len(df_abc_com_z[m_z_tot]) - len(df_abc_filtrado))
+                        if qtd_ocultos_zero_busca > 0:
+                            st.info(
+                                f"ℹ️ Existem mais **{formatar_num_br(qtd_ocultos_zero_busca)} produto(s)** para a busca `'{busca_abc.strip()}'` "
+                                f"que estão com **Saldo = 0** (ou sem custo). Marque a caixa **'⚪ Incluir itens com Saldo = 0 ou Sem Custo'** "
+                                f"acima à direita para visualizar todos os {formatar_num_br(len(df_abc_com_z[m_z_tot]))} itens!"
+                            )
+
             df_abc_exibicao = df_abc_filtrado[
                 ["classe_abc", "codigo", "descricao", "saldo_geral", "custo_unitario", "valor_estoque", "part_pct", "acum_pct"]
             ].rename(
