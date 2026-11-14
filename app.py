@@ -774,7 +774,9 @@ def converter_numero_br(
 FORMATOS_DATA_ACEITOS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%y")
 
 
-def _parse_data_segura_py(valor, ano_min: int = 2020, ano_max: int = 2032):
+def _parse_data_segura_py(valor, ano_min: int = 2000, ano_max: int = None):
+    if ano_max is None:
+        ano_max = hoje_br().year + 15
     if valor is None or pd.isna(valor):
         return None
     if isinstance(valor, (datetime, date, pd.Timestamp)):
@@ -800,15 +802,16 @@ def _parse_data_segura_py(valor, ano_min: int = 2020, ano_max: int = 2032):
 
 
 def formatar_validade_padrao(valor) -> str:
-    dt = _parse_data_segura_py(valor, ano_min=2020, ano_max=2032)
+    dt = _parse_data_segura_py(valor, ano_min=2000, ano_max=hoje_br().year + 15)
     return dt.strftime("%d/%m/%Y") if dt is not None else ""
 
 
 def converter_datas_deterministico(serie: pd.Series) -> pd.Series:
     if serie is None or serie.empty:
         return pd.Series(dtype="datetime64[ns]")
+    ano_teto = hoje_br().year + 15
     unicos = serie.dropna().unique()
-    mapa = {val: _parse_data_segura_py(val, ano_min=2020, ano_max=2032) for val in unicos}
+    mapa = {val: _parse_data_segura_py(val, ano_min=2000, ano_max=ano_teto) for val in unicos}
     lista_dt = [mapa.get(v, None) if pd.notna(v) else None for v in serie]
     return pd.to_datetime(pd.Series(lista_dt, index=serie.index, dtype="object"), errors="coerce").astype("datetime64[ns]")
 
@@ -882,11 +885,19 @@ def estruturar_dataframe_bruto(
                 alvos_encontrados.add(col_alvo)
                 break
     if aba_esquema == "saidas_diarias" and "valor_venda" not in alvos_encontrados and df_orig.shape[1] >= 4:
-        col_4_cand = list(df_orig.columns)[3]
-        if col_4_cand not in colunas_orig_usadas and cols_norm.get(col_4_cand, "") not in MAPA_SINONIMOS["data"]:
-            renomear[col_4_cand] = "valor_venda"
-            colunas_orig_usadas.add(col_4_cand)
-            alvos_encontrados.add("valor_venda")
+        termos_fin_validos = ("valor", "vlr", "proposta", "faturamento", "receita", "preco", "liquido", "bruto", "total_venda")
+        termos_nao_fin = ("saldo", "estoque", "lote", "validade", "custo", "cmv", "cod", "qtd", "quant", "data")
+        for col_cand in list(df_orig.columns)[3:]:
+            norm_cand = cols_norm.get(col_cand, "")
+            if (
+                col_cand not in colunas_orig_usadas
+                and any(t in norm_cand for t in termos_fin_validos)
+                and not any(b in norm_cand for b in termos_nao_fin)
+            ):
+                renomear[col_cand] = "valor_venda"
+                colunas_orig_usadas.add(col_cand)
+                alvos_encontrados.add("valor_venda")
+                break
     if not exigir_colunas_obrigatorias:
         if aba_esquema == "saidas_diarias" and df_orig.shape[1] == 4 and "valor_venda" not in alvos_encontrados:
             ordem_padrao = ["codigo", "descricao", "qtd_saida", "data"]
@@ -1769,6 +1780,8 @@ def calcular_plano_promocional_fefo(
     sobra_proj_list = []
     cap_sobra_list = []
     preco_atual_list = []
+    tem_preco_real_list = []
+    origem_preco_list = []
     preco_piso_list = []
     preco_promo_list = []
     desc_sug_list = []
@@ -1787,9 +1800,17 @@ def calcular_plano_promocional_fefo(
         dias_v = r["dias_para_vencer"]
 
         preco_piso = (custo_u / fator_imposto) if custo_u > 0 else 0.0
-        preco_est = mapa_preco_real.get(cod, 0.0)
-        if preco_est <= 0 and custo_u > 0:
+        preco_real_lido = float(mapa_preco_real.get(cod, 0.0))
+        tem_preco_real = preco_real_lido > 0.0
+        if tem_preco_real:
+            preco_est = preco_real_lido
+            origem_p_txt = "✔️ Venda Real (Saídas)"
+        elif custo_u > 0:
             preco_est = max(custo_u / fator_margem_ref, preco_piso * 1.15)
+            origem_p_txt = "⚠️ Estimado (Margem)"
+        else:
+            preco_est = 0.0
+            origem_p_txt = "⚪ Sem Custo/Preço"
 
         if pd.isna(dias_v):
             sobra_p = 0.0
@@ -1819,7 +1840,7 @@ def calcular_plano_promocional_fefo(
 
             if sobra_p < 0.5 or d_pos > 120:
                 precisa_p = False
-                if d_pos <= 90:
+                if d_pos <= 120:
                     diag_txt = "🟢 Escoa no Giro Normal"
                     mec_txt = "✅ Manter Preço Cheio (Giro atual absorve o lote)"
                 else:
@@ -1871,6 +1892,8 @@ def calcular_plano_promocional_fefo(
         sobra_proj_list.append(sobra_p)
         cap_sobra_list.append(cap_sobra)
         preco_atual_list.append(round(preco_est, 2))
+        tem_preco_real_list.append(tem_preco_real)
+        origem_preco_list.append(origem_p_txt)
         preco_piso_list.append(round(preco_piso, 2))
         preco_promo_list.append(round(preco_promo, 2))
         desc_sug_list.append(round(desc_pct, 1))
@@ -1883,6 +1906,8 @@ def calcular_plano_promocional_fefo(
     df_f["sobra_projetada"] = sobra_proj_list
     df_f["capital_sobra"] = cap_sobra_list
     df_f["preco_atual_est"] = preco_atual_list
+    df_f["tem_preco_real"] = tem_preco_real_list
+    df_f["origem_preco"] = origem_preco_list
     df_f["preco_piso_imposto"] = preco_piso_list
     df_f["preco_promo_sug"] = preco_promo_list
     df_f["desconto_sug_pct"] = desc_sug_list
@@ -1914,6 +1939,7 @@ def gerar_textos_campanha_promocional_fefo(
     aliquota_imp_pct: float,
     mecanica_sugerida: str,
     meta_giro_dia: float,
+    exibir_preco_de_whatsapp: bool = True,
 ) -> tuple[str, str]:
     economia_un = max(0.0, preco_de - preco_por)
     economia_lote_3 = economia_un * 3.0
@@ -1923,14 +1949,23 @@ def gerar_textos_campanha_promocional_fefo(
     resultado_liq_lote = receita_total_lote - imposto_total_lote - custo_total_lote
     margem_liq_pct = ((resultado_liq_lote / receita_total_lote) * 100.0) if receita_total_lote > 0 else 0.0
 
+    if exibir_preco_de_whatsapp and economia_un > 0.01:
+        bloco_preco_wpp = (
+            f"💰 De: ~{formatar_moeda_br(preco_de)}~\n"
+            f"🔥 *Por apenas: {formatar_moeda_br(preco_por)} à vista!* (*-{formatar_num_br(desconto_pct, 1)}%* de desconto)\n"
+            f"📉 Economia imediata de *{formatar_moeda_br(economia_un)} por unidade* "
+            f"(levando 3 un., você economiza *{formatar_moeda_br(economia_lote_3)}*)!\n\n"
+        )
+    else:
+        bloco_preco_wpp = (
+            f"🔥 *Preço Especial de Lote: {formatar_moeda_br(preco_por)} à vista!*\n\n"
+        )
+
     txt_whatsapp_cliente = (
         f"🌾 *OPORTUNIDADE ESPECIAL ESTEIO RURAL — LOTE PROMOCIONAL!* 🌾\n\n"
         f"📦 *{descricao}*\n"
         f"✅ Lote selecionado p/ giro rápido (Validade: *{validade or 'Consultar'}* — *{formatar_qtd_br(saldo_lote)} un.* disponíveis)\n\n"
-        f"💰 De: ~{formatar_moeda_br(preco_de)}~\n"
-        f"🔥 *Por apenas: {formatar_moeda_br(preco_por)} à vista!* (*-{formatar_num_br(desconto_pct, 1)}%* de desconto)\n"
-        f"📉 Economia imediata de *{formatar_moeda_br(economia_un)} por unidade* "
-        f"(levando 3 un., você economiza *{formatar_moeda_br(economia_lote_3)}*)!\n\n"
+        f"{bloco_preco_wpp}"
         f"⚡ *Condição válida exclusivamente enquanto durar este lote ({formatar_qtd_br(saldo_lote)} unidades).*\n"
         f"📲 Responda aqui no WhatsApp ou fale com nossos vendedores no balcão para reservar o seu!"
     )
@@ -2234,6 +2269,17 @@ def processar_planilha_movimento_diario(
         raise ValueError(
             f"A planilha de {rotulo_amigavel} precisa ter pelo menos 3 colunas (Código, Descrição, Quantidade)."
         )
+    coluna_valor_lida = ""
+    if nome_aba == "saidas_diarias":
+        termos_fin_v = ("valor", "vlr", "proposta", "faturamento", "receita", "preco", "liquido", "bruto", "total_venda")
+        termos_nao_fin_v = ("saldo", "estoque", "lote", "validade", "custo", "cmv", "cod", "qtd", "quant", "data")
+        for c_orig in df_raw.columns:
+            n_c = normalizar_chave_coluna(c_orig)
+            if n_c in MAPA_SINONIMOS["valor_venda"] or (
+                any(t in n_c for t in termos_fin_v) and not any(b in n_c for b in termos_nao_fin_v)
+            ):
+                coluna_valor_lida = str(c_orig).strip()
+                break
     df = estruturar_dataframe_bruto(df_raw, nome_aba, exigir_colunas_obrigatorias=True)
     data_iso = data_mov.strftime("%Y-%m-%d")
     df["data"] = data_iso
@@ -2284,6 +2330,7 @@ def processar_planilha_movimento_diario(
         "total_itens": len(df_final),
         "soma_qtd": soma_qtd,
         "soma_valor_venda": soma_valor_venda,
+        "coluna_valor_venda": coluna_valor_lida,
         "data_iso": data_iso,
         "taxa_coincidencia": taxa_coincidencia,
         "qtd_codigos_repetidos": qtd_codigos_repetidos,
@@ -4105,11 +4152,12 @@ with aba1:
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
                         )
                         modo_sai_str = "somadas ao dia" if somar_saidas_mesmo_dia else "gravadas"
-                        str_fat_sai = (
-                            f" | Faturamento Bruto: {formatar_moeda_br(info_sai['soma_valor_venda'])}"
-                            if info_sai.get("soma_valor_venda", 0.0) > 0
-                            else ""
-                        )
+                        col_val_nome = info_sai.get("coluna_valor_venda", "")
+                        if info_sai.get("soma_valor_venda", 0.0) > 0:
+                            rot_col_fat = f" (coluna '{col_val_nome}')" if col_val_nome else ""
+                            str_fat_sai = f" | Faturamento Bruto{rot_col_fat}: {formatar_moeda_br(info_sai['soma_valor_venda'])}"
+                        else:
+                            str_fat_sai = " | Sem coluna de faturamento"
                         mensagens_auditoria_upload.append(
                             f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['total_itens'])} SKUs {modo_sai_str} "
                             f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.{str_fat_sai})."
@@ -5094,13 +5142,20 @@ with aba3:
                 sobra_p_sim = float(lote_sel["sobra_projetada"])
                 custo_u_sim = float(lote_sel["custo_unitario"])
                 piso_imp_sim = float(lote_sel["preco_piso_imposto"])
+                tem_preco_real_sim = bool(lote_sel.get("tem_preco_real", False))
+                origem_preco_sim = str(lote_sel.get("origem_preco", ""))
                 preco_base_padrao = max(float(lote_sel["preco_atual_est"]), custo_u_sim * 1.25, 1.0)
                 desc_sug_padrao = float(lote_sel["desconto_sug_pct"]) if float(lote_sel["desconto_sug_pct"]) > 0 else 15.0
 
                 s_col1, s_col2, s_col3 = st.columns(3)
                 with s_col1:
+                    rotulo_preco_tab = (
+                        "💵 Preço Normal Balcão (✔️ Real Saídas):"
+                        if tem_preco_real_sim
+                        else "💵 Preço Normal Balcão (⚠️ Estimado — Confira):"
+                    )
                     preco_tabela_input = st.number_input(
-                        "💵 Preço Normal de Venda no Balcão (R$):",
+                        rotulo_preco_tab,
                         min_value=0.01,
                         max_value=100000.0,
                         value=float(round(preco_base_padrao, 2)),
@@ -5165,6 +5220,21 @@ with aba3:
                         f"Use apenas se o objetivo for desova de emergência para evitar perda de 100% no vencimento!"
                     )
 
+                preco_foi_editado_manual = abs(float(preco_tabela_input) - float(round(preco_base_padrao, 2))) >= 0.01
+                if not tem_preco_real_sim and not preco_foi_editado_manual:
+                    st.info(
+                        f"💡 **Atenção ao Preço 'De' ({origem_preco_sim}):** Este produto ainda não possui venda com valor faturado na aba `saidas_diarias`, "
+                        f"portanto o preço normal de **{formatar_moeda_br(preco_tabela_input)}** foi estimado pela margem ({formatar_num_br(margem_ref_fefo, 0)}%). "
+                        f"Confira/ajuste o preço real de prateleira no campo acima ou desmarque a opção abaixo para enviar o WhatsApp apenas com o preço final **'Por R$'**!"
+                    )
+
+                exibir_de_wpp = st.checkbox(
+                    "🏷️ Exibir preço antigo ('De: ~R$ X,XX~') e cálculo de economia na mensagem do WhatsApp",
+                    value=True,
+                    key=f"chk_exibir_de_wpp_{cod_sim}_{lote_cod_sim}",
+                    help="Se desmarcado, a mensagem de WhatsApp mostrará direto o Preço Especial de Lote ('Por R$'), sem exibir o preço 'De:'.",
+                )
+
                 txt_wpp_cli, txt_brief_eq = gerar_textos_campanha_promocional_fefo(
                     codigo=cod_sim,
                     descricao=desc_sim,
@@ -5181,6 +5251,7 @@ with aba3:
                     aliquota_imp_pct=float(aliquota_imp_fefo),
                     mecanica_sugerida=str(lote_sel["mecanica_ia"]),
                     meta_giro_dia=float(lote_sel["meta_giro_dia"]),
+                    exibir_preco_de_whatsapp=exibir_de_wpp,
                 )
 
                 col_msg1, col_msg2 = st.columns(2)
