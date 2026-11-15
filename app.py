@@ -1215,8 +1215,8 @@ def salvar_backup_automatico_aba_gsheets(
     df_atual_memoria: pd.DataFrame,
     permitir_vazio: bool = False,
 ):
-    """Salva uma cópia rápida em _bkp_<nome_aba> antes de qualquer alteração (suporta abas pequenas e grandes)."""
-    if df_atual_memoria is None:
+    """Salva uma cópia rápida em _bkp_<nome_aba> apenas para abas leves (estoque_atual, entradas, saídas, custos, base, ocultos, trânsito)."""
+    if nome_aba_origem == "historico" or df_atual_memoria is None:
         return
     if df_atual_memoria.empty and not permitir_vazio:
         return
@@ -1234,7 +1234,11 @@ def remover_datas_aba_incremental_gsheets(
     datas_remover: set,
     df_atual_memoria: pd.DataFrame = None,
 ) -> int:
-    """Remove de uma aba incremental todas as linhas das datas informadas, salvando backup automático antes."""
+    """
+    Remove de uma aba incremental todas as linhas das datas informadas:
+    - Para 'historico': usa exclusão direta de linhas na planilha (sem regravar a aba inteira).
+    - Para abas pequenas ('entradas_diarias', 'saidas_diarias'): salva backup automático _bkp_* e regrava a tabela limpa.
+    """
     datas_iso_alvo = set()
     for d in (datas_remover or set()):
         dt_p = converter_datas_deterministico(pd.Series([str(d).strip()]))
@@ -1244,6 +1248,35 @@ def remover_datas_aba_incremental_gsheets(
             datas_iso_alvo.add(str(d).strip())
     if not datas_iso_alvo:
         return 0
+
+    if nome_aba == "historico":
+        ws = obter_ou_criar_aba(planilha, nome_aba)
+        primeira_linha = [str(c).strip() for c in ws.row_values(1)]
+        if not primeira_linha:
+            return 0
+        idx_col_data = (primeira_linha.index("data") + 1) if "data" in primeira_linha else len(primeira_linha)
+        col_datas_antes = ws.col_values(idx_col_data)
+        dt_col_parsed = converter_datas_deterministico(pd.Series(col_datas_antes))
+        dt_col_iso = dt_col_parsed.dt.strftime("%Y-%m-%d").fillna("")
+        linhas_para_apagar = [
+            i
+            for i, val_iso in enumerate(dt_col_iso, start=1)
+            if i >= 2 and val_iso in datas_iso_alvo
+        ]
+        if linhas_para_apagar:
+            blocos = []
+            inicio = fim = linhas_para_apagar[0]
+            for r in linhas_para_apagar[1:]:
+                if r == fim + 1:
+                    fim = r
+                else:
+                    blocos.append((inicio, fim))
+                    inicio = fim = r
+            blocos.append((inicio, fim))
+            for ini, f in reversed(blocos):
+                ws.delete_rows(ini, f)
+        return len(linhas_para_apagar)
+
     df_base = (
         df_atual_memoria.copy()
         if (df_atual_memoria is not None and not df_atual_memoria.empty)
@@ -1262,6 +1295,9 @@ def remover_datas_aba_incremental_gsheets(
     else:
         ws = obter_ou_criar_aba(planilha, nome_aba)
         migrar_aba_incremental_em_lotes(planilha, ws, df_restante, nome_aba=nome_aba)
+    reg_hashes = st.session_state.setdefault("hashes_soma_por_data", {})
+    for dt_rm in datas_iso_alvo:
+        reg_hashes.pop(f"{nome_aba}::{dt_rm}", None)
     return qtd_removidas
 
 
@@ -1270,7 +1306,7 @@ def restaurar_backup_automatico_aba_gsheets(
     nome_aba_destino: str,
     df_atual_memoria: pd.DataFrame = None,
 ) -> int:
-    """Restaura o conteúdo de _bkp_<nome_aba_destino> para qualquer aba do sistema (incluindo entradas, saídas, ocultos e histórico)."""
+    """Restaura o conteúdo de _bkp_<nome_aba_destino> para as abas com cópia automática e limpa datas indevidas no histórico."""
     import gspread
     nome_bkp = f"_bkp_{nome_aba_destino}"
     try:
@@ -1307,13 +1343,96 @@ def restaurar_backup_automatico_aba_gsheets(
         gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp)
         for dt_r in sorted(datas_rest):
             df_dia_rest = df_bkp[df_bkp["data"] == dt_r].copy()
-            gravar_historico_incremental_gsheets(planilha, df_dia_rest, dt_r, criar_backup=False)
+            gravar_historico_incremental_gsheets(planilha, df_dia_rest, dt_r)
     elif len(df_bkp) > TAMANHO_LOTE_MIGRACAO:
         ws_dest = obter_ou_criar_aba(planilha, nome_aba_destino)
         migrar_aba_incremental_em_lotes(planilha, ws_dest, df_bkp, nome_aba=nome_aba_destino)
     else:
         gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp, permitir_vazio=aba_permite_vazio)
+    if nome_aba_destino in ("entradas_diarias", "saidas_diarias"):
+        reg_hashes = st.session_state.setdefault("hashes_soma_por_data", {})
+        chaves_limpar = [k for k in reg_hashes if k.startswith(f"{nome_aba_destino}::")]
+        for k_l in chaves_limpar:
+            reg_hashes.pop(k_l, None)
     return len(df_bkp)
+
+
+def _calcular_hash_dataframe_dia(df_dia: pd.DataFrame, nome_aba: str) -> str:
+    if df_dia is None or df_dia.empty:
+        return ""
+    df_p = padronizar_dataframe(df_dia, nome_aba).sort_values("codigo").reset_index(drop=True)
+    if df_p.empty:
+        return ""
+    txt_serial = df_p.to_csv(index=False)
+    return hashlib.sha256(txt_serial.encode("utf-8")).hexdigest()[:16]
+
+
+def gravar_historico_incremental_gsheets(
+    planilha,
+    df_novo_dia: pd.DataFrame,
+    data_ref: str,
+    df_atual_memoria: pd.DataFrame = None,
+    criar_backup: bool = False,
+):
+    """
+    Grava o histórico diário usando append_rows + delete_rows apenas das linhas da mesma data ou >180d.
+    Consome apenas 1 a 2 chamadas de escrita na API do Google Sheets independentemente do tamanho do histórico.
+    """
+    df_novo_padrao = compactar_estoque_para_historico(df_novo_dia)
+    if df_novo_padrao.empty:
+        return
+    data_ref_str = str(data_ref).strip()
+    df_str = df_novo_padrao.fillna("").astype(str)
+    cabecalho = df_str.columns.tolist()
+    linhas_novas = df_str.values.tolist()
+    linhas_nec_inicial = len(linhas_novas) + 10
+    cols_nec = max(len(cabecalho), 3)
+    ws = obter_ou_criar_aba(planilha, "historico", linhas_nec_inicial + 50, cols_nec + 2)
+    primeira_linha = [str(c).strip() for c in ws.row_values(1)]
+    if not primeira_linha:
+        if ws.row_count < linhas_nec_inicial or ws.col_count < cols_nec:
+            ws.resize(rows=max(ws.row_count, linhas_nec_inicial), cols=max(ws.col_count, cols_nec))
+        ws.update(
+            values=[cabecalho] + linhas_novas,
+            range_name="A1",
+            value_input_option="RAW",
+        )
+        return
+    limite_str = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
+    if primeira_linha != cabecalho:
+        df_antigo = ler_aba_bruta_gsheets(planilha, "historico")
+        if not df_antigo.empty:
+            df_antigo = df_antigo[
+                (df_antigo["data"] != data_ref_str)
+                & (df_antigo["data"] >= limite_str)
+            ].copy()
+            df_combinado = pd.concat([df_antigo, df_novo_padrao], ignore_index=True)
+        else:
+            df_combinado = df_novo_padrao
+        migrar_aba_incremental_em_lotes(planilha, ws, df_combinado, nome_aba="historico")
+        return
+    idx_col_data = (primeira_linha.index("data") + 1) if "data" in primeira_linha else len(cabecalho)
+    col_datas_antes = ws.col_values(idx_col_data)
+    dt_col_parsed = converter_datas_deterministico(pd.Series(col_datas_antes))
+    dt_col_iso = dt_col_parsed.dt.strftime("%Y-%m-%d").fillna("")
+    linhas_antigas_para_apagar = [
+        i
+        for i, val_iso in enumerate(dt_col_iso, start=1)
+        if i >= 2 and (val_iso == data_ref_str or (val_iso != "" and val_iso < limite_str))
+    ]
+    ws.append_rows(values=linhas_novas, value_input_option="RAW")
+    if linhas_antigas_para_apagar:
+        blocos = []
+        inicio = fim = linhas_antigas_para_apagar[0]
+        for r in linhas_antigas_para_apagar[1:]:
+            if r == fim + 1:
+                fim = r
+            else:
+                blocos.append((inicio, fim))
+                inicio = fim = r
+        blocos.append((inicio, fim))
+        for ini, f in reversed(blocos):
+            ws.delete_rows(ini, f)
 
 
 def gravar_aba_incremental_por_data_gsheets(
@@ -1325,13 +1444,22 @@ def gravar_aba_incremental_por_data_gsheets(
     df_atual_memoria: pd.DataFrame = None,
     hash_arquivo: str = "",
     criar_backup: bool = True,
-):
+    hashes_soma_atuais: dict = None,
+) -> bool:
     """
-    Grava dados incrementais por data de forma atômica (sem janela inconsistente entre append e delete)
-    e protege contra soma duplicada caso o mesmo arquivo seja reenviado após falha parcial.
+    Grava dados incrementais por data:
+    - Para 'historico': delega para gravar_historico_incremental_gsheets (1 a 2 chamadas fixas, sem _bkp_historico).
+    - Para 'entradas_diarias' e 'saidas_diarias': faz backup _bkp_*, grava de forma atômica e mantém a lista
+      acumulativa de todos os hashes de arquivos já somados naquela data (impedindo que reenviar o Arquivo A
+      depois do Arquivo B no modo 'Somar ao dia' dobre o Arquivo A).
+    Retorna True se o arquivo já havia sido somado anteriormente naquela data e foi ignorado para evitar duplicação.
     """
     if df_novo_dia is None or df_novo_dia.empty:
-        return
+        return False
+    if nome_aba == "historico":
+        gravar_historico_incremental_gsheets(planilha, df_novo_dia, data_ref)
+        return False
+
     data_ref_str = str(data_ref).strip()
     limite_str = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
 
@@ -1348,52 +1476,57 @@ def gravar_aba_incremental_por_data_gsheets(
     if criar_backup and not df_base_existente.empty:
         salvar_backup_automatico_aba_gsheets(planilha, nome_aba, df_base_existente)
 
+    registro_hashes_sessao = st.session_state.setdefault("hashes_soma_por_data", {})
+    if hashes_soma_atuais:
+        for k_h, lista_h in hashes_soma_atuais.items():
+            if k_h not in registro_hashes_sessao:
+                registro_hashes_sessao[k_h] = list(lista_h)
+
+    chave_op = f"{nome_aba}::{data_ref_str}"
+    hash_efetivo = str(hash_arquivo).strip() or _calcular_hash_dataframe_dia(df_novo_dia, nome_aba)
+    ja_somado_ignorado = False
+
+    df_mesmo_dia_existente = (
+        df_base_existente[df_base_existente["data"] == data_ref_str].copy()
+        if (not df_base_existente.empty and "data" in df_base_existente.columns)
+        else pd.DataFrame()
+    )
+
     if somar_mesma_data and nome_aba in ("entradas_diarias", "saidas_diarias"):
         col_qtd = "qtd_entrada" if nome_aba == "entradas_diarias" else "qtd_saida"
-        registro_hashes = st.session_state.setdefault("hashes_soma_incremental", {})
-        chave_op = f"{nome_aba}::{data_ref_str}"
-        if (
-            hash_arquivo
-            and chave_op in registro_hashes
-            and registro_hashes[chave_op].get("hash") == hash_arquivo
-        ):
-            df_mesmo_dia = registro_hashes[chave_op].get("df_base_antes", pd.DataFrame()).copy()
-        elif not df_base_existente.empty and "data" in df_base_existente.columns:
-            df_mesmo_dia = df_base_existente[df_base_existente["data"] == data_ref_str].copy()
-            if hash_arquivo:
-                registro_hashes[chave_op] = {
-                    "hash": hash_arquivo,
-                    "df_base_antes": df_mesmo_dia.copy(),
-                }
+        if df_mesmo_dia_existente.empty:
+            registro_hashes_sessao[chave_op] = [hash_efetivo] if hash_efetivo else []
         else:
-            df_mesmo_dia = pd.DataFrame()
-            if hash_arquivo:
-                registro_hashes[chave_op] = {
-                    "hash": hash_arquivo,
-                    "df_base_antes": pd.DataFrame(),
+            hashes_ja_no_dia = list(registro_hashes_sessao.get(chave_op, []))
+            if not hashes_ja_no_dia:
+                hash_base_antiga = _calcular_hash_dataframe_dia(df_mesmo_dia_existente, nome_aba)
+                if hash_base_antiga:
+                    hashes_ja_no_dia.append(hash_base_antiga)
+            if hash_efetivo and hash_efetivo in hashes_ja_no_dia:
+                ja_somado_ignorado = True
+                df_novo_dia = df_mesmo_dia_existente.copy()
+            else:
+                df_mesmo_dia = df_mesmo_dia_existente.drop_duplicates(subset=["codigo", "data"], keep="last")
+                df_unido = pd.concat([df_mesmo_dia, df_novo_dia], ignore_index=True)
+                agg_inc = {
+                    "descricao": ("descricao", "last"),
+                    col_qtd: (col_qtd, "sum"),
                 }
+                if "valor_entrada" in df_unido.columns:
+                    agg_inc["valor_entrada"] = ("valor_entrada", "sum")
+                if "valor_venda" in df_unido.columns:
+                    agg_inc["valor_venda"] = ("valor_venda", "sum")
+                agg_inc["data"] = ("data", "last")
+                df_novo_dia = df_unido.groupby("codigo", as_index=False).agg(**agg_inc)
+                if hash_efetivo:
+                    hashes_ja_no_dia.append(hash_efetivo)
+            registro_hashes_sessao[chave_op] = hashes_ja_no_dia
+    elif nome_aba in ("entradas_diarias", "saidas_diarias"):
+        registro_hashes_sessao[chave_op] = [hash_efetivo] if hash_efetivo else []
 
-        if not df_mesmo_dia.empty:
-            df_mesmo_dia = df_mesmo_dia.drop_duplicates(subset=["codigo", "data"], keep="last")
-            df_unido = pd.concat([df_mesmo_dia, df_novo_dia], ignore_index=True)
-            agg_inc = {
-                "descricao": ("descricao", "last"),
-                col_qtd: (col_qtd, "sum"),
-            }
-            if "valor_entrada" in df_unido.columns:
-                agg_inc["valor_entrada"] = ("valor_entrada", "sum")
-            if "valor_venda" in df_unido.columns:
-                agg_inc["valor_venda"] = ("valor_venda", "sum")
-            agg_inc["data"] = ("data", "last")
-            df_novo_dia = df_unido.groupby("codigo", as_index=False).agg(**agg_inc)
-
-    df_novo_padrao = (
-        compactar_estoque_para_historico(df_novo_dia)
-        if nome_aba == "historico"
-        else padronizar_dataframe(df_novo_dia, nome_aba)
-    )
+    df_novo_padrao = padronizar_dataframe(df_novo_dia, nome_aba)
     if df_novo_padrao.empty:
-        return
+        return ja_somado_ignorado
 
     if not df_base_existente.empty and "data" in df_base_existente.columns:
         df_antigo_sem_data = df_base_existente[
@@ -1413,24 +1546,7 @@ def gravar_aba_incremental_por_data_gsheets(
     else:
         ws = obter_ou_criar_aba(planilha, nome_aba, len(df_combinado) + 50, len(df_combinado.columns) + 2)
         migrar_aba_incremental_em_lotes(planilha, ws, df_combinado, nome_aba=nome_aba)
-
-
-def gravar_historico_incremental_gsheets(
-    planilha,
-    df_novo_dia: pd.DataFrame,
-    data_ref: str,
-    df_atual_memoria: pd.DataFrame = None,
-    criar_backup: bool = True,
-):
-    df_compacto = compactar_estoque_para_historico(df_novo_dia)
-    gravar_aba_incremental_por_data_gsheets(
-        planilha,
-        "historico",
-        df_compacto,
-        data_ref,
-        df_atual_memoria=df_atual_memoria,
-        criar_backup=criar_backup,
-    )
+    return ja_somado_ignorado
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1457,6 +1573,8 @@ def carregar_estado_completo() -> dict:
     ult_att = "Sincronizado via Nuvem"
     grupos_pref_custom = {}
     grupos_sku_custom = {}
+    hashes_soma_meta = {}
+    limite_iso_meta = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
     if not df_meta.empty and "chave" in df_meta.columns and "valor" in df_meta.columns:
         mapa_meta = dict(zip(df_meta["chave"], df_meta["valor"]))
         try:
@@ -1475,6 +1593,13 @@ def carregar_estado_completo() -> dict:
                 sku_k = normalizar_codigo_sku(ch_s[len("grp_sku_"):])
                 if sku_k:
                     grupos_sku_custom[sku_k] = val_s
+            elif ch_s.startswith("soma_hashes_") and val_s:
+                chave_aba_dt = ch_s[len("soma_hashes_"):].strip()
+                partes_dt = chave_aba_dt.split("::")
+                if len(partes_dt) == 2 and partes_dt[1] >= limite_iso_meta:
+                    lista_h = [h.strip() for h in val_s.split(",") if h.strip()]
+                    if lista_h:
+                        hashes_soma_meta[chave_aba_dt] = lista_h
     return {
         "estoque_atual": df_est,
         "historico": df_hist,
@@ -1490,6 +1615,7 @@ def carregar_estado_completo() -> dict:
         "ultima_atualizacao": ult_att,
         "grupos_pref_custom": grupos_pref_custom,
         "grupos_sku_custom": grupos_sku_custom,
+        "hashes_soma_meta": hashes_soma_meta,
         "df_meta_bruto": df_meta,
     }
 
@@ -1816,6 +1942,7 @@ def montar_dataframe_meta_completo(
     ult_att_val: str,
     grupos_pref_custom: dict = None,
     grupos_sku_custom: dict = None,
+    hashes_soma_por_data: dict = None,
 ) -> pd.DataFrame:
     linhas = [
         {"chave": "dias_base", "valor": str(int(dias_base_val))},
@@ -1830,6 +1957,19 @@ def montar_dataframe_meta_completo(
             sk_norm = normalizar_codigo_sku(sk)
             if sk_norm and str(sv).strip():
                 linhas.append({"chave": f"grp_sku_{sk_norm}", "valor": str(sv).strip()})
+    hashes_ref = hashes_soma_por_data if hashes_soma_por_data is not None else st.session_state.get("hashes_soma_por_data", {})
+    if hashes_ref:
+        limite_iso_m = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
+        for ch_op, lista_h in sorted(hashes_ref.items()):
+            partes_op = str(ch_op).split("::")
+            if len(partes_op) == 2 and partes_op[1] >= limite_iso_m and lista_h:
+                hashes_unicos = []
+                for h_item in lista_h:
+                    hs = str(h_item).strip()
+                    if hs and hs not in hashes_unicos:
+                        hashes_unicos.append(hs)
+                if hashes_unicos:
+                    linhas.append({"chave": f"soma_hashes_{ch_op}", "valor": ",".join(hashes_unicos)})
     return pd.DataFrame(linhas)
 
 
@@ -2307,9 +2447,10 @@ def processar_planilha_estoque(
     data_pos: date,
     codigos_ref: set,
     ignorar_trava_catalogo: bool = False,
+    ignorar_trava_data: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     aviso_sem_data = validar_coerencia_data_upload(
-        arquivo, data_pos, "Posição de Estoque", ignorar_trava=ignorar_trava_catalogo
+        arquivo, data_pos, "Posição de Estoque", ignorar_trava=ignorar_trava_data
     )
     df_raw = ler_arquivo_upload(arquivo, exigir_multiplas_colunas=True)
     if df_raw.shape[1] < 6:
@@ -2454,9 +2595,10 @@ def processar_planilha_movimento_diario(
     rotulo_amigavel: str,
     codigos_ref: set,
     ignorar_trava_catalogo: bool = False,
+    ignorar_trava_data: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     aviso_sem_data = validar_coerencia_data_upload(
-        arquivo, data_mov, rotulo_amigavel, ignorar_trava=ignorar_trava_catalogo
+        arquivo, data_mov, rotulo_amigavel, ignorar_trava=ignorar_trava_data
     )
     df_raw = ler_arquivo_upload(arquivo, exigir_multiplas_colunas=True)
     if df_raw.shape[1] < 3:
@@ -2839,22 +2981,47 @@ def calcular_motor_giro_sazonal(
             # 1. Comparação direta das planilhas de Estoque Diário (captura quedas de saldo e consumo interno de fábrica)
             queda_direta = (-deltas_geral[cols_transicao]).clip(lower=0.0)
 
-            # 2. Consumo parcial em alta de estoque: só é inferido quando NÃO há planilha de Saídas naquele dia
-            # (se a planilha de Saídas do dia foi importada, a venda do dia já vem explícita em saidas_transicao,
-            # evitando que uma Entrada ainda não lançada no saldo do ERP infle o consumo)
-            cols_sem_planilha_saida = [c for c in cols_transicao if c not in cols_com_planilha_saida]
-            consumo_em_alta = pd.DataFrame(0.0, index=entradas_transicao.index, columns=cols_transicao)
-            if cols_sem_planilha_saida:
-                ent_sem_sai = entradas_transicao[cols_sem_planilha_saida]
-                del_sem_sai = deltas_geral[cols_sem_planilha_saida]
-                mask_alta_parcial = (ent_sem_sai > 0.0) & (del_sem_sai > 0.0) & (del_sem_sai < ent_sem_sai)
-                consumo_em_alta[cols_sem_planilha_saida] = (ent_sem_sai - del_sem_sai).where(mask_alta_parcial, 0.0)
+            # Identifica quais SKUs são Matéria-Prima (MP / grupo 26), que dão saída por Ordem de Produção e não aparecem no relatório de Saídas
+            mapa_desc_prod = (
+                dict(zip(df_prod["codigo"], df_prod["descricao"]))
+                if (df_prod is not None and not df_prod.empty and "descricao" in df_prod.columns)
+                else {}
+            )
+            eh_mp_por_idx = pd.Series(
+                [
+                    str(c).strip().startswith("26")
+                    or str(mapa_desc_prod.get(c, "")).strip().upper().startswith("MP ")
+                    for c in entradas_transicao.index
+                ],
+                index=entradas_transicao.index,
+            )
 
-            # Detecção de NF de Entrada que ainda não refletiu no saldo do ERP (para alerta de auditoria)
+            # 2. Consumo em dia com NF de Entrada:
+            # - Para itens sem saída na planilha de vendas daquele dia (saidas_transicao <= 0) em que o estoque subiu menos que a NF (delta > 0 e delta < entrada): consumo = entrada - delta
+            # - Para Matérias-Primas (MP), cuja NF (Fatu416) já compõe o saldo do dia e a saída é por produção: mesmo que o saldo físico caia no dia da NF (delta <= 0), consumo = (entrada - delta).clip(lower=0)
+            del_trans = deltas_geral[cols_transicao]
+            sem_saida_no_sku_dia = saidas_transicao <= 0.0
+            mask_alta_parcial_sku = (
+                (entradas_transicao > 0.0)
+                & sem_saida_no_sku_dia
+                & (del_trans > 0.0)
+                & (del_trans < entradas_transicao)
+            )
+            mask_mp_com_entrada = (
+                (entradas_transicao > 0.0)
+                & sem_saida_no_sku_dia
+                & eh_mp_por_idx.values[:, None]
+            )
+            consumo_em_alta = (entradas_transicao - del_trans).clip(lower=0.0).where(
+                mask_alta_parcial_sku | mask_mp_com_entrada, 0.0
+            )
+
+            # Detecção de NF de Entrada de mercadoria de revenda que ainda não refletiu no saldo do ERP
+            # (mesmo quando houve saída parcial no dia: se delta + saidas <= 0, a entrada ainda não somou no saldo)
             mask_nf_nao_refletida = (
                 (entradas_transicao > 0.0)
-                & (deltas_geral[cols_transicao] <= 0.0)
-                & (saidas_transicao <= 0.0)
+                & (~eh_mp_por_idx.values[:, None])
+                & ((del_trans + saidas_transicao) <= 0.0)
             )
             if mask_nf_nao_refletida.any().any():
                 alertas_nf_dict = {}
@@ -3081,6 +3248,12 @@ df_pedidos_transito = estado.get("pedidos_transito", pd.DataFrame(columns=ESQUEM
 dias_base_atual = int(estado.get("dias_base", 87))
 grupos_pref_custom = estado.get("grupos_pref_custom", {})
 grupos_sku_custom = estado.get("grupos_sku_custom", {})
+hashes_soma_meta = estado.get("hashes_soma_meta", {})
+if hashes_soma_meta:
+    reg_h_init = st.session_state.setdefault("hashes_soma_por_data", {})
+    for k_hm, v_hm in hashes_soma_meta.items():
+        if k_hm not in reg_h_init:
+            reg_h_init[k_hm] = list(v_hm)
 codigos_ocultos = set(df_ocultos["codigo"].unique()) if not df_ocultos.empty else set()
 codigos_em_transito = set(df_pedidos_transito["codigo"].unique()) if not df_pedidos_transito.empty else set()
 mostrar_ocultos_temp = False
@@ -4517,11 +4690,29 @@ with aba1:
                 type=["xlsx", "xls", "csv"],
                 key="up_base",
             )
-    ignorar_trava_catalogo = st.checkbox(
-        "🔓 Autorizar mudança estrutural de catálogo / data (ignorar trava de 80% de coincidência ou forçar estoque retroativo como atual)",
-        value=False,
-        help="Marque apenas se estiver trocando de ERP, importando uma linha de produtos nova ou se quiser forçar que um estoque de data anterior substitua o estoque atual.",
-    )
+    with st.expander("⚙️ Opções Avançadas de Exceção de Travas (Desmarcado por Padrão — Use Apenas se Necessário)", expanded=False):
+        ct1, ct2, ct3 = st.columns(3)
+        with ct1:
+            ignorar_trava_catalogo = st.checkbox(
+                "🔓 Ignorar trava de 80% de coincidência de códigos",
+                value=False,
+                key="chk_ign_trava_cat",
+                help="Marque apenas se estiver trocando de ERP ou importando uma linha de produtos totalmente nova.",
+            )
+        with ct2:
+            ignorar_trava_data = st.checkbox(
+                "📅 Ignorar trava de data no nome do arquivo / lote",
+                value=False,
+                key="chk_ign_trava_dt",
+                help="Marque apenas se quiser forçar a gravação de um arquivo cuja data no nome seja diferente da data escolhida no seletor.",
+            )
+        with ct3:
+            forcar_estoque_retroativo = st.checkbox(
+                "⏪ Forçar Estoque retroativo como Estoque Atual",
+                value=False,
+                key="chk_forcar_est_retro",
+                help="Por padrão, estoques de datas anteriores vão apenas para o Histórico. Marque apenas se quiser que um estoque antigo substitua o estoque_atual.",
+            )
     btn_sincronizar = st.button(
         "🚀 Processar e Sincronizar com Segurança",
         type="primary",
@@ -4569,18 +4760,17 @@ with aba1:
                     type="primary",
                     use_container_width=True,
                 )
-    with st.expander("⏪ Desfazer Última Importação ou Excluir Data de Movimento (Todas as Abas c/ Backup Automático)", expanded=False):
+    with st.expander("⏪ Desfazer Última Importação ou Excluir Data de Movimento (Backups Automáticos Leves)", expanded=False):
         st.caption(
-            "Restaure a cópia automática imediatamente anterior (`_bkp_*`) de qualquer aba do sistema (Estoque, Entradas, Saídas, Custos, "
-            "Histórico, Base Inicial, Ocultos ou Pedidos em Trânsito) ou remova os lançamentos de uma data específica."
+            "Restaure a cópia automática imediatamente anterior (`_bkp_*`) das abas leves (Estoque Atual, Entradas, Saídas, Custos, "
+            "Base Inicial, Ocultos ou Pedidos em Trânsito) ou remova os lançamentos de uma data específica no Histórico, Entradas ou Saídas."
         )
         cr1, cr2 = st.columns([2, 1])
         mapa_opcoes_restaurar = {
-            "Posição de Estoque (estoque_atual)": ("estoque_atual", df_estoque_bruto),
+            "Posição de Estoque (estoque_atual + ajuste no histórico)": ("estoque_atual", df_estoque_bruto),
             "Entradas Diárias (entradas_diarias)": ("entradas_diarias", df_entradas_bruto),
             "Saídas Diárias (saidas_diarias)": ("saidas_diarias", df_saidas_bruto),
             "Planilha de Custos (custos)": ("custos", df_custos),
-            "Histórico de Estoque 180d (historico)": ("historico", df_historico_bruto),
             "Base Inicial de Vendas (base_inicial)": ("base_inicial", df_base_vendas),
             "Produtos Ocultos (ocultos)": ("ocultos", df_ocultos),
             "Pedidos em Trânsito / Já Comprei (pedidos_transito)": ("pedidos_transito", df_pedidos_transito),
@@ -4685,7 +4875,7 @@ with aba1:
             abas_ja_gravadas = []
             with st.spinner("Validando colunas, códigos e saldos antes de sincronizar com o Google Sheets..."):
                 try:
-                    if arq_estoque is not None and not ignorar_trava_catalogo:
+                    if arq_estoque is not None and not ignorar_trava_data:
                         if arq_entradas is not None and data_entrada >= data_posicao:
                             raise ValueError(
                                 f"Trava de Coerência Temporal: A data das **Entradas ({data_entrada.strftime('%d/%m/%Y')})** "
@@ -4721,6 +4911,7 @@ with aba1:
                             data_posicao,
                             codigos_ref=codigos_ref_estoque,
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
+                            ignorar_trava_data=ignorar_trava_data,
                         )
                         codigos_ref_geral = codigos_ref_geral | set(novo_estoque["codigo"].unique())
                         datas_est_existentes = (
@@ -4729,7 +4920,7 @@ with aba1:
                             else []
                         )
                         maior_data_est_atual = datas_est_existentes[-1] if datas_est_existentes else ""
-                        if maior_data_est_atual and data_str < maior_data_est_atual and not ignorar_trava_catalogo:
+                        if maior_data_est_atual and data_str < maior_data_est_atual and not forcar_estoque_retroativo:
                             atualizar_aba_estoque_atual = False
                             teve_alerta = True
                             dt_at_fmt = pd.to_datetime(maior_data_est_atual, format="%Y-%m-%d", errors="coerce")
@@ -4759,7 +4950,10 @@ with aba1:
                             mensagens_auditoria_upload.append(info_dup_est["aviso_sem_data"])
                     df_custos_via_entrada = pd.DataFrame()
                     info_upsert_custo_ent = {}
+                    hash_arq_ent = ""
+                    ent_ja_somada_antes = False
                     if arq_entradas is not None:
+                        hash_arq_ent = hashlib.sha256(arq_entradas.getvalue()).hexdigest()[:16]
                         novas_entradas, info_ent = processar_planilha_movimento_diario(
                             arquivo=arq_entradas,
                             data_mov=data_entrada,
@@ -4768,13 +4962,35 @@ with aba1:
                             rotulo_amigavel="Entradas Diárias",
                             codigos_ref=codigos_ref_geral,
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
+                            ignorar_trava_data=ignorar_trava_data,
                         )
+                        dt_ent_iso = data_entrada.strftime("%Y-%m-%d")
+                        chave_op_ent = f"entradas_diarias::{dt_ent_iso}"
+                        hashes_ent_ja_no_dia = list(
+                            st.session_state.get("hashes_soma_por_data", {}).get(
+                                chave_op_ent, hashes_soma_meta.get(chave_op_ent, [])
+                            )
+                        )
+                        if (
+                            somar_entradas_mesmo_dia
+                            and not hashes_ent_ja_no_dia
+                            and not df_entradas_bruto.empty
+                            and "data" in df_entradas_bruto.columns
+                        ):
+                            df_ent_dia_atual = df_entradas_bruto[df_entradas_bruto["data"] == dt_ent_iso]
+                            if not df_ent_dia_atual.empty:
+                                h_ant_e = _calcular_hash_dataframe_dia(df_ent_dia_atual, "entradas_diarias")
+                                if h_ant_e:
+                                    hashes_ent_ja_no_dia.append(h_ant_e)
+                        if somar_entradas_mesmo_dia and hash_arq_ent and hash_arq_ent in hashes_ent_ja_no_dia:
+                            ent_ja_somada_antes = True
+
                         modo_ent_str = "somadas ao dia" if somar_entradas_mesmo_dia else "gravadas"
                         col_val_ent_nome = info_ent.get("coluna_valor_entrada", "")
                         df_ext_c = info_ent.get("df_custos_extraidos", pd.DataFrame()).copy()
-                        dt_ent_iso = data_entrada.strftime("%Y-%m-%d")
                         if (
                             somar_entradas_mesmo_dia
+                            and (not ent_ja_somada_antes)
                             and not df_ext_c.empty
                             and not df_entradas_bruto.empty
                             and "data" in df_entradas_bruto.columns
@@ -4802,32 +5018,39 @@ with aba1:
                                 df_soma_c["custo_unitario"] = (df_soma_c["valor_entrada"] / df_soma_c["qtd_entrada"]).round(4)
                                 df_ext_c = df_soma_c[["codigo", "descricao", "custo_unitario"]].copy()
 
-                        if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
-                            rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
-                            if atualizar_custo_pela_entrada:
-                                df_custos_via_entrada, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
-                                    df_custos_atual=df_custos,
-                                    df_custos_novos_entrada=df_ext_c,
-                                    data_entrada_iso=dt_ent_iso,
-                                    df_entradas_historico=df_entradas_bruto,
-                                    limite_alerta_variacao_pct=20.0,
-                                )
-                                tot_c_aplicados = info_upsert_custo_ent["qtd_atualizados"] + info_upsert_custo_ent["qtd_inseridos"]
-                                str_val_ent = (
-                                    f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
-                                    f"➔ 💰 **{formatar_num_br(tot_c_aplicados)} custo(s) unitário(s) atualizado(s)**"
-                                )
-                            else:
-                                str_val_ent = (
-                                    f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
-                                    f"(Custos C1 mantidos s/ alteração conforme opção)"
-                                )
+                        if ent_ja_somada_antes:
+                            teve_alerta = True
+                            mensagens_auditoria_upload.append(
+                                f"🛡️ **Proteção contra Soma Duplicada (Entradas {data_entrada.strftime('%d/%m')}):** "
+                                f"Este arquivo exato (`{arq_entradas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as quantidades!"
+                            )
                         else:
-                            str_val_ent = ""
-                        mensagens_auditoria_upload.append(
-                            f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs {modo_ent_str} "
-                            f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.{str_val_ent})."
-                        )
+                            if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
+                                rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
+                                if atualizar_custo_pela_entrada:
+                                    df_custos_via_entrada, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
+                                        df_custos_atual=df_custos,
+                                        df_custos_novos_entrada=df_ext_c,
+                                        data_entrada_iso=dt_ent_iso,
+                                        df_entradas_historico=df_entradas_bruto,
+                                        limite_alerta_variacao_pct=20.0,
+                                    )
+                                    tot_c_aplicados = info_upsert_custo_ent["qtd_atualizados"] + info_upsert_custo_ent["qtd_inseridos"]
+                                    str_val_ent = (
+                                        f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                        f"➔ 💰 **{formatar_num_br(tot_c_aplicados)} custo(s) unitário(s) atualizado(s)**"
+                                    )
+                                else:
+                                    str_val_ent = (
+                                        f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                        f"(Custos C1 mantidos s/ alteração conforme opção)"
+                                    )
+                            else:
+                                str_val_ent = ""
+                            mensagens_auditoria_upload.append(
+                                f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs {modo_ent_str} "
+                                f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.{str_val_ent})."
+                            )
                         if info_upsert_custo_ent.get("qtd_ignorados_data_antiga", 0) > 0:
                             teve_alerta = True
                             ex_ign_dt = ", ".join(info_upsert_custo_ent["exemplos_ignorados_data"])
@@ -4842,7 +5065,7 @@ with aba1:
                                 f"⚠️ **Alerta de Variação de Custo (> 20%) na Entrada:** {formatar_num_br(info_upsert_custo_ent['qtd_alertas_variacao'])} produto(s) "
                                 f"tiveram alteração brusca em relação ao custo anterior: {ex_var_c}. Confira se a unidade da NF está correta!"
                             )
-                        if info_ent.get("qtd_codigos_repetidos", 0) > 0:
+                        if info_ent.get("qtd_codigos_repetidos", 0) > 0 and not ent_ja_somada_antes:
                             teve_alerta = True
                             ex_rep_ent = ", ".join(info_ent["exemplos_repetidos"])
                             mensagens_auditoria_upload.append(
@@ -4862,6 +5085,7 @@ with aba1:
                             rotulo_amigavel="Saídas Diárias",
                             codigos_ref=codigos_ref_geral,
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
+                            ignorar_trava_data=ignorar_trava_data,
                         )
                         modo_sai_str = "somadas ao dia" if somar_saidas_mesmo_dia else "gravadas"
                         col_val_nome = info_sai.get("coluna_valor_venda", "")
@@ -4934,12 +5158,9 @@ with aba1:
                             planilha_gsheets,
                             novo_estoque,
                             data_str,
-                            df_atual_memoria=df_historico_bruto,
-                            criar_backup=True,
                         )
                         abas_ja_gravadas.append("historico")
                     if novas_entradas is not None:
-                        hash_arq_ent = hashlib.sha256(arq_entradas.getvalue()).hexdigest()[:16] if arq_entradas is not None else ""
                         gravar_aba_incremental_por_data_gsheets(
                             planilha_gsheets,
                             "entradas_diarias",
@@ -4949,6 +5170,7 @@ with aba1:
                             df_atual_memoria=df_entradas_bruto,
                             hash_arquivo=hash_arq_ent,
                             criar_backup=True,
+                            hashes_soma_atuais=hashes_soma_meta,
                         )
                         abas_ja_gravadas.append("entradas_diarias")
                         if not df_pedidos_transito.empty:
@@ -4970,7 +5192,7 @@ with aba1:
                                 )
                     if novas_saidas is not None:
                         hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
-                        gravar_aba_incremental_por_data_gsheets(
+                        sai_ja_somada = gravar_aba_incremental_por_data_gsheets(
                             planilha_gsheets,
                             "saidas_diarias",
                             novas_saidas,
@@ -4979,7 +5201,14 @@ with aba1:
                             df_atual_memoria=df_saidas_bruto,
                             hash_arquivo=hash_arq_sai,
                             criar_backup=True,
+                            hashes_soma_atuais=hashes_soma_meta,
                         )
+                        if sai_ja_somada:
+                            teve_alerta = True
+                            mensagens_auditoria_upload.append(
+                                f"🛡️ **Proteção contra Soma Duplicada (Saídas {data_saida.strftime('%d/%m')}):** "
+                                f"Este arquivo exato (`{arq_saidas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as vendas!"
+                            )
                         abas_ja_gravadas.append("saidas_diarias")
                     if novos_custos is not None:
                         if not df_custos_via_entrada.empty:
