@@ -4474,7 +4474,7 @@ with aba2:
     with c_op1:
         incluir_zerados_com_giro = st.checkbox(
             "Incluir Saldo = 0 c/ giro",
-            value=True,
+            value=False,
         )
     with c_op2:
         usar_sugestao_reforcada_pico = st.checkbox(
@@ -5072,13 +5072,13 @@ with aba3:
             escopo_fefo = st.selectbox(
                 "🏢 Escopo de Produtos:",
                 options=[
-                    "🏪 Apenas Loja Varejo (Ocultar MP Fábrica)",
                     "🏢 Todos os Produtos (Loja + Fábrica MP)",
+                    "🏪 Apenas Loja Varejo (Ocultar MP Fábrica)",
                     "🏭 Apenas Fábrica / Matéria-Prima (MP)",
                 ],
                 index=0,
                 key="fefo_escopo_sel",
-                help="Por padrão foca nos produtos de prateleira/varejo onde cabem promoções comerciais.",
+                help="Por padrão exibe todos os produtos (Loja + Fábrica MP). Você pode filtrar apenas Varejo ou apenas MP.",
             )
         with c_p2:
             janela_giro_fefo = st.selectbox(
