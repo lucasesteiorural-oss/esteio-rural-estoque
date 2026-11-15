@@ -1456,6 +1456,8 @@ def carregar_estado_completo() -> dict:
     df_meta = ler_aba_bruta_gsheets(planilha, "meta")
     dias_base = 87
     ult_att = "Sincronizado via Nuvem"
+    grupos_pref_custom = {}
+    grupos_sku_custom = {}
     if not df_meta.empty and "chave" in df_meta.columns and "valor" in df_meta.columns:
         mapa_meta = dict(zip(df_meta["chave"], df_meta["valor"]))
         try:
@@ -1463,6 +1465,17 @@ def carregar_estado_completo() -> dict:
         except ValueError:
             dias_base = 87
         ult_att = mapa_meta.get("ultima_atualizacao", ult_att)
+        for ch_m, val_m in mapa_meta.items():
+            ch_s = str(ch_m).strip()
+            val_s = str(val_m).strip()
+            if ch_s.startswith("grp_pref_") and val_s:
+                pref_k = ch_s[len("grp_pref_"):].strip()
+                if pref_k:
+                    grupos_pref_custom[pref_k] = val_s
+            elif ch_s.startswith("grp_sku_") and val_s:
+                sku_k = normalizar_codigo_sku(ch_s[len("grp_sku_"):])
+                if sku_k:
+                    grupos_sku_custom[sku_k] = val_s
     return {
         "estoque_atual": df_est,
         "historico": df_hist,
@@ -1476,6 +1489,9 @@ def carregar_estado_completo() -> dict:
         "expirados_15d_recente": cods_exp_15d,
         "dias_base": dias_base,
         "ultima_atualizacao": ult_att,
+        "grupos_pref_custom": grupos_pref_custom,
+        "grupos_sku_custom": grupos_sku_custom,
+        "df_meta_bruto": df_meta,
     }
 
 
@@ -1521,13 +1537,16 @@ def _formatar_e_centralizar_aba_openpyxl(ws):
 def gerar_excel_banco_dados(estado: dict) -> bytes:
     from openpyxl import load_workbook
     buffer_xlsx = io.BytesIO()
-    df_meta_bkp = pd.DataFrame(
-        [
-            {"chave": "dias_base", "valor": str(estado.get("dias_base", 87))},
-            {"chave": "ultima_atualizacao", "valor": str(estado.get("ultima_atualizacao", "-"))},
-            {"chave": "data_exportacao_backup", "valor": agora_br().strftime("%d/%m/%Y %H:%M:%S")},
-        ]
-    )
+    linhas_meta_bkp = [
+        {"chave": "dias_base", "valor": str(estado.get("dias_base", 87))},
+        {"chave": "ultima_atualizacao", "valor": str(estado.get("ultima_atualizacao", "-"))},
+        {"chave": "data_exportacao_backup", "valor": agora_br().strftime("%d/%m/%Y %H:%M:%S")},
+    ]
+    for pref_k, nome_g in sorted((estado.get("grupos_pref_custom") or {}).items()):
+        linhas_meta_bkp.append({"chave": f"grp_pref_{pref_k}", "valor": str(nome_g)})
+    for sku_k, nome_g in sorted((estado.get("grupos_sku_custom") or {}).items()):
+        linhas_meta_bkp.append({"chave": f"grp_sku_{sku_k}", "valor": str(nome_g)})
+    df_meta_bkp = pd.DataFrame(linhas_meta_bkp)
     with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
         estado.get("estoque_atual", pd.DataFrame()).to_excel(writer, sheet_name="estoque_atual", index=False)
         estado.get("entradas_diarias", pd.DataFrame()).to_excel(writer, sheet_name="entradas_diarias", index=False)
@@ -1767,10 +1786,113 @@ MAPA_DEPARTAMENTOS_SIAGRI = {
 }
 
 
-def identificar_departamento_sku(codigo: str) -> str:
-    cod_s = str(codigo).strip()
+def construir_mapa_departamentos(mapa_pref_custom: dict = None) -> dict:
+    mapa = dict(MAPA_DEPARTAMENTOS_SIAGRI)
+    if mapa_pref_custom:
+        for k, v in mapa_pref_custom.items():
+            ks = str(k).strip()
+            vs = str(v).strip()
+            if ks and vs:
+                mapa[ks] = vs
+    return mapa
+
+
+def identificar_departamento_sku(
+    codigo: str,
+    mapa_pref_custom: dict = None,
+    mapa_sku_custom: dict = None,
+) -> str:
+    cod_s = normalizar_codigo_sku(codigo)
+    if not cod_s:
+        cod_s = str(codigo).strip()
+    if mapa_sku_custom and cod_s in mapa_sku_custom and str(mapa_sku_custom[cod_s]).strip():
+        return str(mapa_sku_custom[cod_s]).strip()
     pref = cod_s[:2] if len(cod_s) >= 2 else cod_s
-    return MAPA_DEPARTAMENTOS_SIAGRI.get(pref, f"Outros ({pref or 'S/C'})")
+    mapa_base = construir_mapa_departamentos(mapa_pref_custom)
+    return mapa_base.get(pref, f"Outros ({pref or 'S/C'})")
+
+
+def montar_dataframe_meta_completo(
+    dias_base_val: int,
+    ult_att_val: str,
+    grupos_pref_custom: dict = None,
+    grupos_sku_custom: dict = None,
+) -> pd.DataFrame:
+    linhas = [
+        {"chave": "dias_base", "valor": str(int(dias_base_val))},
+        {"chave": "ultima_atualizacao", "valor": str(ult_att_val)},
+    ]
+    if grupos_pref_custom:
+        for pk, pv in sorted(grupos_pref_custom.items()):
+            if str(pk).strip() and str(pv).strip():
+                linhas.append({"chave": f"grp_pref_{str(pk).strip()}", "valor": str(pv).strip()})
+    if grupos_sku_custom:
+        for sk, sv in sorted(grupos_sku_custom.items()):
+            sk_norm = normalizar_codigo_sku(sk)
+            if sk_norm and str(sv).strip():
+                linhas.append({"chave": f"grp_sku_{sk_norm}", "valor": str(sv).strip()})
+    return pd.DataFrame(linhas)
+
+
+def _renderizar_dataframe_selecionavel(
+    styler_ou_df,
+    key: str,
+    height: int = None,
+    column_config: dict = None,
+) -> list:
+    """Renderiza st.dataframe com seleção de linha (on_select='rerun') e retorna os índices clicados."""
+    kwargs_df = {
+        "use_container_width": True,
+        "hide_index": True,
+        "key": key,
+    }
+    if height is not None:
+        kwargs_df["height"] = height
+    if column_config is not None:
+        kwargs_df["column_config"] = column_config
+    try:
+        evento = st.dataframe(
+            styler_ou_df,
+            on_select="rerun",
+            selection_mode="single-row",
+            **kwargs_df,
+        )
+        if evento is not None and hasattr(evento, "selection") and hasattr(evento.selection, "rows"):
+            return list(evento.selection.rows)
+        if isinstance(evento, dict):
+            return list(evento.get("selection", {}).get("rows", []))
+    except TypeError:
+        st.dataframe(styler_ou_df, **kwargs_df)
+    return []
+
+
+def _extrair_selecao_altair(evento, campo_alvo: str):
+    """Extrai o valor clicado em um gráfico interativo st.altair_chart(on_select='rerun')."""
+    if evento is None:
+        return None
+    sel_dict = None
+    if hasattr(evento, "selection"):
+        sel_dict = evento.selection
+    elif isinstance(evento, dict):
+        sel_dict = evento.get("selection")
+    if not sel_dict:
+        return None
+    try:
+        itens = dict(sel_dict) if not isinstance(sel_dict, dict) else sel_dict
+    except Exception:
+        return None
+    for _, val_sel in itens.items():
+        if isinstance(val_sel, list) and len(val_sel) > 0 and isinstance(val_sel[0], dict):
+            if campo_alvo in val_sel[0]:
+                return val_sel[0][campo_alvo]
+        elif isinstance(val_sel, dict):
+            if campo_alvo in val_sel:
+                v_c = val_sel[campo_alvo]
+                if isinstance(v_c, list) and v_c:
+                    return v_c[0]
+                if isinstance(v_c, str):
+                    return v_c
+    return None
 
 
 
@@ -2877,6 +2999,8 @@ df_base_vendas = estado["base_inicial"]
 df_ocultos = estado["ocultos"]
 df_pedidos_transito = estado.get("pedidos_transito", pd.DataFrame(columns=ESQUEMA_ABAS["pedidos_transito"]))
 dias_base_atual = int(estado.get("dias_base", 87))
+grupos_pref_custom = estado.get("grupos_pref_custom", {})
+grupos_sku_custom = estado.get("grupos_sku_custom", {})
 codigos_ocultos = set(df_ocultos["codigo"].unique()) if not df_ocultos.empty else set()
 codigos_em_transito = set(df_pedidos_transito["codigo"].unique()) if not df_pedidos_transito.empty else set()
 mostrar_ocultos_temp = False
@@ -2963,16 +3087,31 @@ with aba_dash:
         else:
             df_bi["custo_unitario"] = 0.0
 
-        df_bi["eh_mp"] = (
-            df_bi["descricao"].astype(str).str.strip().str.upper().str.startswith("MP ")
-            | df_bi["codigo"].astype(str).str.startswith("26")
+        df_bi["departamento"] = df_bi["codigo"].map(
+            lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
         )
+        df_bi["eh_mp"] = [
+            True
+            if (
+                str(dep).strip().startswith("26")
+                or "matéria-prima" in str(dep).lower()
+                or "materia-prima" in str(dep).lower()
+                or "(mp)" in str(dep).lower()
+            )
+            else (
+                False
+                if str(cod) in grupos_sku_custom
+                else (
+                    str(desc).strip().upper().startswith("MP ")
+                    or str(cod).strip().startswith("26")
+                )
+            )
+            for cod, desc, dep in zip(df_bi["codigo"], df_bi["descricao"], df_bi["departamento"])
+        ]
         if visao_operacional_bi.startswith("🏪"):
             df_bi = df_bi[~df_bi["eh_mp"]].copy()
         elif visao_operacional_bi.startswith("🏭"):
             df_bi = df_bi[df_bi["eh_mp"]].copy()
-
-        df_bi["departamento"] = df_bi["codigo"].map(identificar_departamento_sku)
         opcoes_depto_bi = sorted(df_bi["departamento"].unique())
         with f_col2:
             deptos_sel_bi = st.multiselect(
@@ -3184,8 +3323,12 @@ with aba_dash:
 
         st.markdown("---")
         g_col1, g_col2 = st.columns(2)
+        faixa_saude_clicada = None
+        depto_clicado = None
+
         with g_col1:
             st.markdown("#### 1. Saúde do Capital Imobilizado por Autonomia de Giro")
+            st.caption("👆 **Clique em uma barra do gráfico ou em uma linha da tabela** para abrir os produtos daquele grupo!")
             df_ativos_bi = df_bi[df_bi["saldo_pos"] > 0].copy()
             if not df_ativos_bi.empty:
                 res_saude_bi = (
@@ -3196,39 +3339,75 @@ with aba_dash:
                         CMV_Mensal=("cmv_mensal", "sum"),
                     )
                     .sort_values("faixa_saude")
+                    .reset_index(drop=True)
                 )
                 res_saude_bi["% Capital"] = (res_saude_bi["Capital"] / max(tot_cap_bi, 1.0)) * 100.0
-                st.bar_chart(
-                    res_saude_bi.set_index("faixa_saude")[["Capital"]],
-                    use_container_width=True,
-                    height=260,
-                )
+
+                try:
+                    import altair as alt
+                    sel_bar_saude = alt.selection_point(fields=["faixa_saude"], name="sel_saude")
+                    chart_saude = (
+                        alt.Chart(res_saude_bi)
+                        .mark_bar(cornerRadiusEnd=6, height=26)
+                        .encode(
+                            x=alt.X("Capital:Q", title="Capital Imobilizado (R$)"),
+                            y=alt.Y("faixa_saude:N", sort=list(res_saude_bi["faixa_saude"]), title=None, axis=alt.Axis(labelLimit=260)),
+                            color=alt.Color(
+                                "faixa_saude:N",
+                                legend=None,
+                                scale=alt.Scale(scheme="tealblues"),
+                            ),
+                            opacity=alt.condition(sel_bar_saude, alt.value(1.0), alt.value(0.55)),
+                            tooltip=[
+                                alt.Tooltip("faixa_saude:N", title="Faixa de Saúde"),
+                                alt.Tooltip("SKUs:Q", title="SKUs", format=",d"),
+                                alt.Tooltip("Capital:Q", title="Capital (R$)", format=",.2f"),
+                                alt.Tooltip("CMV_Mensal:Q", title="CMV Mensal (R$)", format=",.2f"),
+                            ],
+                        )
+                        .add_params(sel_bar_saude)
+                        .properties(height=235)
+                    )
+                    ev_chart_s = st.altair_chart(chart_saude, use_container_width=True, on_select="rerun", key="alt_chart_saude_bi")
+                    faixa_saude_clicada = _extrair_selecao_altair(ev_chart_s, "faixa_saude")
+                except Exception:
+                    st.bar_chart(
+                        res_saude_bi.set_index("faixa_saude")[["Capital"]],
+                        use_container_width=True,
+                        height=235,
+                    )
+
                 df_saude_exib = res_saude_bi.rename(
                     columns={
-                        "faixa_saude": "Faixa de Saúde (Autonomia)",
-                        "Capital": "Capital Imobilizado (R$)",
-                        "CMV_Mensal": "Giro Mensal CMV (R$)",
+                        "faixa_saude": "Faixa de Saúde",
+                        "Capital": "Capital (R$)",
+                        "CMV_Mensal": "CMV/Mês (R$)",
+                        "% Capital": "% Cap.",
                     }
                 )
-                st.dataframe(
+                linhas_sel_saude = _renderizar_dataframe_selecionavel(
                     estilizar_tabela_br(
                         df_saude_exib,
                         formatadores={
                             "SKUs": formatar_num_br,
-                            "Capital Imobilizado (R$)": formatar_moeda_br,
-                            "Giro Mensal CMV (R$)": formatar_moeda_br,
-                            "% Capital": lambda x: formatar_pct_br(x, 1),
+                            "Capital (R$)": formatar_moeda_br,
+                            "CMV/Mês (R$)": formatar_moeda_br,
+                            "% Cap.": lambda x: formatar_pct_br(x, 1),
                         },
-                        colunas_esquerda=["Faixa de Saúde (Autonomia)"],
+                        colunas_esquerda=["Faixa de Saúde"],
                     ),
-                    use_container_width=True,
-                    hide_index=True,
+                    key="df_sel_saude_bi",
                 )
+                if linhas_sel_saude:
+                    idx_s = linhas_sel_saude[0]
+                    if 0 <= idx_s < len(res_saude_bi):
+                        faixa_saude_clicada = str(res_saude_bi.iloc[idx_s]["faixa_saude"])
             else:
                 st.info("Nenhum item com saldo positivo no filtro atual.")
 
         with g_col2:
             st.markdown("#### 2. Capital Imobilizado vs. Giro Mensal (CMV) por Departamento")
+            st.caption("👆 **Clique na linha do grupo (ex: `50 - Veterinária`) ou na barra** para abrir os produtos daquele grupo!")
             res_depto_bi = (
                 df_bi.groupby("departamento", as_index=False)
                 .agg(
@@ -3238,213 +3417,451 @@ with aba_dash:
                 )
                 .sort_values("Capital", ascending=False)
             )
-            res_depto_bi = res_depto_bi[(res_depto_bi["Capital"] > 0) | (res_depto_bi["CMV_Mensal"] > 0)].copy()
+            res_depto_bi = res_depto_bi[(res_depto_bi["Capital"] > 0) | (res_depto_bi["CMV_Mensal"] > 0)].reset_index(drop=True)
             if not res_depto_bi.empty:
-                res_depto_bi["Cobertura (Dias)"] = [
+                res_depto_bi["Cobertura"] = [
                     round(c / (m / 30.0), 0) if m > 0 else 999.0
                     for c, m in zip(res_depto_bi["Capital"], res_depto_bi["CMV_Mensal"])
                 ]
-                st.bar_chart(
-                    res_depto_bi.set_index("departamento")[["Capital", "CMV_Mensal"]],
-                    use_container_width=True,
-                    height=260,
-                )
+                try:
+                    import altair as alt
+                    sel_bar_dep = alt.selection_point(fields=["departamento"], name="sel_depto")
+                    chart_dep = (
+                        alt.Chart(res_depto_bi.head(12))
+                        .mark_bar(cornerRadiusEnd=6, height=18)
+                        .encode(
+                            x=alt.X("Capital:Q", title="Capital Atual (R$)"),
+                            y=alt.Y("departamento:N", sort="-x", title=None, axis=alt.Axis(labelLimit=240)),
+                            color=alt.value("#38bdf8"),
+                            opacity=alt.condition(sel_bar_dep, alt.value(1.0), alt.value(0.55)),
+                            tooltip=[
+                                alt.Tooltip("departamento:N", title="Grupo / Departamento"),
+                                alt.Tooltip("SKUs:Q", title="SKUs c/ Saldo", format=",d"),
+                                alt.Tooltip("Capital:Q", title="Capital Atual (R$)", format=",.2f"),
+                                alt.Tooltip("CMV_Mensal:Q", title="Giro CMV/Mês (R$)", format=",.2f"),
+                            ],
+                        )
+                        .add_params(sel_bar_dep)
+                        .properties(height=235)
+                    )
+                    ev_chart_d = st.altair_chart(chart_dep, use_container_width=True, on_select="rerun", key="alt_chart_depto_bi")
+                    depto_clicado = _extrair_selecao_altair(ev_chart_d, "departamento")
+                except Exception:
+                    st.bar_chart(
+                        res_depto_bi.set_index("departamento")[["Capital", "CMV_Mensal"]],
+                        use_container_width=True,
+                        height=235,
+                    )
+
                 df_dep_exib = res_depto_bi.rename(
                     columns={
-                        "departamento": "Departamento / Linha",
-                        "SKUs": "SKUs c/ Saldo",
-                        "Capital": "Capital Atual (R$)",
-                        "CMV_Mensal": "Giro Mensal CMV (R$)",
+                        "departamento": "Grupo / Departamento",
+                        "SKUs": "SKUs",
+                        "Capital": "Capital (R$)",
+                        "CMV_Mensal": "CMV/Mês (R$)",
                     }
                 )
-                st.dataframe(
+                linhas_sel_dep = _renderizar_dataframe_selecionavel(
                     estilizar_tabela_br(
                         df_dep_exib,
                         formatadores={
-                            "SKUs c/ Saldo": formatar_num_br,
-                            "Capital Atual (R$)": formatar_moeda_br,
-                            "Giro Mensal CMV (R$)": formatar_moeda_br,
-                            "Cobertura (Dias)": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else f"{formatar_num_br(x, 0)}d",
+                            "SKUs": formatar_num_br,
+                            "Capital (R$)": formatar_moeda_br,
+                            "CMV/Mês (R$)": formatar_moeda_br,
+                            "Cobertura": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else f"{formatar_num_br(x, 0)}d",
                         },
-                        colunas_esquerda=["Departamento / Linha"],
+                        colunas_esquerda=["Grupo / Departamento"],
+                    ),
+                    key="df_sel_depto_bi",
+                )
+                if linhas_sel_dep:
+                    idx_d = linhas_sel_dep[0]
+                    if 0 <= idx_d < len(res_depto_bi):
+                        depto_clicado = str(res_depto_bi.iloc[idx_d]["departamento"])
+
+        # Painel de Detalhamento Interativo (Drill-Down) quando o usuário clica no Quadro 1 ou no Quadro 2
+        if faixa_saude_clicada:
+            df_det_s = (
+                df_ativos_bi[df_ativos_bi["faixa_saude"] == faixa_saude_clicada]
+                .sort_values(["valor_estoque", "cmv_mensal"], ascending=[False, False])
+                .reset_index(drop=True)
+            )
+            with st.container():
+                st.markdown(
+                    f"##### 🔎 Produtos na Faixa Selecionada: **{faixa_saude_clicada}** "
+                    f"({formatar_num_br(len(df_det_s))} SKUs | Capital: {formatar_moeda_br(df_det_s['valor_estoque'].sum())})"
+                )
+                cs1, cs2 = st.columns([2.2, 1.0])
+                with cs1:
+                    busca_det_s = st.text_input(
+                        "🔍 Filtrar produto dentro desta faixa de saúde:",
+                        placeholder="Digite código ou nome do produto...",
+                        key="busca_drill_saude_bi",
+                    )
+                if busca_det_s and busca_det_s.strip():
+                    ts_b = busca_det_s.lower().strip()
+                    df_det_s = df_det_s[
+                        df_det_s["codigo"].str.lower().str.contains(ts_b, na=False, regex=False)
+                        | df_det_s["descricao"].str.lower().str.contains(ts_b, na=False, regex=False)
+                    ].copy()
+                df_det_s_exib = df_det_s[
+                    ["codigo", "descricao", "departamento", "saldo_atual", "custo_unitario", "valor_estoque", "giro_dia", "cmv_mensal", "autonomia_dias"]
+                ].rename(
+                    columns={
+                        "codigo": "Cód.",
+                        "descricao": "Descrição",
+                        "departamento": "Grupo / Departamento",
+                        "saldo_atual": "Saldo",
+                        "custo_unitario": "Custo Un. (R$)",
+                        "valor_estoque": "Capital (R$)",
+                        "giro_dia": "Giro/Dia",
+                        "cmv_mensal": "CMV/Mês (R$)",
+                        "autonomia_dias": "Autonomia",
+                    }
+                )
+                with cs2:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    st.download_button(
+                        label="📥 Baixar Produtos desta Faixa (.xlsx)",
+                        data=gerar_excel_relatorio(df_det_s_exib, "Produtos_Faixa_Saude"),
+                        file_name=f"Produtos_Saude_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_drill_saude_bi",
+                    )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_det_s_exib,
+                        formatadores={
+                            "Saldo": formatar_qtd_br,
+                            "Custo Un. (R$)": formatar_moeda_br,
+                            "Capital (R$)": formatar_moeda_br,
+                            "Giro/Dia": lambda x: formatar_num_br(x, 3) if (pd.notna(x) and 0 < float(x) < 0.05) else formatar_num_br(x, 2),
+                            "CMV/Mês (R$)": formatar_moeda_br,
+                            "Autonomia": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else f"{formatar_num_br(x, 1)}d",
+                        },
+                        colunas_esquerda=["Descrição", "Grupo / Departamento"],
                     ),
                     use_container_width=True,
                     hide_index=True,
+                    height=320,
+                )
+
+        if depto_clicado:
+            df_det_d = (
+                df_bi[(df_bi["departamento"] == depto_clicado) & ((df_bi["saldo_pos"] > 0) | (df_bi["cmv_mensal"] > 0))]
+                .sort_values(["valor_estoque", "cmv_mensal"], ascending=[False, False])
+                .reset_index(drop=True)
+            )
+            with st.container():
+                st.markdown(
+                    f"##### 📂 Produtos do Grupo Selecionado: **{depto_clicado}** "
+                    f"({formatar_num_br(len(df_det_d))} SKUs | Capital: {formatar_moeda_br(df_det_d['valor_estoque'].sum())} | "
+                    f"CMV/Mês: {formatar_moeda_br(df_det_d['cmv_mensal'].sum())})"
+                )
+                cd_b1, cd_b2 = st.columns([2.2, 1.0])
+                with cd_b1:
+                    busca_det_d = st.text_input(
+                        f"🔍 Pesquisar produto dentro de '{depto_clicado}':",
+                        placeholder="Digite código ou nome do produto...",
+                        key="busca_drill_depto_bi",
+                    )
+                if busca_det_d and busca_det_d.strip():
+                    td_b = busca_det_d.lower().strip()
+                    df_det_d = df_det_d[
+                        df_det_d["codigo"].str.lower().str.contains(td_b, na=False, regex=False)
+                        | df_det_d["descricao"].str.lower().str.contains(td_b, na=False, regex=False)
+                    ].copy()
+                df_det_d_exib = df_det_d[
+                    ["codigo", "descricao", "faixa_saude", "saldo_atual", "custo_unitario", "valor_estoque", "giro_dia", "cmv_mensal", "autonomia_dias"]
+                ].rename(
+                    columns={
+                        "codigo": "Cód.",
+                        "descricao": "Descrição",
+                        "faixa_saude": "Faixa de Saúde",
+                        "saldo_atual": "Saldo",
+                        "custo_unitario": "Custo Un. (R$)",
+                        "valor_estoque": "Capital (R$)",
+                        "giro_dia": "Giro/Dia",
+                        "cmv_mensal": "CMV/Mês (R$)",
+                        "autonomia_dias": "Autonomia",
+                    }
+                )
+                with cd_b2:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    st.download_button(
+                        label="📥 Baixar Produtos deste Grupo (.xlsx)",
+                        data=gerar_excel_relatorio(df_det_d_exib, "Produtos_Grupo"),
+                        file_name=f"Produtos_Grupo_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_drill_depto_bi",
+                    )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_det_d_exib,
+                        formatadores={
+                            "Saldo": formatar_qtd_br,
+                            "Custo Un. (R$)": formatar_moeda_br,
+                            "Capital (R$)": formatar_moeda_br,
+                            "Giro/Dia": lambda x: formatar_num_br(x, 3) if (pd.notna(x) and 0 < float(x) < 0.05) else formatar_num_br(x, 2),
+                            "CMV/Mês (R$)": formatar_moeda_br,
+                            "Autonomia": lambda x: "Zerado" if pd.notna(x) and float(x) <= 0 else ("Sem Giro" if pd.notna(x) and float(x) >= 999.0 else f"{formatar_num_br(x, 1)}d"),
+                        },
+                        colunas_esquerda=["Descrição", "Faixa de Saúde"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=320,
                 )
 
         st.markdown("---")
         st.markdown("#### 3. Matriz Estratégica 2D (ABC de Estoque × ABC de Giro) & Listas de Ação Imediata")
-        m_col1, m_col2 = st.columns([1.15, 1.85])
-        with m_col1:
-            quadrantes_bi = [
-                (
-                    "🏆 Campeões Saudáveis (Est. A/B × Giro A)",
-                    df_bi["abc_estoque"].isin(["A", "B"]) & (df_bi["abc_giro"] == "A"),
-                    "Manter reposição contínua",
-                ),
-                (
-                    "🔥 Falsos Classe C / Ruptura Líderes (Est. C/Zero × Giro A)",
-                    df_bi["abc_estoque"].isin(["C", "Sem Estoque"]) & (df_bi["abc_giro"] == "A"),
-                    "Compra imediata (perdendo venda)",
-                ),
-                (
-                    "🐘 Elefantes Brancos (Est. A × Giro C/Sem Giro)",
-                    (df_bi["abc_estoque"] == "A") & df_bi["abc_giro"].isin(["C", "Sem Giro"]),
-                    "Travar compra e promocionar",
-                ),
-                (
-                    "📦 Giro Intermediário Equilibrado (Giro B)",
-                    df_bi["abc_giro"] == "B",
-                    "Reposição regular conforme cobertura",
-                ),
-                (
-                    "💤 Cauda Longa s/ Giro (Est. B/C × Sem Giro)",
-                    df_bi["abc_estoque"].isin(["B", "C"]) & (df_bi["abc_giro"] == "Sem Giro"),
-                    "Liquidar gradualmente no balcão",
-                ),
-            ]
-            linhas_quad = []
-            for nome_q, mask_q, acao_q in quadrantes_bi:
-                sub_q = df_bi[mask_q]
-                linhas_quad.append(
-                    {
-                        "Quadrante Estratégico": nome_q,
-                        "SKUs": len(sub_q),
-                        "Capital (R$)": float(sub_q["valor_estoque"].sum()),
-                        "CMV Mensal (R$)": float(sub_q["cmv_mensal"].sum()),
-                        "Ação Recomendada": acao_q,
+        st.caption(
+            "As duas tabelas abaixo agora ficam **uma embaixo da outra em largura total (100%)** para nunca cortar colunas. "
+            "👆 **Clique em qualquer linha da Matriz Estratégica 2D** para abrir todos os produtos daquele quadrante!"
+        )
+        quadrantes_bi = [
+            (
+                "🏆 Campeões Saudáveis (Est. A/B × Giro A)",
+                df_bi["abc_estoque"].isin(["A", "B"]) & (df_bi["abc_giro"] == "A"),
+                "Manter reposição contínua",
+            ),
+            (
+                "🔥 Falsos Classe C / Ruptura Líderes (Est. C/Zero × Giro A)",
+                df_bi["abc_estoque"].isin(["C", "Sem Estoque"]) & (df_bi["abc_giro"] == "A"),
+                "Compra imediata (perdendo venda)",
+            ),
+            (
+                "🐘 Elefantes Brancos (Est. A × Giro C/Sem Giro)",
+                (df_bi["abc_estoque"] == "A") & df_bi["abc_giro"].isin(["C", "Sem Giro"]),
+                "Travar compra e promocionar",
+            ),
+            (
+                "📦 Giro Intermediário Equilibrado (Giro B)",
+                df_bi["abc_giro"] == "B",
+                "Reposição regular conforme cobertura",
+            ),
+            (
+                "💤 Cauda Longa s/ Giro (Est. B/C × Sem Giro)",
+                df_bi["abc_estoque"].isin(["B", "C"]) & (df_bi["abc_giro"] == "Sem Giro"),
+                "Liquidar gradualmente no balcão",
+            ),
+        ]
+        linhas_quad = []
+        for nome_q, mask_q, acao_q in quadrantes_bi:
+            sub_q = df_bi[mask_q]
+            linhas_quad.append(
+                {
+                    "Quadrante Estratégico": nome_q,
+                    "SKUs": len(sub_q),
+                    "Capital Imobilizado (R$)": float(sub_q["valor_estoque"].sum()),
+                    "Giro CMV Mensal (R$)": float(sub_q["cmv_mensal"].sum()),
+                    "Ação Recomendada": acao_q,
+                }
+            )
+        df_quad_exib = pd.DataFrame(linhas_quad)
+        linhas_sel_quad = _renderizar_dataframe_selecionavel(
+            estilizar_tabela_br(
+                df_quad_exib,
+                formatadores={
+                    "SKUs": formatar_num_br,
+                    "Capital Imobilizado (R$)": formatar_moeda_br,
+                    "Giro CMV Mensal (R$)": formatar_moeda_br,
+                },
+                colunas_esquerda=["Quadrante Estratégico", "Ação Recomendada"],
+            ),
+            key="df_sel_matriz_2d_bi",
+        )
+
+        if linhas_sel_quad:
+            idx_q = linhas_sel_quad[0]
+            if 0 <= idx_q < len(quadrantes_bi):
+                nome_q_sel, mask_q_sel, _ = quadrantes_bi[idx_q]
+                df_det_q = (
+                    df_bi[mask_q_sel]
+                    .sort_values(["cmv_mensal", "valor_estoque"], ascending=[False, False])
+                    .reset_index(drop=True)
+                )
+                st.markdown(
+                    f"##### 🎯 Produtos do Quadrante Selecionado: **{nome_q_sel}** "
+                    f"({formatar_num_br(len(df_det_q))} SKUs | Capital: {formatar_moeda_br(df_det_q['valor_estoque'].sum())} | "
+                    f"CMV/Mês: {formatar_moeda_br(df_det_q['cmv_mensal'].sum())})"
+                )
+                cq1, cq2 = st.columns([2.2, 1.0])
+                with cq1:
+                    busca_det_q = st.text_input(
+                        "🔍 Pesquisar produto dentro deste quadrante:",
+                        placeholder="Digite código ou nome do produto...",
+                        key="busca_drill_quad_bi",
+                    )
+                if busca_det_q and busca_det_q.strip():
+                    tq_b = busca_det_q.lower().strip()
+                    df_det_q = df_det_q[
+                        df_det_q["codigo"].str.lower().str.contains(tq_b, na=False, regex=False)
+                        | df_det_q["descricao"].str.lower().str.contains(tq_b, na=False, regex=False)
+                    ].copy()
+                df_det_q_exib = df_det_q[
+                    ["codigo", "descricao", "departamento", "saldo_atual", "custo_unitario", "valor_estoque", "abc_estoque", "abc_giro", "cmv_mensal", "autonomia_dias"]
+                ].rename(
+                    columns={
+                        "codigo": "Cód.",
+                        "descricao": "Descrição",
+                        "departamento": "Grupo / Departamento",
+                        "saldo_atual": "Saldo",
+                        "custo_unitario": "Custo Un. (R$)",
+                        "valor_estoque": "Capital (R$)",
+                        "abc_estoque": "ABC Est.",
+                        "abc_giro": "ABC Giro",
+                        "cmv_mensal": "CMV/Mês (R$)",
+                        "autonomia_dias": "Autonomia",
                     }
                 )
-            df_quad_exib = pd.DataFrame(linhas_quad)
-            st.dataframe(
-                estilizar_tabela_br(
-                    df_quad_exib,
-                    formatadores={
-                        "SKUs": formatar_num_br,
-                        "Capital (R$)": formatar_moeda_br,
-                        "CMV Mensal (R$)": formatar_moeda_br,
-                    },
-                    colunas_esquerda=["Quadrante Estratégico", "Ação Recomendada"],
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
+                with cq2:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    st.download_button(
+                        label="📥 Baixar Produtos deste Quadrante (.xlsx)",
+                        data=gerar_excel_relatorio(df_det_q_exib, "Produtos_Quadrante"),
+                        file_name=f"Produtos_Quadrante_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_drill_quad_bi",
+                    )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_det_q_exib,
+                        formatadores={
+                            "Saldo": formatar_qtd_br,
+                            "Custo Un. (R$)": formatar_moeda_br,
+                            "Capital (R$)": formatar_moeda_br,
+                            "CMV/Mês (R$)": formatar_moeda_br,
+                            "Autonomia": lambda x: "Zerado" if pd.notna(x) and float(x) <= 0 else ("Sem Giro" if pd.notna(x) and float(x) >= 999.0 else f"{formatar_num_br(x, 1)}d"),
+                        },
+                        colunas_esquerda=["Descrição", "Grupo / Departamento"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=300,
+                )
 
-        with m_col2:
-            sub_tab1, sub_tab2, sub_tab3 = st.tabs(
-                [
-                    f"🔥 Top Campeões em Ruptura / Alerta ({formatar_num_br(qtd_giro_a_ruptura)})",
-                    f"🐘 Top Elefantes Brancos Est. A ({formatar_num_br(elefantes_count)})",
-                    "💰 Top 30 Oportunidades de Destravar Caixa",
-                ]
+        st.markdown("<div style='margin-top: 12px;'></div>", unsafe_allow_html=True)
+        sub_tab1, sub_tab2, sub_tab3 = st.tabs(
+            [
+                f"🔥 Top Campeões em Ruptura / Alerta ({formatar_num_br(qtd_giro_a_ruptura)})",
+                f"🐘 Top Elefantes Brancos Est. A ({formatar_num_br(elefantes_count)})",
+                "💰 Top 30 Oportunidades de Destravar Caixa",
+            ]
+        )
+        with sub_tab1:
+            df_rup_a = (
+                df_bi[(df_bi["abc_giro"] == "A") & ((df_bi["saldo_pos"] <= 0) | (df_bi["autonomia_dias"] <= float(lead_bi))) & (~df_bi["codigo"].isin(codigos_em_transito))]
+                .sort_values("cmv_mensal", ascending=False)
+                .head(30)
             )
-            with sub_tab1:
-                df_rup_a = (
-                    df_bi[(df_bi["abc_giro"] == "A") & ((df_bi["saldo_pos"] <= 0) | (df_bi["autonomia_dias"] <= float(lead_bi))) & (~df_bi["codigo"].isin(codigos_em_transito))]
-                    .sort_values("cmv_mensal", ascending=False)
-                    .head(30)
-                )
-                if df_rup_a.empty:
-                    st.success("✅ Todos os produtos da Curva A de Giro estão com cobertura acima do prazo de entrega!")
-                else:
-                    df_rup_exib = df_rup_a[
-                        ["codigo", "descricao", "saldo_atual", "autonomia_dias", "abc_estoque", "cmv_mensal", "custo_unitario"]
-                    ].rename(
-                        columns={
-                            "codigo": "Código",
-                            "descricao": "Descrição",
-                            "saldo_atual": "Saldo Atual",
-                            "autonomia_dias": "Autonomia (d)",
-                            "abc_estoque": "ABC Est.",
-                            "cmv_mensal": "Giro CMV/Mês (R$)",
-                            "custo_unitario": "Custo Unit. (R$)",
-                        }
-                    )
-                    st.dataframe(
-                        estilizar_tabela_br(
-                            df_rup_exib,
-                            formatadores={
-                                "Saldo Atual": formatar_qtd_br,
-                                "Autonomia (d)": lambda x: "Zerado" if pd.notna(x) and float(x) <= 0 else formatar_num_br(x, 1),
-                                "Giro CMV/Mês (R$)": formatar_moeda_br,
-                                "Custo Unit. (R$)": formatar_moeda_br,
-                            },
-                            colunas_esquerda=["Descrição"],
-                        ),
-                        use_container_width=True,
-                        hide_index=True,
-                        height=250,
-                    )
-            with sub_tab2:
-                df_elef = (
-                    df_bi[(df_bi["abc_estoque"] == "A") & (df_bi["abc_giro"].isin(["C", "Sem Giro"]))]
-                    .sort_values("valor_estoque", ascending=False)
-                    .head(30)
-                )
-                if df_elef.empty:
-                    st.success("✅ Nenhum item Classe A de estoque está parado ou com giro C!")
-                else:
-                    df_elef_exib = df_elef[
-                        ["codigo", "descricao", "saldo_atual", "custo_unitario", "valor_estoque", "abc_giro", "cmv_mensal"]
-                    ].rename(
-                        columns={
-                            "codigo": "Código",
-                            "descricao": "Descrição",
-                            "saldo_atual": "Saldo Atual",
-                            "custo_unitario": "Custo Unit. (R$)",
-                            "valor_estoque": "Capital Parado (R$)",
-                            "abc_giro": "ABC Giro",
-                            "cmv_mensal": "Giro CMV/Mês (R$)",
-                        }
-                    )
-                    st.dataframe(
-                        estilizar_tabela_br(
-                            df_elef_exib,
-                            formatadores={
-                                "Saldo Atual": formatar_qtd_br,
-                                "Custo Unit. (R$)": formatar_moeda_br,
-                                "Capital Parado (R$)": formatar_moeda_br,
-                                "Giro CMV/Mês (R$)": formatar_moeda_br,
-                            },
-                            colunas_esquerda=["Descrição"],
-                        ),
-                        use_container_width=True,
-                        hide_index=True,
-                        height=250,
-                    )
-            with sub_tab3:
-                df_dest = (
-                    df_bi[df_bi["capital_liberavel"] > 0]
-                    .sort_values("capital_liberavel", ascending=False)
-                    .head(30)
-                )
-                df_dest_exib = df_dest[
-                    ["codigo", "descricao", "saldo_atual", "autonomia_dias", "valor_estoque", "capital_liberavel"]
+            if df_rup_a.empty:
+                st.success("✅ Todos os produtos da Curva A de Giro estão com cobertura acima do prazo de entrega!")
+            else:
+                df_rup_exib = df_rup_a[
+                    ["codigo", "descricao", "departamento", "saldo_atual", "autonomia_dias", "abc_estoque", "cmv_mensal", "custo_unitario"]
                 ].rename(
                     columns={
                         "codigo": "Código",
                         "descricao": "Descrição",
+                        "departamento": "Grupo / Departamento",
                         "saldo_atual": "Saldo Atual",
                         "autonomia_dias": "Autonomia (d)",
-                        "valor_estoque": "Estoque Atual (R$)",
-                        "capital_liberavel": f"Excesso >{int(meta_cobertura_bi)}d (R$)",
+                        "abc_estoque": "ABC Est.",
+                        "cmv_mensal": "Giro CMV/Mês (R$)",
+                        "custo_unitario": "Custo Unit. (R$)",
                     }
                 )
                 st.dataframe(
                     estilizar_tabela_br(
-                        df_dest_exib,
+                        df_rup_exib,
                         formatadores={
                             "Saldo Atual": formatar_qtd_br,
-                            "Autonomia (d)": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else formatar_num_br(x, 1),
-                            "Estoque Atual (R$)": formatar_moeda_br,
-                            f"Excesso >{int(meta_cobertura_bi)}d (R$)": formatar_moeda_br,
+                            "Autonomia (d)": lambda x: "Zerado" if pd.notna(x) and float(x) <= 0 else formatar_num_br(x, 1),
+                            "Giro CMV/Mês (R$)": formatar_moeda_br,
+                            "Custo Unit. (R$)": formatar_moeda_br,
                         },
-                        colunas_esquerda=["Descrição"],
+                        colunas_esquerda=["Descrição", "Grupo / Departamento"],
                     ),
                     use_container_width=True,
                     hide_index=True,
-                    height=250,
+                    height=280,
                 )
+        with sub_tab2:
+            df_elef = (
+                df_bi[(df_bi["abc_estoque"] == "A") & (df_bi["abc_giro"].isin(["C", "Sem Giro"]))]
+                .sort_values("valor_estoque", ascending=False)
+                .head(30)
+            )
+            if df_elef.empty:
+                st.success("✅ Nenhum item Classe A de estoque está parado ou com giro C!")
+            else:
+                df_elef_exib = df_elef[
+                    ["codigo", "descricao", "departamento", "saldo_atual", "custo_unitario", "valor_estoque", "abc_giro", "cmv_mensal"]
+                ].rename(
+                    columns={
+                        "codigo": "Código",
+                        "descricao": "Descrição",
+                        "departamento": "Grupo / Departamento",
+                        "saldo_atual": "Saldo Atual",
+                        "custo_unitario": "Custo Unit. (R$)",
+                        "valor_estoque": "Capital Parado (R$)",
+                        "abc_giro": "ABC Giro",
+                        "cmv_mensal": "Giro CMV/Mês (R$)",
+                    }
+                )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_elef_exib,
+                        formatadores={
+                            "Saldo Atual": formatar_qtd_br,
+                            "Custo Unit. (R$)": formatar_moeda_br,
+                            "Capital Parado (R$)": formatar_moeda_br,
+                            "Giro CMV/Mês (R$)": formatar_moeda_br,
+                        },
+                        colunas_esquerda=["Descrição", "Grupo / Departamento"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=280,
+                )
+        with sub_tab3:
+            df_dest = (
+                df_bi[df_bi["capital_liberavel"] > 0]
+                .sort_values("capital_liberavel", ascending=False)
+                .head(30)
+            )
+            df_dest_exib = df_dest[
+                ["codigo", "descricao", "departamento", "saldo_atual", "autonomia_dias", "valor_estoque", "capital_liberavel"]
+            ].rename(
+                columns={
+                    "codigo": "Código",
+                    "descricao": "Descrição",
+                    "departamento": "Grupo / Departamento",
+                    "saldo_atual": "Saldo Atual",
+                    "autonomia_dias": "Autonomia (d)",
+                    "valor_estoque": "Estoque Atual (R$)",
+                    "capital_liberavel": f"Excesso >{int(meta_cobertura_bi)}d (R$)",
+                }
+            )
+            st.dataframe(
+                estilizar_tabela_br(
+                    df_dest_exib,
+                    formatadores={
+                        "Saldo Atual": formatar_qtd_br,
+                        "Autonomia (d)": lambda x: "Sem Giro" if pd.notna(x) and float(x) >= 999.0 else formatar_num_br(x, 1),
+                        "Estoque Atual (R$)": formatar_moeda_br,
+                        f"Excesso >{int(meta_cobertura_bi)}d (R$)": formatar_moeda_br,
+                    },
+                    colunas_esquerda=["Descrição", "Grupo / Departamento"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=280,
+            )
 
         st.markdown("---")
         st.markdown("#### 4. Evolução do Patrimônio Diário e Balanço de Entradas (NFs) vs. Saídas (CMV e Faturamento)")
@@ -4438,11 +4855,11 @@ with aba1:
                         salvar_backup_automatico_aba_gsheets(planilha_gsheets, "base_inicial", df_base_vendas)
                         gravar_aba_pequena_gsheets(planilha_gsheets, "base_inicial", nova_base)
                         abas_ja_gravadas.append("base_inicial")
-                    df_meta_novo = pd.DataFrame(
-                        [
-                            {"chave": "dias_base", "valor": str(int(dias_base_input))},
-                            {"chave": "ultima_atualizacao", "valor": agora_str},
-                        ]
+                    df_meta_novo = montar_dataframe_meta_completo(
+                        dias_base_val=int(dias_base_input),
+                        ult_att_val=agora_str,
+                        grupos_pref_custom=grupos_pref_custom,
+                        grupos_sku_custom=grupos_sku_custom,
                     )
                     gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_novo)
                     abas_ja_gravadas.append("meta")
@@ -4474,6 +4891,254 @@ with aba1:
                             f"As seguintes abas já haviam sido atualizadas antes da falha: **`{abas_str}`**. "
                             f"Clique em sincronizar novamente para concluir as demais."
                         )
+
+    with st.expander("🗂️ Gerenciar e Editar Grupos / Departamentos de Produtos (Por Prefixo ou Produto Específico)", expanded=False):
+        st.caption(
+            "Os grupos do Dashboard Executivo são definidos pelos **2 primeiros dígitos do código do produto no Siagri** (ex: `50` = Veterinária, `70` = Ferragens). "
+            "Aqui você pode **renomear ou criar grupos por prefixo** e também **mover produtos específicos** (ex: `903001 - MP MILHO MOIDO 40KG`) para outro grupo!"
+        )
+        frames_cat_grp = []
+        for df_g_src in [df_estoque_bruto, df_entradas_bruto, df_saidas_bruto, df_custos, df_base_vendas]:
+            if df_g_src is not None and not df_g_src.empty and "codigo" in df_g_src.columns and "descricao" in df_g_src.columns:
+                frames_cat_grp.append(df_g_src[["codigo", "descricao"]])
+        if frames_cat_grp:
+            df_cat_grp = (
+                pd.concat(frames_cat_grp, ignore_index=True)
+                .loc[lambda d: d["descricao"] != ""]
+                .drop_duplicates(subset=["codigo"], keep="first")
+                .reset_index(drop=True)
+            )
+        else:
+            df_cat_grp = pd.DataFrame(columns=["codigo", "descricao"])
+
+        df_cat_grp["prefixo"] = df_cat_grp["codigo"].astype(str).str.strip().str.slice(0, 2)
+        contagem_pref = df_cat_grp.groupby("prefixo")["codigo"].count().to_dict() if not df_cat_grp.empty else {}
+        exemplo_pref = (
+            df_cat_grp.groupby("prefixo")
+            .apply(lambda g: f"[{g['codigo'].iloc[0]}] {g['descricao'].iloc[0][:38]}")
+            .to_dict()
+            if not df_cat_grp.empty
+            else {}
+        )
+
+        mapa_depto_ativo = construir_mapa_departamentos(grupos_pref_custom)
+        todos_prefixos = sorted(set(mapa_depto_ativo.keys()) | set(contagem_pref.keys()))
+        linhas_editor_pref = []
+        for pref_p in todos_prefixos:
+            if not str(pref_p).strip():
+                continue
+            linhas_editor_pref.append(
+                {
+                    "Prefixo (2 dígitos)": str(pref_p).strip(),
+                    "Nome do Grupo / Departamento": mapa_depto_ativo.get(str(pref_p).strip(), f"Outros ({pref_p})"),
+                    "SKUs no Catálogo": int(contagem_pref.get(str(pref_p).strip(), 0)),
+                    "Exemplo de Produto no ERP": exemplo_pref.get(str(pref_p).strip(), "-"),
+                }
+            )
+        df_ed_pref_in = pd.DataFrame(linhas_editor_pref)
+
+        st.markdown("##### 1. Editar Nomes dos Grupos por Prefixo (2 Primeiros Dígitos do Código)")
+        ed_pref_out = st.data_editor(
+            df_ed_pref_in,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key="editor_grupos_prefixo_aba7",
+            disabled=["SKUs no Catálogo", "Exemplo de Produto no ERP"],
+            column_config={
+                "Prefixo (2 dígitos)": st.column_config.TextColumn(
+                    "Prefixo (2 dígitos)",
+                    help="2 primeiros dígitos do código do produto no Siagri (ex: 50, 70, 26, 90).",
+                    width="small",
+                ),
+                "Nome do Grupo / Departamento": st.column_config.TextColumn(
+                    "Nome do Grupo / Departamento",
+                    help="Clique duas vezes para editar o nome deste grupo como preferir.",
+                    width="medium",
+                ),
+                "SKUs no Catálogo": st.column_config.NumberColumn(
+                    "SKUs no Catálogo",
+                    help="Quantidade de produtos cadastrados que começam com este prefixo.",
+                    width="small",
+                ),
+                "Exemplo de Produto no ERP": st.column_config.TextColumn(
+                    "Exemplo de Produto no ERP",
+                    help="Exemplo de produto deste prefixo para ajudar a identificar grupos 'Outros'.",
+                    width="medium",
+                ),
+            },
+        )
+        cg_b1, cg_b2 = st.columns([1.6, 1.0])
+        with cg_b1:
+            if st.button("💾 Salvar Nomes dos Grupos por Prefixo na Nuvem", type="primary", use_container_width=True, key="btn_salvar_grp_pref"):
+                with st.spinner("Salvando configuração de grupos no Google Sheets..."):
+                    try:
+                        novo_pref_dict = {}
+                        for _, r_gp in ed_pref_out.iterrows():
+                            p_k = str(r_gp.get("Prefixo (2 dígitos)", "")).strip()
+                            n_v = str(r_gp.get("Nome do Grupo / Departamento", "")).strip()
+                            if p_k and n_v:
+                                novo_pref_dict[p_k] = n_v
+                        df_meta_grp = montar_dataframe_meta_completo(
+                            dias_base_val=int(dias_base_atual),
+                            ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                            grupos_pref_custom=novo_pref_dict,
+                            grupos_sku_custom=grupos_sku_custom,
+                        )
+                        gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_grp)
+                        st.session_state.pop("bkp_db_xlsx_bytes", None)
+                        st.session_state.pop("backup_zip_bytes", None)
+                        carregar_estado_completo.clear()
+                        st.session_state["msg_sucesso_sync"] = "✅ Nomes dos grupos atualizados e salvos na nuvem com sucesso!"
+                        st.rerun()
+                    except Exception as e_gp:
+                        st.error(f"❌ Erro ao salvar grupos: {e_gp}")
+        with cg_b2:
+            if st.button("🔄 Restaurar Nomes Padrão dos Prefixos", use_container_width=True, key="btn_reset_grp_pref"):
+                with st.spinner("Restaurando nomes padrão..."):
+                    try:
+                        df_meta_grp = montar_dataframe_meta_completo(
+                            dias_base_val=int(dias_base_atual),
+                            ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                            grupos_pref_custom={},
+                            grupos_sku_custom=grupos_sku_custom,
+                        )
+                        gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_grp)
+                        carregar_estado_completo.clear()
+                        st.session_state["msg_sucesso_sync"] = "✅ Nomes padrão dos prefixos restaurados!"
+                        st.rerun()
+                    except Exception as e_rst_gp:
+                        st.error(f"❌ Erro ao restaurar: {e_rst_gp}")
+
+        st.markdown("---")
+        st.markdown("##### 2. Mover Produto(s) Específico(s) para Outro Grupo (Exceções por Código SKU)")
+        st.caption(
+            "Útil quando um produto foi cadastrado no Siagri com código de outra família (ex: `903001 - MP MILHO MOIDO 40KG` "
+            "que começa com `90`, mas você quer que fique em `26 - Nutrição & Matéria-Prima (MP)`)."
+        )
+        if not df_cat_grp.empty:
+            mapa_desc_cat = dict(zip(df_cat_grp["codigo"], df_cat_grp["descricao"]))
+            opcoes_sku_mover = [
+                f"[{r['codigo']}] {r['descricao']} (Grupo Atual: {identificar_departamento_sku(r['codigo'], grupos_pref_custom, grupos_sku_custom)})"
+                for _, r in df_cat_grp.sort_values("descricao").iterrows()
+            ]
+            cods_sku_ordenados = df_cat_grp.sort_values("descricao")["codigo"].tolist()
+            cm_sku1, cm_sku2, cm_sku3 = st.columns([1.8, 1.3, 0.9])
+            with cm_sku1:
+                indices_skus_sel = st.multiselect(
+                    "Selecione um ou mais produtos para mudar de grupo:",
+                    options=range(len(opcoes_sku_mover)),
+                    format_func=lambda i: opcoes_sku_mover[i],
+                    key="sel_skus_mover_grupo",
+                )
+            grupos_disponiveis_destino = sorted(
+                list(
+                    set(mapa_depto_ativo.values())
+                    | set(grupos_sku_custom.values())
+                    | {f"Outros ({p})" for p in todos_prefixos if p not in mapa_depto_ativo}
+                )
+            )
+            with cm_sku2:
+                grupo_destino_sel = st.selectbox(
+                    "Grupo de Destino:",
+                    options=grupos_disponiveis_destino + ["➕ Digitar Novo Nome de Grupo..."],
+                    key="sel_grupo_destino_sku",
+                )
+                if grupo_destino_sel == "➕ Digitar Novo Nome de Grupo...":
+                    grupo_destino_final = st.text_input(
+                        "Digite o nome do novo grupo:",
+                        placeholder="Ex: 99 - Uso Interno / Fábrica",
+                        key="txt_novo_grupo_sku_custom",
+                    ).strip()
+                else:
+                    grupo_destino_final = grupo_destino_sel
+            with cm_sku3:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if st.button(
+                    "📌 Fixar no Grupo",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=(not indices_skus_sel or not grupo_destino_final),
+                    key="btn_fixar_sku_grupo",
+                ):
+                    with st.spinner("Salvando exceção de grupo no Google Sheets..."):
+                        try:
+                            novo_sku_custom = dict(grupos_sku_custom)
+                            for idx_sel in indices_skus_sel:
+                                cod_alvo_m = normalizar_codigo_sku(cods_sku_ordenados[int(idx_sel)])
+                                if cod_alvo_m:
+                                    novo_sku_custom[cod_alvo_m] = grupo_destino_final
+                            df_meta_sku = montar_dataframe_meta_completo(
+                                dias_base_val=int(dias_base_atual),
+                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                grupos_pref_custom=grupos_pref_custom,
+                                grupos_sku_custom=novo_sku_custom,
+                            )
+                            gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_sku)
+                            carregar_estado_completo.clear()
+                            st.session_state["msg_sucesso_sync"] = (
+                                f"✅ {formatar_num_br(len(indices_skus_sel))} produto(s) movido(s) para o grupo '{grupo_destino_final}'!"
+                            )
+                            st.rerun()
+                        except Exception as e_sk_g:
+                            st.error(f"❌ Erro ao mover produto de grupo: {e_sk_g}")
+
+            if grupos_sku_custom:
+                st.markdown("###### 📌 Produtos com Grupo Personalizado Ativo")
+                linhas_sku_cust = []
+                for c_sk, g_sk in sorted(grupos_sku_custom.items()):
+                    pref_orig = c_sk[:2] if len(c_sk) >= 2 else c_sk
+                    linhas_sku_cust.append(
+                        {
+                            "remover": False,
+                            "Código": c_sk,
+                            "Descrição": mapa_desc_cat.get(c_sk, "Produto Cadastrado"),
+                            "Grupo Original (Prefixo)": mapa_depto_ativo.get(pref_orig, f"Outros ({pref_orig})"),
+                            "Grupo Personalizado Atual": g_sk,
+                        }
+                    )
+                df_sku_cust_in = pd.DataFrame(linhas_sku_cust)
+                ed_sku_cust = st.data_editor(
+                    df_sku_cust_in,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="editor_excecoes_sku_grupo",
+                    disabled=["Código", "Descrição", "Grupo Original (Prefixo)", "Grupo Personalizado Atual"],
+                    column_config={
+                        "remover": st.column_config.CheckboxColumn(
+                            "Voltar ao Padrão?",
+                            help="Marque para remover a exceção e devolver este produto ao grupo do seu prefixo original.",
+                            default=False,
+                            width="small",
+                        )
+                    },
+                )
+                sel_rem_sku_g = ed_sku_cust[ed_sku_cust["remover"] == True]
+                if not sel_rem_sku_g.empty:
+                    if st.button(
+                        f"↩️ Devolver {formatar_num_br(len(sel_rem_sku_g))} Produto(s) Marcado(s) ao Grupo Original",
+                        key="btn_rem_excecao_sku_grp",
+                    ):
+                        with st.spinner("Atualizando grupos no Google Sheets..."):
+                            try:
+                                novo_sku_custom = {
+                                    k: v
+                                    for k, v in grupos_sku_custom.items()
+                                    if k not in set(sel_rem_sku_g["Código"].unique())
+                                }
+                                df_meta_sku = montar_dataframe_meta_completo(
+                                    dias_base_val=int(dias_base_atual),
+                                    ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                    grupos_pref_custom=grupos_pref_custom,
+                                    grupos_sku_custom=novo_sku_custom,
+                                )
+                                gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_sku)
+                                carregar_estado_completo.clear()
+                                st.session_state["msg_sucesso_sync"] = "✅ Produto(s) devolvido(s) ao grupo original!"
+                                st.rerun()
+                            except Exception as e_rm_sk:
+                                st.error(f"❌ Erro ao remover exceção: {e_rm_sk}")
+
     r1, r2, r3, r4 = st.columns(4)
     qtd_skus_visiveis = df_estoque["codigo"].nunique() if (not df_estoque.empty and "codigo" in df_estoque.columns) else 0
     qtd_datas_hist = df_historico_bruto["data"].nunique() if (not df_historico_bruto.empty and "data" in df_historico_bruto.columns) else 0
