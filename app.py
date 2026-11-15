@@ -2,6 +2,7 @@ import io
 import re
 import math
 import hmac
+import hashlib
 import zipfile
 import unicodedata
 from datetime import datetime, date, timedelta
@@ -1177,99 +1178,10 @@ def gravar_aba_pequena_gsheets(planilha, nome_aba: str, df: pd.DataFrame, permit
     ws.resize(rows=linhas_nec, cols=cols_nec)
 
 
-def remover_datas_aba_incremental_gsheets(planilha, nome_aba: str, datas_remover: set) -> int:
-    """Remove de uma aba incremental (historico, entradas_diarias ou saidas_diarias) todas as linhas das datas informadas."""
-    datas_iso_alvo = set()
-    for d in (datas_remover or set()):
-        dt_p = converter_datas_deterministico(pd.Series([str(d).strip()]))
-        if not dt_p.empty and pd.notna(dt_p.iloc[0]):
-            datas_iso_alvo.add(dt_p.iloc[0].strftime("%Y-%m-%d"))
-        elif str(d).strip():
-            datas_iso_alvo.add(str(d).strip())
-    if not datas_iso_alvo:
-        return 0
-    ws = obter_ou_criar_aba(planilha, nome_aba)
-    primeira_linha = [str(c).strip() for c in ws.row_values(1)]
-    if not primeira_linha:
-        return 0
-    idx_col_data = (primeira_linha.index("data") + 1) if "data" in primeira_linha else len(primeira_linha)
-    col_datas_antes = ws.col_values(idx_col_data)
-    dt_col_parsed = converter_datas_deterministico(pd.Series(col_datas_antes))
-    dt_col_iso = dt_col_parsed.dt.strftime("%Y-%m-%d").fillna("")
-    linhas_para_apagar = [
-        i
-        for i, val_iso in enumerate(dt_col_iso, start=1)
-        if i >= 2 and val_iso in datas_iso_alvo
-    ]
-    if linhas_para_apagar:
-        blocos = []
-        inicio = fim = linhas_para_apagar[0]
-        for r in linhas_para_apagar[1:]:
-            if r == fim + 1:
-                fim = r
-            else:
-                blocos.append((inicio, fim))
-                inicio = fim = r
-        blocos.append((inicio, fim))
-        for ini, f in reversed(blocos):
-            ws.delete_rows(ini, f)
-    return len(linhas_para_apagar)
-
-
-def salvar_backup_automatico_aba_gsheets(planilha, nome_aba_origem: str, df_atual_memoria: pd.DataFrame):
-    """Salva uma cópia rápida em _bkp_<nome_aba> usando o DataFrame já carregado em memória antes de sobrescrever."""
-    if df_atual_memoria is None or df_atual_memoria.empty:
-        return
-    nome_bkp = f"_bkp_{nome_aba_origem}"
-    gravar_aba_pequena_gsheets(planilha, nome_bkp, df_atual_memoria, permitir_vazio=False)
-
-
-def restaurar_backup_automatico_aba_gsheets(
-    planilha,
-    nome_aba_destino: str,
-    df_atual_memoria: pd.DataFrame = None,
-) -> int:
-    """Restaura o conteúdo de _bkp_<nome_aba_destino> para a aba principal e limpa datas indevidas no histórico."""
-    import gspread
-    nome_bkp = f"_bkp_{nome_aba_destino}"
-    try:
-        ws_bkp = planilha.worksheet(nome_bkp)
-    except gspread.exceptions.WorksheetNotFound:
-        raise ValueError(f"Ainda não existe cópia automática anterior (`{nome_bkp}`) para restaurar.")
-    valores = ws_bkp.get_all_values()
-    if not valores or len(valores) < 2:
-        raise ValueError(f"A cópia automática (`{nome_bkp}`) está vazia.")
-    cabecalho = [str(c).strip() if str(c).strip() else f"col_{i}" for i, c in enumerate(valores[0])]
-    df_bkp = padronizar_dataframe(pd.DataFrame(valores[1:], columns=cabecalho), nome_aba_destino, origem_gsheets=True)
-    if df_bkp.empty:
-        raise ValueError(f"Nenhum registro válido encontrado na cópia automática (`{nome_bkp}`).")
-    if nome_aba_destino == "estoque_atual":
-        datas_atuais = set()
-        if df_atual_memoria is not None and not df_atual_memoria.empty and "data" in df_atual_memoria.columns:
-            datas_atuais.update(str(d).strip() for d in df_atual_memoria["data"].unique() if str(d).strip())
-        df_est_nuvem = ler_aba_bruta_gsheets(planilha, "estoque_atual")
-        if not df_est_nuvem.empty and "data" in df_est_nuvem.columns:
-            datas_atuais.update(str(d).strip() for d in df_est_nuvem["data"].unique() if str(d).strip())
-        datas_rest = (
-            {str(d).strip() for d in df_bkp["data"].unique() if str(d).strip()}
-            if "data" in df_bkp.columns
-            else set()
-        )
-        datas_indevidas = datas_atuais - datas_rest
-        if datas_indevidas:
-            remover_datas_aba_incremental_gsheets(planilha, "historico", datas_indevidas)
-        gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp)
-        for dt_r in sorted(datas_rest):
-            df_dia_rest = df_bkp[df_bkp["data"] == dt_r].copy()
-            gravar_historico_incremental_gsheets(planilha, df_dia_rest, dt_r)
-    else:
-        gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp)
-    return len(df_bkp)
-
-
 def migrar_aba_incremental_em_lotes(planilha, ws_antiga, df_combinado: pd.DataFrame, nome_aba: str = "historico"):
     import gspread
-    df_padrao = podar_historico_180_dias(padronizar_dataframe(df_combinado, nome_aba), nome_aba)
+    aba_esquema = nome_aba[5:] if nome_aba.startswith("_bkp_") else nome_aba
+    df_padrao = podar_historico_180_dias(padronizar_dataframe(df_combinado, aba_esquema), aba_esquema)
     df_str = df_padrao.fillna("").astype(str)
     cabecalho = df_str.columns.tolist()
     todas_linhas = df_str.values.tolist()
@@ -1298,6 +1210,113 @@ def migrar_aba_incremental_em_lotes(planilha, ws_antiga, df_combinado: pd.DataFr
     ws_temp.update_title(nome_aba)
 
 
+def salvar_backup_automatico_aba_gsheets(
+    planilha,
+    nome_aba_origem: str,
+    df_atual_memoria: pd.DataFrame,
+    permitir_vazio: bool = False,
+):
+    """Salva uma cópia rápida em _bkp_<nome_aba> antes de qualquer alteração (suporta abas pequenas e grandes)."""
+    if df_atual_memoria is None:
+        return
+    if df_atual_memoria.empty and not permitir_vazio:
+        return
+    nome_bkp = f"_bkp_{nome_aba_origem}"
+    if len(df_atual_memoria) > TAMANHO_LOTE_MIGRACAO:
+        ws_bkp = obter_ou_criar_aba(planilha, nome_bkp)
+        migrar_aba_incremental_em_lotes(planilha, ws_bkp, df_atual_memoria, nome_aba=nome_bkp)
+    else:
+        gravar_aba_pequena_gsheets(planilha, nome_bkp, df_atual_memoria, permitir_vazio=permitir_vazio)
+
+
+def remover_datas_aba_incremental_gsheets(
+    planilha,
+    nome_aba: str,
+    datas_remover: set,
+    df_atual_memoria: pd.DataFrame = None,
+) -> int:
+    """Remove de uma aba incremental todas as linhas das datas informadas, salvando backup automático antes."""
+    datas_iso_alvo = set()
+    for d in (datas_remover or set()):
+        dt_p = converter_datas_deterministico(pd.Series([str(d).strip()]))
+        if not dt_p.empty and pd.notna(dt_p.iloc[0]):
+            datas_iso_alvo.add(dt_p.iloc[0].strftime("%Y-%m-%d"))
+        elif str(d).strip():
+            datas_iso_alvo.add(str(d).strip())
+    if not datas_iso_alvo:
+        return 0
+    df_base = (
+        df_atual_memoria.copy()
+        if (df_atual_memoria is not None and not df_atual_memoria.empty)
+        else ler_aba_bruta_gsheets(planilha, nome_aba)
+    )
+    if df_base.empty or "data" not in df_base.columns:
+        return 0
+    mask_rem = df_base["data"].isin(datas_iso_alvo)
+    qtd_removidas = int(mask_rem.sum())
+    if qtd_removidas <= 0:
+        return 0
+    salvar_backup_automatico_aba_gsheets(planilha, nome_aba, df_base, permitir_vazio=True)
+    df_restante = df_base[~mask_rem].copy().reset_index(drop=True)
+    if len(df_restante) <= TAMANHO_LOTE_MIGRACAO:
+        gravar_aba_pequena_gsheets(planilha, nome_aba, df_restante, permitir_vazio=True)
+    else:
+        ws = obter_ou_criar_aba(planilha, nome_aba)
+        migrar_aba_incremental_em_lotes(planilha, ws, df_restante, nome_aba=nome_aba)
+    return qtd_removidas
+
+
+def restaurar_backup_automatico_aba_gsheets(
+    planilha,
+    nome_aba_destino: str,
+    df_atual_memoria: pd.DataFrame = None,
+) -> int:
+    """Restaura o conteúdo de _bkp_<nome_aba_destino> para qualquer aba do sistema (incluindo entradas, saídas, ocultos e histórico)."""
+    import gspread
+    nome_bkp = f"_bkp_{nome_aba_destino}"
+    try:
+        ws_bkp = planilha.worksheet(nome_bkp)
+    except gspread.exceptions.WorksheetNotFound:
+        raise ValueError(f"Ainda não existe cópia automática anterior (`{nome_bkp}`) para restaurar.")
+    valores = ws_bkp.get_all_values()
+    aba_permite_vazio = nome_aba_destino in ("ocultos", "pedidos_transito", "entradas_diarias", "saidas_diarias")
+    if not valores or len(valores) < 2:
+        if aba_permite_vazio:
+            df_vazio = padronizar_dataframe(pd.DataFrame(), nome_aba_destino)
+            gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_vazio, permitir_vazio=True)
+            return 0
+        raise ValueError(f"A cópia automática (`{nome_bkp}`) está vazia.")
+    cabecalho = [str(c).strip() if str(c).strip() else f"col_{i}" for i, c in enumerate(valores[0])]
+    df_bkp = padronizar_dataframe(pd.DataFrame(valores[1:], columns=cabecalho), nome_aba_destino, origem_gsheets=True)
+    if df_bkp.empty and not aba_permite_vazio:
+        raise ValueError(f"Nenhum registro válido encontrado na cópia automática (`{nome_bkp}`).")
+    if nome_aba_destino == "estoque_atual":
+        datas_atuais = set()
+        if df_atual_memoria is not None and not df_atual_memoria.empty and "data" in df_atual_memoria.columns:
+            datas_atuais.update(str(d).strip() for d in df_atual_memoria["data"].unique() if str(d).strip())
+        df_est_nuvem = ler_aba_bruta_gsheets(planilha, "estoque_atual")
+        if not df_est_nuvem.empty and "data" in df_est_nuvem.columns:
+            datas_atuais.update(str(d).strip() for d in df_est_nuvem["data"].unique() if str(d).strip())
+        datas_rest = (
+            {str(d).strip() for d in df_bkp["data"].unique() if str(d).strip()}
+            if "data" in df_bkp.columns
+            else set()
+        )
+        datas_indevidas = datas_atuais - datas_rest
+        if datas_indevidas:
+            remover_datas_aba_incremental_gsheets(planilha, "historico", datas_indevidas)
+        gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp)
+        for dt_r in sorted(datas_rest):
+            df_dia_rest = df_bkp[df_bkp["data"] == dt_r].copy()
+            gravar_historico_incremental_gsheets(planilha, df_dia_rest, dt_r, criar_backup=False)
+    elif len(df_bkp) > TAMANHO_LOTE_MIGRACAO:
+        ws_dest = obter_ou_criar_aba(planilha, nome_aba_destino)
+        migrar_aba_incremental_em_lotes(planilha, ws_dest, df_bkp, nome_aba=nome_aba_destino)
+    else:
+        gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp, permitir_vazio=aba_permite_vazio)
+    return len(df_bkp)
+
+
 def gravar_aba_incremental_por_data_gsheets(
     planilha,
     nome_aba: str,
@@ -1305,31 +1324,70 @@ def gravar_aba_incremental_por_data_gsheets(
     data_ref: str,
     somar_mesma_data: bool = False,
     df_atual_memoria: pd.DataFrame = None,
+    hash_arquivo: str = "",
+    criar_backup: bool = True,
 ):
+    """
+    Grava dados incrementais por data de forma atômica (sem janela inconsistente entre append e delete)
+    e protege contra soma duplicada caso o mesmo arquivo seja reenviado após falha parcial.
+    """
     if df_novo_dia is None or df_novo_dia.empty:
         return
     data_ref_str = str(data_ref).strip()
+    limite_str = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
+
+    df_base_existente = (
+        df_atual_memoria.copy()
+        if (df_atual_memoria is not None and not df_atual_memoria.empty)
+        else ler_aba_bruta_gsheets(planilha, nome_aba)
+    )
+    if not df_base_existente.empty:
+        df_base_existente = podar_historico_180_dias(
+            padronizar_dataframe(df_base_existente, nome_aba), nome_aba
+        )
+
+    if criar_backup and not df_base_existente.empty:
+        salvar_backup_automatico_aba_gsheets(planilha, nome_aba, df_base_existente)
+
     if somar_mesma_data and nome_aba in ("entradas_diarias", "saidas_diarias"):
         col_qtd = "qtd_entrada" if nome_aba == "entradas_diarias" else "qtd_saida"
-        df_base_existente = (
-            df_atual_memoria
-            if (df_atual_memoria is not None and not df_atual_memoria.empty)
-            else ler_aba_bruta_gsheets(planilha, nome_aba)
-        )
-        if not df_base_existente.empty and "data" in df_base_existente.columns:
+        registro_hashes = st.session_state.setdefault("hashes_soma_incremental", {})
+        chave_op = f"{nome_aba}::{data_ref_str}"
+        if (
+            hash_arquivo
+            and chave_op in registro_hashes
+            and registro_hashes[chave_op].get("hash") == hash_arquivo
+        ):
+            df_mesmo_dia = registro_hashes[chave_op].get("df_base_antes", pd.DataFrame()).copy()
+        elif not df_base_existente.empty and "data" in df_base_existente.columns:
             df_mesmo_dia = df_base_existente[df_base_existente["data"] == data_ref_str].copy()
-            if not df_mesmo_dia.empty:
-                df_unido = pd.concat([df_mesmo_dia, df_novo_dia], ignore_index=True)
-                agg_inc = {
-                    "descricao": ("descricao", "last"),
-                    col_qtd: (col_qtd, "sum"),
+            if hash_arquivo:
+                registro_hashes[chave_op] = {
+                    "hash": hash_arquivo,
+                    "df_base_antes": df_mesmo_dia.copy(),
                 }
-                if "valor_entrada" in df_unido.columns:
-                    agg_inc["valor_entrada"] = ("valor_entrada", "sum")
-                if "valor_venda" in df_unido.columns:
-                    agg_inc["valor_venda"] = ("valor_venda", "sum")
-                agg_inc["data"] = ("data", "last")
-                df_novo_dia = df_unido.groupby("codigo", as_index=False).agg(**agg_inc)
+        else:
+            df_mesmo_dia = pd.DataFrame()
+            if hash_arquivo:
+                registro_hashes[chave_op] = {
+                    "hash": hash_arquivo,
+                    "df_base_antes": pd.DataFrame(),
+                }
+
+        if not df_mesmo_dia.empty:
+            df_mesmo_dia = df_mesmo_dia.drop_duplicates(subset=["codigo", "data"], keep="last")
+            df_unido = pd.concat([df_mesmo_dia, df_novo_dia], ignore_index=True)
+            agg_inc = {
+                "descricao": ("descricao", "last"),
+                col_qtd: (col_qtd, "sum"),
+            }
+            if "valor_entrada" in df_unido.columns:
+                agg_inc["valor_entrada"] = ("valor_entrada", "sum")
+            if "valor_venda" in df_unido.columns:
+                agg_inc["valor_venda"] = ("valor_venda", "sum")
+            agg_inc["data"] = ("data", "last")
+            df_novo_dia = df_unido.groupby("codigo", as_index=False).agg(**agg_inc)
+
     df_novo_padrao = (
         compactar_estoque_para_historico(df_novo_dia)
         if nome_aba == "historico"
@@ -1337,62 +1395,43 @@ def gravar_aba_incremental_por_data_gsheets(
     )
     if df_novo_padrao.empty:
         return
-    df_str = df_novo_padrao.fillna("").astype(str)
-    cabecalho = df_str.columns.tolist()
-    linhas_novas = df_str.values.tolist()
-    linhas_nec_inicial = len(linhas_novas) + 10
-    cols_nec = max(len(cabecalho), 3)
-    ws = obter_ou_criar_aba(planilha, nome_aba, linhas_nec_inicial + 50, cols_nec + 2)
-    primeira_linha = [str(c).strip() for c in ws.row_values(1)]
-    if not primeira_linha:
-        if ws.row_count < linhas_nec_inicial or ws.col_count < cols_nec:
-            ws.resize(rows=max(ws.row_count, linhas_nec_inicial), cols=max(ws.col_count, cols_nec))
-        ws.update(
-            values=[cabecalho] + linhas_novas,
-            range_name="A1",
-            value_input_option="RAW",
-        )
-        return
-    limite_str = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
-    if primeira_linha != cabecalho:
-        df_antigo = ler_aba_bruta_gsheets(planilha, nome_aba)
-        if not df_antigo.empty:
-            df_antigo = df_antigo[
-                (df_antigo["data"] != data_ref_str)
-                & (df_antigo["data"] >= limite_str)
-            ].copy()
-            df_combinado = pd.concat([df_antigo, df_novo_padrao], ignore_index=True)
-        else:
-            df_combinado = df_novo_padrao
+
+    if not df_base_existente.empty and "data" in df_base_existente.columns:
+        df_antigo_sem_data = df_base_existente[
+            (df_base_existente["data"] != data_ref_str)
+            & (df_base_existente["data"] >= limite_str)
+        ].copy()
+        df_combinado = pd.concat([df_antigo_sem_data, df_novo_padrao], ignore_index=True)
+    else:
+        df_combinado = df_novo_padrao.copy()
+
+    df_combinado = podar_historico_180_dias(
+        padronizar_dataframe(df_combinado, nome_aba), nome_aba
+    )
+
+    if len(df_combinado) <= TAMANHO_LOTE_MIGRACAO:
+        gravar_aba_pequena_gsheets(planilha, nome_aba, df_combinado, permitir_vazio=True)
+    else:
+        ws = obter_ou_criar_aba(planilha, nome_aba, len(df_combinado) + 50, len(df_combinado.columns) + 2)
         migrar_aba_incremental_em_lotes(planilha, ws, df_combinado, nome_aba=nome_aba)
-        return
-    idx_col_data = (primeira_linha.index("data") + 1) if "data" in primeira_linha else len(cabecalho)
-    col_datas_antes = ws.col_values(idx_col_data)
-    dt_col_parsed = converter_datas_deterministico(pd.Series(col_datas_antes))
-    dt_col_iso = dt_col_parsed.dt.strftime("%Y-%m-%d").fillna("")
-    linhas_antigas_para_apagar = [
-        i
-        for i, val_iso in enumerate(dt_col_iso, start=1)
-        if i >= 2 and (val_iso == data_ref_str or (val_iso != "" and val_iso < limite_str))
-    ]
-    ws.append_rows(values=linhas_novas, value_input_option="RAW")
-    if linhas_antigas_para_apagar:
-        blocos = []
-        inicio = fim = linhas_antigas_para_apagar[0]
-        for r in linhas_antigas_para_apagar[1:]:
-            if r == fim + 1:
-                fim = r
-            else:
-                blocos.append((inicio, fim))
-                inicio = fim = r
-        blocos.append((inicio, fim))
-        for ini, f in reversed(blocos):
-            ws.delete_rows(ini, f)
 
 
-def gravar_historico_incremental_gsheets(planilha, df_novo_dia: pd.DataFrame, data_ref: str):
+def gravar_historico_incremental_gsheets(
+    planilha,
+    df_novo_dia: pd.DataFrame,
+    data_ref: str,
+    df_atual_memoria: pd.DataFrame = None,
+    criar_backup: bool = True,
+):
     df_compacto = compactar_estoque_para_historico(df_novo_dia)
-    gravar_aba_incremental_por_data_gsheets(planilha, "historico", df_compacto, data_ref)
+    gravar_aba_incremental_por_data_gsheets(
+        planilha,
+        "historico",
+        df_compacto,
+        data_ref,
+        df_atual_memoria=df_atual_memoria,
+        criar_backup=criar_backup,
+    )
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -4027,16 +4066,21 @@ with aba1:
                     type="primary",
                     use_container_width=True,
                 )
-    with st.expander("⏪ Desfazer Última Importação ou Excluir Data de Movimento (Entradas / Saídas / Histórico)", expanded=False):
+    with st.expander("⏪ Desfazer Última Importação ou Excluir Data de Movimento (Todas as Abas c/ Backup Automático)", expanded=False):
         st.caption(
-            "Restaure a cópia automática anterior (`_bkp_estoque_atual`, `_bkp_custos`, `_bkp_base_inicial`) ou remova os lançamentos "
-            "de uma data específica em `entradas_diarias`, `saidas_diarias` ou `historico`."
+            "Restaure a cópia automática imediatamente anterior (`_bkp_*`) de qualquer aba do sistema (Estoque, Entradas, Saídas, Custos, "
+            "Histórico, Base Inicial, Ocultos ou Pedidos em Trânsito) ou remova os lançamentos de uma data específica."
         )
         cr1, cr2 = st.columns([2, 1])
         mapa_opcoes_restaurar = {
             "Posição de Estoque (estoque_atual)": ("estoque_atual", df_estoque_bruto),
+            "Entradas Diárias (entradas_diarias)": ("entradas_diarias", df_entradas_bruto),
+            "Saídas Diárias (saidas_diarias)": ("saidas_diarias", df_saidas_bruto),
             "Planilha de Custos (custos)": ("custos", df_custos),
+            "Histórico de Estoque 180d (historico)": ("historico", df_historico_bruto),
             "Base Inicial de Vendas (base_inicial)": ("base_inicial", df_base_vendas),
+            "Produtos Ocultos (ocultos)": ("ocultos", df_ocultos),
+            "Pedidos em Trânsito / Já Comprei (pedidos_transito)": ("pedidos_transito", df_pedidos_transito),
         }
         with cr1:
             rotulo_aba_rest = st.selectbox(
@@ -4113,7 +4157,10 @@ with aba1:
             with st.spinner(f"Removendo registros de {data_del_escolhida} em `{aba_del_escolhida}`..."):
                 try:
                     qtd_apagadas = remover_datas_aba_incremental_gsheets(
-                        planilha_gsheets, aba_del_escolhida, {data_del_escolhida}
+                        planilha_gsheets,
+                        aba_del_escolhida,
+                        {data_del_escolhida},
+                        df_atual_memoria=df_del_ref,
                     )
                     st.session_state.pop("bkp_db_xlsx_bytes", None)
                     st.session_state.pop("backup_zip_bytes", None)
@@ -4326,9 +4373,16 @@ with aba1:
                             salvar_backup_automatico_aba_gsheets(planilha_gsheets, "estoque_atual", df_estoque_bruto)
                             gravar_aba_pequena_gsheets(planilha_gsheets, "estoque_atual", novo_estoque)
                             abas_ja_gravadas.append("estoque_atual")
-                        gravar_historico_incremental_gsheets(planilha_gsheets, novo_estoque, data_str)
+                        gravar_historico_incremental_gsheets(
+                            planilha_gsheets,
+                            novo_estoque,
+                            data_str,
+                            df_atual_memoria=df_historico_bruto,
+                            criar_backup=True,
+                        )
                         abas_ja_gravadas.append("historico")
                     if novas_entradas is not None:
+                        hash_arq_ent = hashlib.sha256(arq_entradas.getvalue()).hexdigest()[:16] if arq_entradas is not None else ""
                         gravar_aba_incremental_por_data_gsheets(
                             planilha_gsheets,
                             "entradas_diarias",
@@ -4336,6 +4390,8 @@ with aba1:
                             data_entrada.strftime("%Y-%m-%d"),
                             somar_mesma_data=somar_entradas_mesmo_dia,
                             df_atual_memoria=df_entradas_bruto,
+                            hash_arquivo=hash_arq_ent,
+                            criar_backup=True,
                         )
                         abas_ja_gravadas.append("entradas_diarias")
                         if not df_pedidos_transito.empty:
@@ -4344,6 +4400,9 @@ with aba1:
                                 df_pedidos_transito, df_ent_comb_temp
                             )
                             if cods_desp_sync:
+                                salvar_backup_automatico_aba_gsheets(
+                                    planilha_gsheets, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                                )
                                 gravar_aba_pequena_gsheets(
                                     planilha_gsheets, "pedidos_transito", df_trans_pos_nf, permitir_vazio=True
                                 )
@@ -4353,6 +4412,7 @@ with aba1:
                                     f"que estavam ocultos em trânsito chegaram nesta NF de Entrada e voltaram automaticamente ao painel!"
                                 )
                     if novas_saidas is not None:
+                        hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
                         gravar_aba_incremental_por_data_gsheets(
                             planilha_gsheets,
                             "saidas_diarias",
@@ -4360,6 +4420,8 @@ with aba1:
                             data_saida.strftime("%Y-%m-%d"),
                             somar_mesma_data=somar_saidas_mesmo_dia,
                             df_atual_memoria=df_saidas_bruto,
+                            hash_arquivo=hash_arq_sai,
+                            criar_backup=True,
                         )
                         abas_ja_gravadas.append("saidas_diarias")
                     if novos_custos is not None:
@@ -4942,6 +5004,9 @@ with aba2:
                             .drop_duplicates(subset=["codigo"], keep="last")
                             .reset_index(drop=True)
                         )
+                        salvar_backup_automatico_aba_gsheets(
+                            planilha_gsheets, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                        )
                         gravar_aba_pequena_gsheets(
                             planilha_gsheets, "pedidos_transito", df_trans_atualizado, permitir_vazio=True
                         )
@@ -5043,6 +5108,9 @@ with aba2:
                         else:
                             cods_dev = set(sel_devolver_tr["Código"].unique())
                             df_tr_restante = df_pedidos_transito[~df_pedidos_transito["codigo"].isin(cods_dev)].copy()
+                        salvar_backup_automatico_aba_gsheets(
+                            planilha_gsheets, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                        )
                         gravar_aba_pequena_gsheets(
                             planilha_gsheets, "pedidos_transito", df_tr_restante, permitir_vazio=True
                         )
@@ -5822,6 +5890,9 @@ with aba6:
                             .drop_duplicates(subset=["codigo"], keep="last")
                             .reset_index(drop=True)
                         )
+                        salvar_backup_automatico_aba_gsheets(
+                            planilha_gsheets, "ocultos", df_ocultos, permitir_vazio=True
+                        )
                         gravar_aba_pequena_gsheets(
                             planilha_gsheets, "ocultos", df_ocultos_atualizado, permitir_vazio=True
                         )
@@ -5894,6 +5965,9 @@ with aba6:
                         else:
                             cods_remover = set(selecionados_para_restaurar["codigo"].unique())
                             df_ocultos_restante = df_ocultos[~df_ocultos["codigo"].isin(cods_remover)].copy()
+                        salvar_backup_automatico_aba_gsheets(
+                            planilha_gsheets, "ocultos", df_ocultos, permitir_vazio=True
+                        )
                         gravar_aba_pequena_gsheets(
                             planilha_gsheets, "ocultos", df_ocultos_restante, permitir_vazio=True
                         )
