@@ -363,6 +363,7 @@ COLUNAS_NUMERICAS = {
     "custo_unitario",
     "qtd_vendida",
     "qtd_entrada",
+    "valor_entrada",
     "qtd_saida",
     "valor_venda",
     "qtd_comprada",
@@ -370,7 +371,7 @@ COLUNAS_NUMERICAS = {
 ESQUEMA_ABAS = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
     "historico": ["codigo", "saldo_geral", "data"],
-    "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "data"],
+    "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "valor_entrada", "data"],
     "saidas_diarias": ["codigo", "descricao", "qtd_saida", "valor_venda", "data"],
     "custos": ["codigo", "descricao", "custo_unitario"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
@@ -392,7 +393,7 @@ COLUNAS_OBRIGATORIAS_UPLOAD = {
 ORDEM_POSICIONAL_PADRAO = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
     "historico": ["codigo", "saldo_geral", "data"],
-    "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "data"],
+    "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "valor_entrada", "data"],
     "saidas_diarias": ["codigo", "descricao", "qtd_saida", "valor_venda", "data"],
     "custos": ["codigo", "descricao", "custo_unitario"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
@@ -522,7 +523,24 @@ MAPA_SINONIMOS = {
         "qtd_comprada",
         "quantidade",
         "qtd",
+    ],
+    "valor_entrada": [
+        "valor_entrada",
+        "valor",
+        "vlr",
+        "valor_total",
+        "vlr_total",
+        "valor_total_entrada",
         "total_entrada",
+        "valor_nf",
+        "vlr_nf",
+        "valor_liquido",
+        "valor_bruto",
+        "valor_total_da_proposta",
+        "custo_total",
+        "custo_unitario",
+        "custo_c1",
+        "valor_unitario",
     ],
     "qtd_saida": [
         "qtd_saida",
@@ -598,6 +616,8 @@ def formatar_moeda_br(valor) -> str:
         v = float(valor)
     except (ValueError, TypeError):
         return "R$ 0,00"
+    if 0 < abs(v) < 1.0 and abs(v * 100 - round(v * 100)) > 0.01:
+        return f"R$ {formatar_num_br(v, 3)}"
     return f"R$ {formatar_num_br(v, 2)}"
 
 
@@ -884,23 +904,35 @@ def estruturar_dataframe_bruto(
                 colunas_orig_usadas.add(encontrada)
                 alvos_encontrados.add(col_alvo)
                 break
-    if aba_esquema == "saidas_diarias" and "valor_venda" not in alvos_encontrados and df_orig.shape[1] >= 4:
-        termos_fin_validos = ("valor", "vlr", "proposta", "faturamento", "receita", "preco", "liquido", "bruto", "total_venda")
-        termos_nao_fin = ("saldo", "estoque", "lote", "validade", "custo", "cmv", "cod", "qtd", "quant", "data")
-        for col_cand in list(df_orig.columns)[3:]:
-            norm_cand = cols_norm.get(col_cand, "")
-            if (
-                col_cand not in colunas_orig_usadas
-                and any(t in norm_cand for t in termos_fin_validos)
-                and not any(b in norm_cand for b in termos_nao_fin)
-            ):
-                renomear[col_cand] = "valor_venda"
-                colunas_orig_usadas.add(col_cand)
-                alvos_encontrados.add("valor_venda")
-                break
+    if aba_esquema in ("saidas_diarias", "entradas_diarias") and df_orig.shape[1] >= 4:
+        col_fin_alvo = "valor_venda" if aba_esquema == "saidas_diarias" else "valor_entrada"
+        if col_fin_alvo not in alvos_encontrados:
+            termos_fin_validos = (
+                ("valor", "vlr", "proposta", "faturamento", "receita", "preco", "liquido", "bruto", "total_venda")
+                if aba_esquema == "saidas_diarias"
+                else ("valor", "vlr", "custo", "c1", "nf", "nota", "preco", "liquido", "bruto", "total")
+            )
+            termos_nao_fin = (
+                ("saldo", "estoque", "lote", "validade", "custo", "cmv", "cod", "qtd", "quant", "data")
+                if aba_esquema == "saidas_diarias"
+                else ("saldo", "estoque", "lote", "validade", "cod", "qtd", "quant", "data")
+            )
+            for col_cand in list(df_orig.columns)[3:]:
+                norm_cand = cols_norm.get(col_cand, "")
+                if (
+                    col_cand not in colunas_orig_usadas
+                    and any(t in norm_cand for t in termos_fin_validos)
+                    and not any(b in norm_cand for b in termos_nao_fin)
+                ):
+                    renomear[col_cand] = col_fin_alvo
+                    colunas_orig_usadas.add(col_cand)
+                    alvos_encontrados.add(col_fin_alvo)
+                    break
     if not exigir_colunas_obrigatorias:
         if aba_esquema == "saidas_diarias" and df_orig.shape[1] == 4 and "valor_venda" not in alvos_encontrados:
             ordem_padrao = ["codigo", "descricao", "qtd_saida", "data"]
+        elif aba_esquema == "entradas_diarias" and df_orig.shape[1] == 4 and "valor_entrada" not in alvos_encontrados:
+            ordem_padrao = ["codigo", "descricao", "qtd_entrada", "data"]
         else:
             ordem_padrao = ORDEM_POSICIONAL_PADRAO.get(aba_esquema, colunas_esperadas)
         cols_orig_lista = list(df_orig.columns)
@@ -1292,6 +1324,8 @@ def gravar_aba_incremental_por_data_gsheets(
                     "descricao": ("descricao", "last"),
                     col_qtd: (col_qtd, "sum"),
                 }
+                if "valor_entrada" in df_unido.columns:
+                    agg_inc["valor_entrada"] = ("valor_entrada", "sum")
                 if "valor_venda" in df_unido.columns:
                     agg_inc["valor_venda"] = ("valor_venda", "sum")
                 agg_inc["data"] = ("data", "last")
@@ -2270,6 +2304,7 @@ def processar_planilha_movimento_diario(
             f"A planilha de {rotulo_amigavel} precisa ter pelo menos 3 colunas (Código, Descrição, Quantidade)."
         )
     coluna_valor_lida = ""
+    eh_custo_unitario_direto = False
     if nome_aba == "saidas_diarias":
         termos_fin_v = ("valor", "vlr", "proposta", "faturamento", "receita", "preco", "liquido", "bruto", "total_venda")
         termos_nao_fin_v = ("saldo", "estoque", "lote", "validade", "custo", "cmv", "cod", "qtd", "quant", "data")
@@ -2280,7 +2315,21 @@ def processar_planilha_movimento_diario(
             ):
                 coluna_valor_lida = str(c_orig).strip()
                 break
+    elif nome_aba == "entradas_diarias":
+        termos_fin_e = ("valor", "vlr", "custo", "c1", "nf", "nota", "preco", "liquido", "bruto", "total")
+        termos_nao_fin_e = ("saldo", "estoque", "lote", "validade", "cod", "qtd", "quant", "data")
+        for c_orig in df_raw.columns:
+            n_c = normalizar_chave_coluna(c_orig)
+            if n_c in MAPA_SINONIMOS["valor_entrada"] or (
+                any(t in n_c for t in termos_fin_e) and not any(b in n_c for b in termos_nao_fin_e)
+            ):
+                coluna_valor_lida = str(c_orig).strip()
+                if any(u in n_c for u in ("unitario", "unit", "c1", "medio")):
+                    eh_custo_unitario_direto = True
+                break
     df = estruturar_dataframe_bruto(df_raw, nome_aba, exigir_colunas_obrigatorias=True)
+    if nome_aba == "entradas_diarias" and eh_custo_unitario_direto and "valor_entrada" in df.columns:
+        df["valor_entrada"] = df["qtd_entrada"] * df["valor_entrada"]
     data_iso = data_mov.strftime("%Y-%m-%d")
     df["data"] = data_iso
     if df.empty:
@@ -2313,6 +2362,8 @@ def processar_planilha_movimento_diario(
         "descricao": ("descricao", "last"),
         col_qtd: (col_qtd, "sum"),
     }
+    if "valor_entrada" in df.columns:
+        agg_mov["valor_entrada"] = ("valor_entrada", "sum")
     if "valor_venda" in df.columns:
         agg_mov["valor_venda"] = ("valor_venda", "sum")
     agg_mov["data"] = ("data", "last")
@@ -2326,11 +2377,21 @@ def processar_planilha_movimento_diario(
     df_final = padronizar_dataframe(df_agrupado, nome_aba)
     soma_qtd = float(df_final[col_qtd].sum())
     soma_valor_venda = float(df_final["valor_venda"].sum()) if "valor_venda" in df_final.columns else 0.0
+    soma_valor_entrada = float(df_final["valor_entrada"].sum()) if "valor_entrada" in df_final.columns else 0.0
+    df_custos_extraidos = pd.DataFrame(columns=["codigo", "descricao", "custo_unitario"])
+    if nome_aba == "entradas_diarias" and "valor_entrada" in df_final.columns:
+        df_c_val = df_final[(df_final["qtd_entrada"] > 0) & (df_final["valor_entrada"] > 0)].copy()
+        if not df_c_val.empty:
+            df_c_val["custo_unitario"] = (df_c_val["valor_entrada"] / df_c_val["qtd_entrada"]).round(4)
+            df_custos_extraidos = df_c_val[["codigo", "descricao", "custo_unitario"]].copy()
     return df_final, {
         "total_itens": len(df_final),
         "soma_qtd": soma_qtd,
         "soma_valor_venda": soma_valor_venda,
-        "coluna_valor_venda": coluna_valor_lida,
+        "soma_valor_entrada": soma_valor_entrada,
+        "coluna_valor_venda": coluna_valor_lida if nome_aba == "saidas_diarias" else "",
+        "coluna_valor_entrada": coluna_valor_lida if nome_aba == "entradas_diarias" else "",
+        "df_custos_extraidos": df_custos_extraidos,
         "data_iso": data_iso,
         "taxa_coincidencia": taxa_coincidencia,
         "qtd_codigos_repetidos": qtd_codigos_repetidos,
@@ -2338,6 +2399,33 @@ def processar_planilha_movimento_diario(
         "exemplos_repetidos": exemplos_repetidos,
         "aviso_sem_data": aviso_sem_data,
     }
+
+
+def atualizar_custos_via_entradas_df(
+    df_custos_atual: pd.DataFrame,
+    df_custos_novos_entrada: pd.DataFrame,
+) -> tuple[pd.DataFrame, int, int]:
+    """
+    Faz o Upsert (atualização seletiva) na tabela de custos a partir dos custos unitários
+    apurados na planilha de Entradas (Valor / Quantidade), preservando todos os demais SKUs.
+    """
+    if df_custos_novos_entrada is None or df_custos_novos_entrada.empty:
+        return padronizar_dataframe(df_custos_atual, "custos"), 0, 0
+    df_novos = df_custos_novos_entrada[df_custos_novos_entrada["custo_unitario"] > 0].copy()
+    if df_novos.empty:
+        return padronizar_dataframe(df_custos_atual, "custos"), 0, 0
+    df_base_c = (
+        padronizar_dataframe(df_custos_atual, "custos")
+        if (df_custos_atual is not None and not df_custos_atual.empty)
+        else padronizar_dataframe(pd.DataFrame(), "custos")
+    )
+    cods_existentes = set(df_base_c["codigo"].unique()) if not df_base_c.empty else set()
+    cods_entrada = set(df_novos["codigo"].unique())
+    qtd_atualizados = len(cods_entrada & cods_existentes)
+    qtd_inseridos = len(cods_entrada - cods_existentes)
+    df_combinado = pd.concat([df_base_c, df_novos[["codigo", "descricao", "custo_unitario"]]], ignore_index=True)
+    df_final_c = padronizar_dataframe(df_combinado, "custos")
+    return df_final_c, qtd_atualizados, qtd_inseridos
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -3363,7 +3451,12 @@ with aba_dash:
                 df_flx = pd.DataFrame({"data": [d for d in datas_flx if str(d).strip()]})
                 if not df_entradas.empty:
                     df_e_bi = df_entradas[df_entradas["codigo"].isin(cods_escopo_bi)].copy()
-                    df_e_bi["Entradas_NF_Custo"] = df_e_bi["qtd_entrada"] * df_e_bi["codigo"].map(mapa_custo_bi).fillna(0.0)
+                    custo_est_e = df_e_bi["qtd_entrada"] * df_e_bi["codigo"].map(mapa_custo_bi).fillna(0.0)
+                    if "valor_entrada" in df_e_bi.columns:
+                        val_e_s = df_e_bi["valor_entrada"].fillna(0.0)
+                        df_e_bi["Entradas_NF_Custo"] = val_e_s.where(val_e_s > 0.0, custo_est_e)
+                    else:
+                        df_e_bi["Entradas_NF_Custo"] = custo_est_e
                     df_flx = df_flx.merge(df_e_bi.groupby("data", as_index=False)["Entradas_NF_Custo"].sum(), on="data", how="left")
                 else:
                     df_flx["Entradas_NF_Custo"] = 0.0
@@ -3450,7 +3543,12 @@ with aba_dash:
 
             if not df_ent_escopo.empty:
                 df_ent_escopo["custo_u"] = df_ent_escopo["codigo"].map(mapa_custo_bi).fillna(0.0)
-                df_ent_escopo["compras_nf_custo"] = df_ent_escopo["qtd_entrada"] * df_ent_escopo["custo_u"]
+                custo_est_nf = df_ent_escopo["qtd_entrada"] * df_ent_escopo["custo_u"]
+                if "valor_entrada" in df_ent_escopo.columns:
+                    val_nf_s = df_ent_escopo["valor_entrada"].fillna(0.0)
+                    df_ent_escopo["compras_nf_custo"] = val_nf_s.where(val_nf_s > 0.0, custo_est_nf)
+                else:
+                    df_ent_escopo["compras_nf_custo"] = custo_est_nf
                 df_ent_escopo["mes_ano"] = df_ent_escopo["data"].astype(str).str.slice(0, 7)
             else:
                 df_ent_escopo = pd.DataFrame(columns=["codigo", "descricao", "qtd_entrada", "data", "custo_u", "compras_nf_custo", "mes_ano"])
@@ -3771,7 +3869,7 @@ with aba1:
             st.warning(aviso_dup["texto"])
         else:
             st.info(aviso_dup["texto"])
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
             """
@@ -3797,10 +3895,11 @@ with aba1:
         st.markdown(
             """
             <div class="glass-card">
-                <strong>2. Entradas por Data (3 colunas)</strong><br><br>
+                <strong>2. Entradas Faturadas c/ Custo (Fatu416)</strong><br><br>
                 <span class="pill-tag">Código</span>
                 <span class="pill-tag">Descrição</span>
                 <span class="pill-tag">Quantidade</span>
+                <span class="pill-tag">Valor (Atualiza Custo!)</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -3850,25 +3949,18 @@ with aba1:
             key="chk_somar_sai_dia",
             help="Desmarcado (padrão): substitui as saídas desta data. Marcado: soma o novo arquivo às saídas já salvas nesta mesma data.",
         )
-    with c4:
-        st.markdown(
-            """
-            <div class="glass-card">
-                <strong>4. Planilha de Custos (3 colunas)</strong><br><br>
-                <span class="pill-tag">Código</span>
-                <span class="pill-tag">Descrição</span>
-                <span class="pill-tag">Custo Unitário C1</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
+    with st.expander("📦 Carga Geral Avulsa de Custos C1 ou Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
+        st.caption(
+            "💡 Os custos unitários já são atualizados automaticamente sempre que você sobe a planilha de **Entradas Faturadas (Fatu416 com coluna `Valor`)** acima! "
+            "Use os campos abaixo apenas quando quiser fazer uma carga geral de custos do catálogo inteiro ou atualizar a Base Inicial de apoio."
         )
-        arq_custos = st.file_uploader(
-            "Selecionar Custos (.xlsx, .xls ou .csv)",
-            type=["xlsx", "xls", "csv"],
-            key="up_custos",
-        )
-    with st.expander("📦 Configurar / Atualizar Base Inicial Histórica de Vendas (Apoio - 3 colunas)", expanded=False):
-        cb1, cb2 = st.columns([1, 2])
+        cb0, cb1, cb2 = st.columns([1.4, 0.8, 1.4])
+        with cb0:
+            arq_custos = st.file_uploader(
+                "Planilha Geral de Custos C1 (Código, Descrição, Custo Unitário):",
+                type=["xlsx", "xls", "csv"],
+                key="up_custos",
+            )
         with cb1:
             dias_base_input = st.number_input(
                 "Período da base inicial (dias):",
@@ -3879,7 +3971,7 @@ with aba1:
             )
         with cb2:
             arq_base = st.file_uploader(
-                "Selecionar Base Inicial (.xlsx, .xls ou .csv — Código, Descrição, Qtd. Vendida)",
+                "Base Inicial de Vendas (Código, Descrição, Qtd. Vendida):",
                 type=["xlsx", "xls", "csv"],
                 key="up_base",
             )
@@ -4115,6 +4207,9 @@ with aba1:
                         if info_dup_est.get("aviso_sem_data"):
                             teve_alerta = True
                             mensagens_auditoria_upload.append(info_dup_est["aviso_sem_data"])
+                    df_custos_via_entrada = pd.DataFrame()
+                    qtd_custos_att_ent = 0
+                    qtd_custos_ins_ent = 0
                     if arq_entradas is not None:
                         novas_entradas, info_ent = processar_planilha_movimento_diario(
                             arquivo=arq_entradas,
@@ -4126,9 +4221,22 @@ with aba1:
                             ignorar_trava_catalogo=ignorar_trava_catalogo,
                         )
                         modo_ent_str = "somadas ao dia" if somar_entradas_mesmo_dia else "gravadas"
+                        col_val_ent_nome = info_ent.get("coluna_valor_entrada", "")
+                        df_ext_c = info_ent.get("df_custos_extraidos", pd.DataFrame())
+                        if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
+                            df_custos_via_entrada, qtd_custos_att_ent, qtd_custos_ins_ent = atualizar_custos_via_entradas_df(
+                                df_custos, df_ext_c
+                            )
+                            rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
+                            str_val_ent = (
+                                f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                f"➔ 💰 **{formatar_num_br(qtd_custos_att_ent + qtd_custos_ins_ent)} custo(s) unitário(s) atualizado(s) automaticamente**"
+                            )
+                        else:
+                            str_val_ent = ""
                         mensagens_auditoria_upload.append(
                             f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs {modo_ent_str} "
-                            f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.)."
+                            f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.{str_val_ent})."
                         )
                         if info_ent.get("qtd_codigos_repetidos", 0) > 0:
                             teve_alerta = True
@@ -4255,8 +4363,14 @@ with aba1:
                         )
                         abas_ja_gravadas.append("saidas_diarias")
                     if novos_custos is not None:
+                        if not df_custos_via_entrada.empty:
+                            novos_custos, _, _ = atualizar_custos_via_entradas_df(novos_custos, info_ent["df_custos_extraidos"])
                         salvar_backup_automatico_aba_gsheets(planilha_gsheets, "custos", df_custos)
                         gravar_aba_pequena_gsheets(planilha_gsheets, "custos", novos_custos)
+                        abas_ja_gravadas.append("custos")
+                    elif not df_custos_via_entrada.empty:
+                        salvar_backup_automatico_aba_gsheets(planilha_gsheets, "custos", df_custos)
+                        gravar_aba_pequena_gsheets(planilha_gsheets, "custos", df_custos_via_entrada)
                         abas_ja_gravadas.append("custos")
                     if nova_base is not None:
                         salvar_backup_automatico_aba_gsheets(planilha_gsheets, "base_inicial", df_base_vendas)
@@ -4549,28 +4663,28 @@ with aba2:
                 sug_ref = float(math.ceil(nec_ref - 1e-9)) if nec_ref > 0 else 0.0
                 sug_ref = max(sug_ref, sug_padrao)
             if eh_pico and eh_ruptura:
-                aut_str = "Zerado" if saldo_at <= 0 else f"{formatar_num_br(autonomia, 1)}d"
+                aut_str = "0d" if saldo_at <= 0 else f"{formatar_num_br(autonomia, 1)}d"
                 txt_alerta = (
-                    prefixo_tr + f"🔥 Ruptura ({aut_str}) + 🚨 Pico: -{formatar_qtd_br(queda_pico)} un. ({dt_pico})"
+                    prefixo_tr + f"🔥 Rupt. ({aut_str}) + 🚨 Pico -{formatar_qtd_br(queda_pico)} ({dt_pico})"
                 )
                 return True, True, txt_alerta, sug_ref
             if eh_pico:
                 txt_alerta = (
-                    prefixo_tr + f"🚨 Pico: -{formatar_qtd_br(queda_pico)} un. ({dt_pico}) | "
-                    f"Padrão: {formatar_qtd_br(sug_padrao)}"
+                    prefixo_tr + f"🚨 Pico -{formatar_qtd_br(queda_pico)} ({dt_pico}) | "
+                    f"Pad.: {formatar_qtd_br(sug_padrao)}"
                 )
                 return True, False, txt_alerta, sug_ref
             if eh_ruptura:
                 if saldo_at <= 0:
-                    txt_alerta = prefixo_tr + f"🔥 Ruptura: Zerado c/ Giro (Entrega: {lead_time}d)"
+                    txt_alerta = prefixo_tr + "🔥 Zerado c/ Giro"
                 else:
-                    txt_alerta = prefixo_tr + f"🔥 Ruptura: Dura {formatar_num_br(autonomia, 1)}d (≤ {lead_time}d Entrega)"
+                    txt_alerta = prefixo_tr + f"🔥 Dura {formatar_num_br(autonomia, 1)}d (≤{lead_time}d)"
                 return False, True, txt_alerta, sug_ref
             if alerta_nf:
                 return False, False, prefixo_tr + alerta_nf, sug_padrao
             if saida_ult > 0:
                 return False, False, prefixo_tr + f"✔️ -{formatar_qtd_br(saida_ult)} un. ({dt_ult})", sug_padrao
-            return False, False, prefixo_tr + "➖ Sem saída recente", sug_padrao
+            return False, False, prefixo_tr + "➖ Sem saída", sug_padrao
 
         if not df_calc.empty:
             res_analise = df_calc.apply(_avaliar_ruptura_pico_e_sugestao, axis=1)
@@ -4701,22 +4815,22 @@ with aba2:
         df_editor_aba2 = pd.DataFrame(
             {
                 "ja_comprei": [bool(marcar_todos_compra_aba2)] * len(df_compras),
-                "Código": df_compras["codigo"].values,
+                "Cód.": df_compras["codigo"].values,
                 "Descrição": df_compras["descricao"].values,
-                "Saída Recente & Alerta": df_compras["alerta_saida_recente"].values,
-                "Saldo Atual": [formatar_qtd_br(v) for v in df_compras["saldo_atual"].values],
-                "Vencido ou vencendo (≤60d)": [formatar_qtd_br(v) for v in df_compras["vencendo_60d"].values],
-                "Giro Médio/Dia": [
+                "Alerta & Saída": df_compras["alerta_saida_recente"].values,
+                "Saldo": [formatar_qtd_br(v) for v in df_compras["saldo_atual"].values],
+                "Venc. ≤60d": [formatar_qtd_br(v) for v in df_compras["vencendo_60d"].values],
+                "Giro/Dia": [
                     formatar_num_br(v, 3) if (pd.notna(v) and 0 < float(v) < 0.05) else formatar_num_br(v, 2)
                     for v in df_compras["giro_diario"].values
                 ],
-                "Autonomia (Dias)": [
-                    "Sem Giro" if (pd.notna(v) and float(v) >= 999.0) else formatar_num_br(v, 1)
+                "Auton.": [
+                    "S/ Giro" if (pd.notna(v) and float(v) >= 999.0) else f"{formatar_num_br(v, 1)}d"
                     for v in df_compras["autonomia_dias"].values
                 ],
-                "Sugestão Sistema": [formatar_qtd_br(v) for v in df_compras["sugestao_compra"].values],
-                "Último Custo ERP (R$)": [formatar_moeda_br(v) for v in df_compras["custo_unitario"].values],
-                "Total Estimado (R$)": [formatar_moeda_br(v) for v in total_item_s.values],
+                "Sugestão": [formatar_qtd_br(v) for v in df_compras["sugestao_compra"].values],
+                "Custo Un.": [formatar_moeda_br(v) for v in df_compras["custo_unitario"].values],
+                "Total (R$)": [formatar_moeda_br(v) for v in total_item_s.values],
             }
         )
 
@@ -4727,22 +4841,73 @@ with aba2:
             height=450,
             key="editor_ja_comprei_aba2",
             disabled=[
-                "Código",
+                "Cód.",
                 "Descrição",
-                "Saída Recente & Alerta",
-                "Saldo Atual",
-                "Vencido ou vencendo (≤60d)",
-                "Giro Médio/Dia",
-                "Autonomia (Dias)",
-                "Sugestão Sistema",
-                "Último Custo ERP (R$)",
-                "Total Estimado (R$)",
+                "Alerta & Saída",
+                "Saldo",
+                "Venc. ≤60d",
+                "Giro/Dia",
+                "Auton.",
+                "Sugestão",
+                "Custo Un.",
+                "Total (R$)",
             ],
             column_config={
                 "ja_comprei": st.column_config.CheckboxColumn(
-                    "🛒 Já Comprei?",
-                    help="Marque este produto para ocultá-lo da lista e dos alertas por 15 dias (ou até a NF de Entrada chegar)",
+                    "🛒",
+                    help="Já Comprei? — Marque este produto para ocultá-lo da lista e dos alertas por 15 dias (ou até a NF de Entrada chegar).",
                     default=False,
+                    width="small",
+                ),
+                "Cód.": st.column_config.TextColumn(
+                    "Cód.",
+                    help="Código do Produto (SKU no ERP Siagri).",
+                    width="small",
+                ),
+                "Descrição": st.column_config.TextColumn(
+                    "Descrição",
+                    help="Descrição Completa do Produto no ERP.",
+                    width="medium",
+                ),
+                "Alerta & Saída": st.column_config.TextColumn(
+                    "Alerta & Saída",
+                    help="Diagnóstico de Ruptura Iminente (estoque acaba antes do prazo de entrega), Pico Sazonal de Saída ou última venda registrada.",
+                    width="medium",
+                ),
+                "Saldo": st.column_config.TextColumn(
+                    "Saldo",
+                    help="Saldo Geral Atual em Estoque Físico.",
+                    width="small",
+                ),
+                "Venc. ≤60d": st.column_config.TextColumn(
+                    "Venc. ≤60d",
+                    help="Quantidade vencida ou vencendo nos próximos 60 dias (Radar FEFO).",
+                    width="small",
+                ),
+                "Giro/Dia": st.column_config.TextColumn(
+                    "Giro/Dia",
+                    help="Giro Médio Diário Ponderado (unidades vendidas ou consumidas por dia).",
+                    width="small",
+                ),
+                "Auton.": st.column_config.TextColumn(
+                    "Auton.",
+                    help="Autonomia Estimada do Estoque Atual em Dias (Saldo Atual ÷ Giro Médio/Dia).",
+                    width="small",
+                ),
+                "Sugestão": st.column_config.TextColumn(
+                    "Sugestão",
+                    help="Sugestão Inteligente de Compra em unidades para cobrir (Cobertura Alvo + Prazo de Entrega).",
+                    width="small",
+                ),
+                "Custo Un.": st.column_config.TextColumn(
+                    "Custo Un.",
+                    help="Último Custo Unitário C1 (R$) cadastrado ou atualizado automaticamente via NF de Entrada (Fatu416).",
+                    width="small",
+                ),
+                "Total (R$)": st.column_config.TextColumn(
+                    "Total (R$)",
+                    help="Orçamento Total Estimado para o Item (Sugestão de Compra × Último Custo Unitário).",
+                    width="small",
                 ),
             },
         )
@@ -5058,43 +5223,61 @@ with aba3:
                 ]
             ].rename(
                 columns={
-                    "status_fefo": "Faixa FEFO",
-                    "codigo": "Código",
+                    "status_fefo": "Faixa",
+                    "codigo": "Cód.",
                     "descricao": "Descrição",
                     "lote": "Lote",
                     "validade": "Validade",
-                    "dias_para_vencer": "Dias p/ Vencer",
-                    "saldo_lote": "Saldo Lote",
-                    "giro_diario": "Giro/Dia",
-                    "sobra_projetada": "Sobra no Venc.",
-                    "diagnostico_giro_fefo": "Diagnóstico de Escoamento",
-                    "mecanica_ia": "Ação IA & Mecânica Sugerida",
-                    "preco_piso_imposto": "Piso (Custo+Imp.)",
-                    "preco_promo_sug": "Preço Promo Sug.",
-                    "desconto_sug_pct": "Desc. Sug.",
-                    "valor_em_risco": "Capital Lote (R$)",
-                    "capital_sobra": "Capital em Sobra (R$)",
+                    "dias_para_vencer": "Dias",
+                    "saldo_lote": "Qtd. Lote",
+                    "giro_diario": "Giro/d",
+                    "sobra_projetada": "Sobra",
+                    "diagnostico_giro_fefo": "Diagnóstico FEFO",
+                    "mecanica_ia": "Ação IA Sugerida",
+                    "preco_piso_imposto": "Piso (R$)",
+                    "preco_promo_sug": "Promo (R$)",
+                    "desconto_sug_pct": "Desc.",
+                    "valor_em_risco": "Cap. Lote",
+                    "capital_sobra": "Cap. Sobra",
                 }
             )
             st.dataframe(
                 estilizar_tabela_br(
                     df_fefo_exibicao,
                     formatadores={
-                        "Dias p/ Vencer": lambda x: "-" if pd.isna(x) else formatar_num_br(x, 0),
-                        "Saldo Lote": formatar_qtd_br,
-                        "Giro/Dia": lambda x: formatar_num_br(x, 3) if (pd.notna(x) and 0 < float(x) < 0.05) else formatar_num_br(x, 2),
-                        "Sobra no Venc.": formatar_qtd_br,
-                        "Piso (Custo+Imp.)": formatar_moeda_br,
-                        "Preço Promo Sug.": lambda x: "-" if (pd.isna(x) or float(x) <= 0) else formatar_moeda_br(x),
-                        "Desc. Sug.": lambda x: "-" if (pd.isna(x) or float(x) <= 0) else f"-{formatar_pct_br(x, 1)}",
-                        "Capital Lote (R$)": formatar_moeda_br,
-                        "Capital em Sobra (R$)": formatar_moeda_br,
+                        "Dias": lambda x: "-" if pd.isna(x) else formatar_num_br(x, 0),
+                        "Qtd. Lote": formatar_qtd_br,
+                        "Giro/d": lambda x: formatar_num_br(x, 3) if (pd.notna(x) and 0 < float(x) < 0.05) else formatar_num_br(x, 2),
+                        "Sobra": formatar_qtd_br,
+                        "Piso (R$)": formatar_moeda_br,
+                        "Promo (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0) else formatar_moeda_br(x),
+                        "Desc.": lambda x: "-" if (pd.isna(x) or float(x) <= 0) else f"-{formatar_pct_br(x, 1)}",
+                        "Cap. Lote": formatar_moeda_br,
+                        "Cap. Sobra": formatar_moeda_br,
                     },
-                    colunas_esquerda=["Descrição", "Diagnóstico de Escoamento", "Ação IA & Mecânica Sugerida"],
+                    colunas_esquerda=["Descrição", "Diagnóstico FEFO", "Ação IA Sugerida"],
                 ),
                 use_container_width=True,
                 hide_index=True,
                 height=390,
+                column_config={
+                    "Faixa": st.column_config.TextColumn("Faixa", help="Faixa de urgência FEFO (Primeiro que Vence, Primeiro que Sai).", width="small"),
+                    "Cód.": st.column_config.TextColumn("Cód.", help="Código do Produto no ERP.", width="small"),
+                    "Descrição": st.column_config.TextColumn("Descrição", help="Descrição Completa do Produto.", width="medium"),
+                    "Lote": st.column_config.TextColumn("Lote", help="Código do Lote físico.", width="small"),
+                    "Validade": st.column_config.TextColumn("Validade", help="Data de Validade do Lote.", width="small"),
+                    "Dias": st.column_config.TextColumn("Dias", help="Dias restantes até o vencimento do lote.", width="small"),
+                    "Qtd. Lote": st.column_config.TextColumn("Qtd. Lote", help="Saldo físico atual disponível neste lote.", width="small"),
+                    "Giro/d": st.column_config.TextColumn("Giro/d", help="Giro Médio Diário do Produto.", width="small"),
+                    "Sobra": st.column_config.TextColumn("Sobra", help="Quantidade projetada que sobrará sem vender na data de vencimento se mantiver o giro atual.", width="small"),
+                    "Diagnóstico FEFO": st.column_config.TextColumn("Diagnóstico FEFO", help="Indica se o lote escoa sozinho no giro normal ou quantas unidades sobrarão no vencimento.", width="medium"),
+                    "Ação IA Sugerida": st.column_config.TextColumn("Ação IA Sugerida", help="Mecânica comercial recomendada pela IA para zerar o lote antes de vencer.", width="medium"),
+                    "Piso (R$)": st.column_config.TextColumn("Piso (R$)", help="Preço Piso de Equilíbrio (Custo Unitário C1 + Impostos configurados).", width="small"),
+                    "Promo (R$)": st.column_config.TextColumn("Promo (R$)", help="Preço Promocional Sugerido pela IA (sempre acima do Piso).", width="small"),
+                    "Desc.": st.column_config.TextColumn("Desc.", help="Percentual de Desconto Promocional Sugerido sobre o preço normal.", width="small"),
+                    "Cap. Lote": st.column_config.TextColumn("Cap. Lote", help="Capital Total Imobilizado neste Lote (Saldo do Lote × Custo Unitário).", width="small"),
+                    "Cap. Sobra": st.column_config.TextColumn("Cap. Sobra", help="Capital Financeiro em Risco Real de Sobra no Vencimento (Sobra Projetada × Custo Unitário).", width="small"),
+                },
             )
             if not df_fefo_exibicao.empty:
                 st.download_button(
