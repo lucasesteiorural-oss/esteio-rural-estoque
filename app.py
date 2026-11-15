@@ -537,7 +537,6 @@ MAPA_SINONIMOS = {
         "vlr_nf",
         "valor_liquido",
         "valor_bruto",
-        "valor_total_da_proposta",
         "custo_total",
         "custo_unitario",
         "custo_c1",
@@ -911,12 +910,12 @@ def estruturar_dataframe_bruto(
             termos_fin_validos = (
                 ("valor", "vlr", "proposta", "faturamento", "receita", "preco", "liquido", "bruto", "total_venda")
                 if aba_esquema == "saidas_diarias"
-                else ("valor", "vlr", "custo", "c1", "nf", "nota", "preco", "liquido", "bruto", "total")
+                else ("valor", "vlr", "custo", "c1", "nf", "nota", "liquido", "bruto", "total")
             )
             termos_nao_fin = (
                 ("saldo", "estoque", "lote", "validade", "custo", "cmv", "cod", "qtd", "quant", "data")
                 if aba_esquema == "saidas_diarias"
-                else ("saldo", "estoque", "lote", "validade", "cod", "qtd", "quant", "data")
+                else ("saldo", "estoque", "lote", "validade", "cod", "qtd", "quant", "data", "preco", "venda", "proposta", "faturamento", "receita")
             )
             for col_cand in list(df_orig.columns)[3:]:
                 norm_cand = cols_norm.get(col_cand, "")
@@ -2477,11 +2476,11 @@ def processar_planilha_movimento_diario(
                 coluna_valor_lida = str(c_orig).strip()
                 break
     elif nome_aba == "entradas_diarias":
-        termos_fin_e = ("valor", "vlr", "custo", "c1", "nf", "nota", "preco", "liquido", "bruto", "total")
-        termos_nao_fin_e = ("saldo", "estoque", "lote", "validade", "cod", "qtd", "quant", "data")
+        termos_fin_e = ("valor", "vlr", "custo", "c1", "nf", "nota", "liquido", "bruto", "total")
+        termos_nao_fin_e = ("saldo", "estoque", "lote", "validade", "cod", "qtd", "quant", "data", "preco", "venda", "proposta", "faturamento", "receita")
         for c_orig in df_raw.columns:
             n_c = normalizar_chave_coluna(c_orig)
-            if n_c in MAPA_SINONIMOS["valor_entrada"] or (
+            if (n_c in MAPA_SINONIMOS["valor_entrada"] and not any(b in n_c for b in termos_nao_fin_e)) or (
                 any(t in n_c for t in termos_fin_e) and not any(b in n_c for b in termos_nao_fin_e)
             ):
                 coluna_valor_lida = str(c_orig).strip()
@@ -2565,28 +2564,109 @@ def processar_planilha_movimento_diario(
 def atualizar_custos_via_entradas_df(
     df_custos_atual: pd.DataFrame,
     df_custos_novos_entrada: pd.DataFrame,
-) -> tuple[pd.DataFrame, int, int]:
+    data_entrada_iso: str = "",
+    df_entradas_historico: pd.DataFrame = None,
+    limite_alerta_variacao_pct: float = 20.0,
+) -> tuple[pd.DataFrame, dict]:
     """
-    Faz o Upsert (atualização seletiva) na tabela de custos a partir dos custos unitários
-    apurados na planilha de Entradas (Valor / Quantidade), preservando todos os demais SKUs.
+    Faz o Upsert seletivo na tabela de custos a partir dos custos unitários apurados na Entrada:
+    1) Só atualiza o custo se a data da entrada for >= à última entrada daquele SKU (proteção contra NF antiga sobrescrever custo mais novo).
+    2) Detecta e lista alertas de variação brusca de custo (ex: > 20%).
     """
+    info_vazio = {
+        "qtd_atualizados": 0,
+        "qtd_inseridos": 0,
+        "qtd_ignorados_data_antiga": 0,
+        "exemplos_ignorados_data": [],
+        "qtd_alertas_variacao": 0,
+        "exemplos_variacao": [],
+    }
     if df_custos_novos_entrada is None or df_custos_novos_entrada.empty:
-        return padronizar_dataframe(df_custos_atual, "custos"), 0, 0
+        return padronizar_dataframe(df_custos_atual, "custos"), info_vazio
     df_novos = df_custos_novos_entrada[df_custos_novos_entrada["custo_unitario"] > 0].copy()
     if df_novos.empty:
-        return padronizar_dataframe(df_custos_atual, "custos"), 0, 0
+        return padronizar_dataframe(df_custos_atual, "custos"), info_vazio
     df_base_c = (
         padronizar_dataframe(df_custos_atual, "custos")
         if (df_custos_atual is not None and not df_custos_atual.empty)
         else padronizar_dataframe(pd.DataFrame(), "custos")
     )
+    mapa_custo_atual = (
+        dict(zip(df_base_c["codigo"], df_base_c["custo_unitario"]))
+        if not df_base_c.empty
+        else {}
+    )
     cods_existentes = set(df_base_c["codigo"].unique()) if not df_base_c.empty else set()
-    cods_entrada = set(df_novos["codigo"].unique())
-    qtd_atualizados = len(cods_entrada & cods_existentes)
-    qtd_inseridos = len(cods_entrada - cods_existentes)
-    df_combinado = pd.concat([df_base_c, df_novos[["codigo", "descricao", "custo_unitario"]]], ignore_index=True)
+
+    mapa_ult_data_ent = {}
+    if (
+        df_entradas_historico is not None
+        and not df_entradas_historico.empty
+        and "codigo" in df_entradas_historico.columns
+        and "data" in df_entradas_historico.columns
+    ):
+        df_e_hist = df_entradas_historico[df_entradas_historico["qtd_entrada"] > 0].copy()
+        if not df_e_hist.empty:
+            dt_e_s = converter_datas_deterministico(df_e_hist["data"])
+            df_e_hist["_dt_iso"] = dt_e_s.dt.strftime("%Y-%m-%d").fillna("")
+            df_e_hist = df_e_hist[df_e_hist["_dt_iso"] != ""]
+            if not df_e_hist.empty:
+                mapa_ult_data_ent = df_e_hist.groupby("codigo")["_dt_iso"].max().to_dict()
+
+    dt_ent_iso_str = str(data_entrada_iso).strip()
+    linhas_validas = []
+    ignorados_data = []
+    alertas_var = []
+
+    for _, r_n in df_novos.iterrows():
+        cod = str(r_n["codigo"]).strip()
+        custo_novo = float(r_n["custo_unitario"])
+        custo_antigo = float(mapa_custo_atual.get(cod, 0.0))
+        ult_dt_sku = mapa_ult_data_ent.get(cod, "")
+
+        if dt_ent_iso_str and ult_dt_sku and dt_ent_iso_str < ult_dt_sku and custo_antigo > 0.0:
+            dt_ult_fmt = pd.to_datetime(ult_dt_sku, format="%Y-%m-%d", errors="coerce")
+            str_ult = dt_ult_fmt.strftime("%d/%m") if pd.notna(dt_ult_fmt) else ult_dt_sku
+            ignorados_data.append(f"SKU {cod} (mantido {formatar_moeda_br(custo_antigo)} de {str_ult})")
+            continue
+
+        if custo_antigo > 0.0:
+            var_pct = ((custo_novo - custo_antigo) / custo_antigo) * 100.0
+            if abs(var_pct) >= float(limite_alerta_variacao_pct):
+                alertas_var.append(
+                    (
+                        abs(var_pct),
+                        f"SKU {cod} ({formatar_moeda_br(custo_antigo)} ➔ {formatar_moeda_br(custo_novo)} | {formatar_pct_br(var_pct, 1, com_sinal=True)})",
+                    )
+                )
+        linhas_validas.append(r_n)
+
+    if not linhas_validas:
+        return df_base_c, {
+            "qtd_atualizados": 0,
+            "qtd_inseridos": 0,
+            "qtd_ignorados_data_antiga": len(ignorados_data),
+            "exemplos_ignorados_data": ignorados_data[:6],
+            "qtd_alertas_variacao": 0,
+            "exemplos_variacao": [],
+        }
+
+    df_novos_validos = pd.DataFrame(linhas_validas)[["codigo", "descricao", "custo_unitario"]].copy()
+    cods_aplicados = set(df_novos_validos["codigo"].unique())
+    qtd_atualizados = len(cods_aplicados & cods_existentes)
+    qtd_inseridos = len(cods_aplicados - cods_existentes)
+    alertas_var.sort(key=lambda x: x[0], reverse=True)
+
+    df_combinado = pd.concat([df_base_c, df_novos_validos], ignore_index=True)
     df_final_c = padronizar_dataframe(df_combinado, "custos")
-    return df_final_c, qtd_atualizados, qtd_inseridos
+    return df_final_c, {
+        "qtd_atualizados": qtd_atualizados,
+        "qtd_inseridos": qtd_inseridos,
+        "qtd_ignorados_data_antiga": len(ignorados_data),
+        "exemplos_ignorados_data": ignorados_data[:6],
+        "qtd_alertas_variacao": len(alertas_var),
+        "exemplos_variacao": [x[1] for x in alertas_var[:8]],
+    }
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -4376,6 +4456,12 @@ with aba1:
             key="chk_somar_ent_dia",
             help="Desmarcado (padrão): substitui as entradas desta data. Marcado: soma o novo arquivo às entradas já salvas nesta mesma data.",
         )
+        atualizar_custo_pela_entrada = st.checkbox(
+            "💰 Atualizar custo unitário pelos itens desta NF",
+            value=True,
+            key="chk_att_custo_ent_nf",
+            help="Marcado (padrão): atualiza o custo unitário apenas para os produtos desta NF cuja data seja igual ou posterior à última entrada registrada. Desmarque se preferir manter apenas o Custo C1 da Planilha Geral.",
+        )
     with c3:
         st.markdown(
             """
@@ -4672,8 +4758,7 @@ with aba1:
                             teve_alerta = True
                             mensagens_auditoria_upload.append(info_dup_est["aviso_sem_data"])
                     df_custos_via_entrada = pd.DataFrame()
-                    qtd_custos_att_ent = 0
-                    qtd_custos_ins_ent = 0
+                    info_upsert_custo_ent = {}
                     if arq_entradas is not None:
                         novas_entradas, info_ent = processar_planilha_movimento_diario(
                             arquivo=arq_entradas,
@@ -4686,22 +4771,77 @@ with aba1:
                         )
                         modo_ent_str = "somadas ao dia" if somar_entradas_mesmo_dia else "gravadas"
                         col_val_ent_nome = info_ent.get("coluna_valor_entrada", "")
-                        df_ext_c = info_ent.get("df_custos_extraidos", pd.DataFrame())
+                        df_ext_c = info_ent.get("df_custos_extraidos", pd.DataFrame()).copy()
+                        dt_ent_iso = data_entrada.strftime("%Y-%m-%d")
+                        if (
+                            somar_entradas_mesmo_dia
+                            and not df_ext_c.empty
+                            and not df_entradas_bruto.empty
+                            and "data" in df_entradas_bruto.columns
+                            and "valor_entrada" in df_entradas_bruto.columns
+                        ):
+                            df_dia_ant = df_entradas_bruto[
+                                (df_entradas_bruto["data"] == dt_ent_iso)
+                                & (df_entradas_bruto["qtd_entrada"] > 0)
+                                & (df_entradas_bruto["valor_entrada"] > 0)
+                            ].copy()
+                            if not df_dia_ant.empty:
+                                df_soma_c = pd.concat(
+                                    [
+                                        df_dia_ant[["codigo", "descricao", "qtd_entrada", "valor_entrada"]],
+                                        novas_entradas[
+                                            (novas_entradas["qtd_entrada"] > 0) & (novas_entradas["valor_entrada"] > 0)
+                                        ][["codigo", "descricao", "qtd_entrada", "valor_entrada"]],
+                                    ],
+                                    ignore_index=True,
+                                ).groupby("codigo", as_index=False).agg(
+                                    descricao=("descricao", "last"),
+                                    qtd_entrada=("qtd_entrada", "sum"),
+                                    valor_entrada=("valor_entrada", "sum"),
+                                )
+                                df_soma_c["custo_unitario"] = (df_soma_c["valor_entrada"] / df_soma_c["qtd_entrada"]).round(4)
+                                df_ext_c = df_soma_c[["codigo", "descricao", "custo_unitario"]].copy()
+
                         if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
-                            df_custos_via_entrada, qtd_custos_att_ent, qtd_custos_ins_ent = atualizar_custos_via_entradas_df(
-                                df_custos, df_ext_c
-                            )
                             rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
-                            str_val_ent = (
-                                f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
-                                f"➔ 💰 **{formatar_num_br(qtd_custos_att_ent + qtd_custos_ins_ent)} custo(s) unitário(s) atualizado(s) automaticamente**"
-                            )
+                            if atualizar_custo_pela_entrada:
+                                df_custos_via_entrada, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
+                                    df_custos_atual=df_custos,
+                                    df_custos_novos_entrada=df_ext_c,
+                                    data_entrada_iso=dt_ent_iso,
+                                    df_entradas_historico=df_entradas_bruto,
+                                    limite_alerta_variacao_pct=20.0,
+                                )
+                                tot_c_aplicados = info_upsert_custo_ent["qtd_atualizados"] + info_upsert_custo_ent["qtd_inseridos"]
+                                str_val_ent = (
+                                    f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                    f"➔ 💰 **{formatar_num_br(tot_c_aplicados)} custo(s) unitário(s) atualizado(s)**"
+                                )
+                            else:
+                                str_val_ent = (
+                                    f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                    f"(Custos C1 mantidos s/ alteração conforme opção)"
+                                )
                         else:
                             str_val_ent = ""
                         mensagens_auditoria_upload.append(
                             f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs {modo_ent_str} "
                             f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.{str_val_ent})."
                         )
+                        if info_upsert_custo_ent.get("qtd_ignorados_data_antiga", 0) > 0:
+                            teve_alerta = True
+                            ex_ign_dt = ", ".join(info_upsert_custo_ent["exemplos_ignorados_data"])
+                            mensagens_auditoria_upload.append(
+                                f"🛡️ **Proteção contra Custo Retroativo:** {formatar_num_br(info_upsert_custo_ent['qtd_ignorados_data_antiga'])} produto(s) "
+                                f"não tiveram o custo sobrescrito porque esta NF ({data_entrada.strftime('%d/%m/%Y')}) é mais antiga que a última entrada: {ex_ign_dt}."
+                            )
+                        if info_upsert_custo_ent.get("qtd_alertas_variacao", 0) > 0:
+                            teve_alerta = True
+                            ex_var_c = ", ".join(info_upsert_custo_ent["exemplos_variacao"])
+                            mensagens_auditoria_upload.append(
+                                f"⚠️ **Alerta de Variação de Custo (> 20%) na Entrada:** {formatar_num_br(info_upsert_custo_ent['qtd_alertas_variacao'])} produto(s) "
+                                f"tiveram alteração brusca em relação ao custo anterior: {ex_var_c}. Confira se a unidade da NF está correta!"
+                            )
                         if info_ent.get("qtd_codigos_repetidos", 0) > 0:
                             teve_alerta = True
                             ex_rep_ent = ", ".join(info_ent["exemplos_repetidos"])
@@ -4843,7 +4983,17 @@ with aba1:
                         abas_ja_gravadas.append("saidas_diarias")
                     if novos_custos is not None:
                         if not df_custos_via_entrada.empty:
-                            novos_custos, _, _ = atualizar_custos_via_entradas_df(novos_custos, info_ent["df_custos_extraidos"])
+                            # C1 tem prioridade máxima quando a Planilha Geral de Custos C1 é enviada no mesmo lote:
+                            # preserva 100% dos custos positivos de novos_custos (C1) e só aproveita da NF itens ausentes/zerados no C1
+                            cods_c1_pos = set(novos_custos.loc[novos_custos["custo_unitario"] > 0, "codigo"].unique())
+                            df_ent_complementar = df_custos_via_entrada[~df_custos_via_entrada["codigo"].isin(cods_c1_pos)].copy()
+                            if not df_ent_complementar.empty:
+                                novos_custos = padronizar_dataframe(
+                                    pd.concat([novos_custos, df_ent_complementar], ignore_index=True), "custos"
+                                )
+                            mensagens_auditoria_upload.append(
+                                "🛡️ **Prioridade C1 Mantida:** Como a Planilha Geral de Custos C1 foi enviada junto com a Entrada, o Custo C1 prevaleceu sobre o custo da NF."
+                            )
                         salvar_backup_automatico_aba_gsheets(planilha_gsheets, "custos", df_custos)
                         gravar_aba_pequena_gsheets(planilha_gsheets, "custos", novos_custos)
                         abas_ja_gravadas.append("custos")
