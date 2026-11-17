@@ -347,7 +347,7 @@ if not verificar_autenticacao():
 # ==============================================================================
 # 2. FORMATAÇÃO BRASILEIRA (1.000,00), CENTRALIZAÇÃO E ESQUEMAS DE DADOS
 # ==============================================================================
-DIAS_MAX_HISTORICO = 180
+DIAS_MAX_HISTORICO = 730
 DIAS_PADRAO_SONECA_COMPRA = 15
 LIMITE_COINCIDENCIA_CATALOGO = 80.0
 COLUNAS_NUMERICAS = {
@@ -1973,7 +1973,7 @@ def gerar_pacote_backup_leve(estado: dict) -> bytes:
         zf.writestr("Banco_Dados_Esteio_Rural.xlsx", xlsx_bytes)
         df_hist = estado.get("historico", pd.DataFrame())
         csv_bytes = df_hist.to_csv(index=False, sep=";").encode("utf-8-sig")
-        zf.writestr("historico_180d.csv", csv_bytes)
+        zf.writestr("historico_2anos.csv", csv_bytes)
     return buffer_zip.getvalue()
 
 
@@ -3022,7 +3022,8 @@ def atualizar_custos_via_entradas_df(
     """
     Faz o Upsert seletivo na tabela de custos a partir dos custos unitários apurados na Entrada:
     1) Só atualiza o custo se a data da entrada for >= à última entrada daquele SKU (proteção contra NF antiga sobrescrever custo mais novo).
-    2) Detecta e lista alertas de variação brusca de custo (ex: > 20%).
+    2) Detecta alertas de variação brusca de custo (>= 20%) e alertas de custo inalterado (0,0% — possível esquecimento fiscal).
+    3) Retorna os registros detalhados para auditoria fiscal.
     """
     info_vazio = {
         "qtd_atualizados": 0,
@@ -3031,6 +3032,9 @@ def atualizar_custos_via_entradas_df(
         "exemplos_ignorados_data": [],
         "qtd_alertas_variacao": 0,
         "exemplos_variacao": [],
+        "qtd_inalterados": 0,
+        "exemplos_inalterados": [],
+        "registros_auditoria": [],
     }
     if df_custos_novos_entrada is None or df_custos_novos_entrada.empty:
         return padronizar_dataframe(df_custos_atual, "custos"), info_vazio
@@ -3044,6 +3048,11 @@ def atualizar_custos_via_entradas_df(
     )
     mapa_custo_atual = (
         dict(zip(df_base_c["codigo"], df_base_c["custo_unitario"]))
+        if not df_base_c.empty
+        else {}
+    )
+    mapa_desc_atual = (
+        dict(zip(df_base_c["codigo"], df_base_c["descricao"]))
         if not df_base_c.empty
         else {}
     )
@@ -3068,9 +3077,12 @@ def atualizar_custos_via_entradas_df(
     linhas_validas = []
     ignorados_data = []
     alertas_var = []
+    inalterados_custo = []
+    registros_auditoria = []
 
     for _, r_n in df_novos.iterrows():
         cod = str(r_n["codigo"]).strip()
+        desc_item = str(r_n.get("descricao", "")).strip() or str(mapa_desc_atual.get(cod, "")).strip()
         custo_novo = float(r_n["custo_unitario"])
         custo_antigo = float(mapa_custo_atual.get(cod, 0.0))
         ult_dt_sku = mapa_ult_data_ent.get(cod, "")
@@ -3079,17 +3091,48 @@ def atualizar_custos_via_entradas_df(
             dt_ult_fmt = pd.to_datetime(ult_dt_sku, format="%Y-%m-%d", errors="coerce")
             str_ult = dt_ult_fmt.strftime("%d/%m") if pd.notna(dt_ult_fmt) else ult_dt_sku
             ignorados_data.append(f"SKU {cod} (mantido {formatar_moeda_br(custo_antigo)} de {str_ult})")
+            var_ign = ((custo_novo - custo_antigo) / custo_antigo) * 100.0
+            registros_auditoria.append(
+                {
+                    "Código": cod,
+                    "Descrição": desc_item,
+                    "Custo Anterior (R$)": custo_antigo,
+                    "Custo na NF (R$)": custo_novo,
+                    "Variação (%)": round(var_ign, 2),
+                    "Status Auditoria Fiscal": f"🛡️ Ignorado (NF anterior à entrada de {str_ult})",
+                }
+            )
             continue
 
+        var_pct = 0.0
         if custo_antigo > 0.0:
             var_pct = ((custo_novo - custo_antigo) / custo_antigo) * 100.0
-            if abs(var_pct) >= float(limite_alerta_variacao_pct):
+            if abs(custo_novo - custo_antigo) < 0.005 or abs(var_pct) < 0.05:
+                inalterados_custo.append(f"SKU {cod} ({formatar_moeda_br(custo_novo)})")
+                status_aud = "🔎 Custo Inalterado (0,0% — Conferir Fiscal)"
+            elif abs(var_pct) >= float(limite_alerta_variacao_pct):
                 alertas_var.append(
                     (
                         abs(var_pct),
                         f"SKU {cod} ({formatar_moeda_br(custo_antigo)} ➔ {formatar_moeda_br(custo_novo)} | {formatar_pct_br(var_pct, 1, com_sinal=True)})",
                     )
                 )
+                status_aud = f"⚠️ Variação Brusca ({formatar_pct_br(var_pct, 1, com_sinal=True)})"
+            else:
+                status_aud = f"✅ Atualizado ({formatar_pct_br(var_pct, 1, com_sinal=True)})"
+        else:
+            status_aud = "🆕 Novo Custo Cadastrado"
+
+        registros_auditoria.append(
+            {
+                "Código": cod,
+                "Descrição": desc_item,
+                "Custo Anterior (R$)": custo_antigo,
+                "Custo na NF (R$)": custo_novo,
+                "Variação (%)": round(var_pct, 2),
+                "Status Auditoria Fiscal": status_aud,
+            }
+        )
         linhas_validas.append(r_n)
 
     if not linhas_validas:
@@ -3100,6 +3143,9 @@ def atualizar_custos_via_entradas_df(
             "exemplos_ignorados_data": ignorados_data[:6],
             "qtd_alertas_variacao": 0,
             "exemplos_variacao": [],
+            "qtd_inalterados": 0,
+            "exemplos_inalterados": [],
+            "registros_auditoria": registros_auditoria,
         }
 
     df_novos_validos = pd.DataFrame(linhas_validas)[["codigo", "descricao", "custo_unitario"]].copy()
@@ -3117,6 +3163,9 @@ def atualizar_custos_via_entradas_df(
         "exemplos_ignorados_data": ignorados_data[:6],
         "qtd_alertas_variacao": len(alertas_var),
         "exemplos_variacao": [x[1] for x in alertas_var[:8]],
+        "qtd_inalterados": len(inalterados_custo),
+        "exemplos_inalterados": inalterados_custo[:10],
+        "registros_auditoria": registros_auditoria,
     }
 
 
@@ -4873,6 +4922,36 @@ with aba_dash:
                         cresc_vals.append((((at_v - ant_v) / ant_v) * 100.0) if ant_v > 0 else 0.0)
                     df_mom["cresc_mom_pct"] = cresc_vals
 
+                    mapa_base_periodo = dict(zip(df_mom[col_chave_tempo].astype(str), base_cresc.astype(float)))
+                    yoy_vals = []
+                    for idx_m, r_m in df_mom.iterrows():
+                        ch_p = str(r_m[col_chave_tempo]).strip()
+                        at_v = float(base_cresc.iloc[idx_m])
+                        if len(ch_p) >= 7 and ch_p[:4].isdigit():
+                            ch_ano_ant = f"{int(ch_p[:4]) - 1}{ch_p[4:]}"
+                            ant_yoy = float(mapa_base_periodo.get(ch_ano_ant, 0.0))
+                            yoy_vals.append((((at_v - ant_yoy) / ant_yoy) * 100.0) if ant_yoy > 0 else 0.0)
+                        else:
+                            yoy_vals.append(0.0)
+                    df_mom["cresc_yoy_pct"] = yoy_vals
+
+                    cols_mom_final = [
+                        rotulo_col_tempo,
+                        "Dias c/ Saída",
+                        "Compras NF a Custo (R$)",
+                        "CMV das Saídas (R$)",
+                        "Faturamento Bruto (R$)",
+                        "Impostos Est. (R$)",
+                        "Lucro Bruto (R$)",
+                        "Lucro Líquido Real (R$)",
+                        "Margem Bruta (%)",
+                        "Margem Líquida (%)",
+                        "Markup Médio (%)",
+                        "Evolução (%)",
+                    ]
+                    if visao_tempo_margem != "📆 Consolidado Anual":
+                        cols_mom_final.append("Vs. Ano Ant. (%)")
+
                     df_mom_exib = df_mom.rename(
                         columns={
                             col_chave_tempo: rotulo_col_tempo,
@@ -4887,23 +4966,9 @@ with aba_dash:
                             "margem_liq_pct": "Margem Líquida (%)",
                             "markup_pct": "Markup Médio (%)",
                             "cresc_mom_pct": "Evolução (%)",
+                            "cresc_yoy_pct": "Vs. Ano Ant. (%)",
                         }
-                    )[
-                        [
-                            rotulo_col_tempo,
-                            "Dias c/ Saída",
-                            "Compras NF a Custo (R$)",
-                            "CMV das Saídas (R$)",
-                            "Faturamento Bruto (R$)",
-                            "Impostos Est. (R$)",
-                            "Lucro Bruto (R$)",
-                            "Lucro Líquido Real (R$)",
-                            "Margem Bruta (%)",
-                            "Margem Líquida (%)",
-                            "Markup Médio (%)",
-                            "Evolução (%)",
-                        ]
-                    ]
+                    )[cols_mom_final]
                     st.dataframe(
                         estilizar_tabela_br(
                             df_mom_exib,
@@ -4919,6 +4984,7 @@ with aba_dash:
                                 "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
                                 "Markup Médio (%)": lambda x: formatar_pct_br(x, 1, com_sinal=True),
                                 "Evolução (%)": lambda x: "-" if (pd.isna(x) or float(x) == 0.0) else formatar_pct_br(x, 1, com_sinal=True),
+                                "Vs. Ano Ant. (%)": lambda x: "-" if (pd.isna(x) or float(x) == 0.0) else formatar_pct_br(x, 1, com_sinal=True),
                             },
                             colunas_esquerda=[],
                         ),
@@ -5217,6 +5283,71 @@ with aba1:
             st.warning(aviso_dup["texto"])
         else:
             st.info(aviso_dup["texto"])
+    if st.session_state.get("auditoria_custos_ultima_nf"):
+        regs_aud_nf = st.session_state["auditoria_custos_ultima_nf"]
+        dt_aud_nf_str = st.session_state.get("data_auditoria_custos_nf", "")
+        df_aud_nf = pd.DataFrame(regs_aud_nf)
+        qtd_inalt_tab = int(df_aud_nf["Status Auditoria Fiscal"].str.contains("Inalterado", na=False).sum())
+        qtd_var_tab = int(df_aud_nf["Status Auditoria Fiscal"].str.contains("Variação Brusca", na=False).sum())
+        with st.expander(
+            f"🔎 Conferência Fiscal de Custos da Última NF ({dt_aud_nf_str}) — "
+            f"{formatar_num_br(qtd_inalt_tab)} Inalterado(s) 0,0% | {formatar_num_br(qtd_var_tab)} Variação >20%",
+            expanded=(qtd_inalt_tab > 0 or qtd_var_tab > 0),
+        ):
+            st.caption(
+                "Use esta conferência para identificar produtos que entraram na NF com **custo idêntico ao anterior (0,0%)** "
+                "(indicando possível esquecimento na atualização de preço de custo pelo setor fiscal) ou com variação acima de 20%."
+            )
+            fa1, fa2 = st.columns([2.0, 1.0])
+            with fa1:
+                filtro_aud_fiscal = st.selectbox(
+                    "Filtrar itens da NF:",
+                    options=[
+                        f"🔎 Todos os Alertas (Inalterados 0,0%: {qtd_inalt_tab} + Variação >20%: {qtd_var_tab})",
+                        f"🔎 Apenas Custo Inalterado 0,0% ({qtd_inalt_tab})",
+                        f"⚠️ Apenas Variação Brusca >20% ({qtd_var_tab})",
+                        f"📋 Todos os Itens da NF ({len(df_aud_nf)})",
+                    ],
+                    index=0 if (qtd_inalt_tab > 0 or qtd_var_tab > 0) else 3,
+                    key="sel_filtro_aud_fiscal_nf",
+                )
+            df_aud_view = df_aud_nf.copy()
+            if filtro_aud_fiscal.startswith("🔎 Todos os Alertas"):
+                df_aud_view = df_aud_view[
+                    df_aud_view["Status Auditoria Fiscal"].str.contains("Inalterado|Variação Brusca", na=False)
+                ].copy()
+            elif filtro_aud_fiscal.startswith("🔎 Apenas Custo Inalterado"):
+                df_aud_view = df_aud_view[
+                    df_aud_view["Status Auditoria Fiscal"].str.contains("Inalterado", na=False)
+                ].copy()
+            elif filtro_aud_fiscal.startswith("⚠️ Apenas Variação"):
+                df_aud_view = df_aud_view[
+                    df_aud_view["Status Auditoria Fiscal"].str.contains("Variação Brusca", na=False)
+                ].copy()
+            with fa2:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                st.download_button(
+                    label="📥 Baixar Conferência Fiscal (.xlsx)",
+                    data=gerar_excel_relatorio(df_aud_view, "Auditoria_Fiscal_Custos"),
+                    file_name=f"Auditoria_Fiscal_Custos_NF_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_auditoria_fiscal_nf_aba7",
+                )
+            st.dataframe(
+                estilizar_tabela_br(
+                    df_aud_view,
+                    formatadores={
+                        "Custo Anterior (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                        "Custo na NF (R$)": formatar_moeda_br,
+                        "Variação (%)": lambda x: "0,0%" if (pd.isna(x) or abs(float(x)) < 0.05) else formatar_pct_br(x, 1, com_sinal=True),
+                    },
+                    colunas_esquerda=["Descrição", "Status Auditoria Fiscal"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=260,
+            )
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
@@ -5306,7 +5437,7 @@ with aba1:
     with st.expander("📦 Carga Geral Avulsa de Custos C1 ou Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
         st.caption(
             "💡 Os custos unitários já são atualizados automaticamente sempre que você sobe a planilha de **Entradas Faturadas (Fatu416 com coluna `Valor`)** acima! "
-            "Use os campos abaixo apenas quando quiser fazer uma carga geral de custos do catálogo inteiro ou atualizar a Base Inicial de apoio."
+            "Quando você sobe a **Planilha Geral de Custos C1** abaixo (ex.: todo sábado), ela **sobrescreve e prevalece 100%** sobre a tabela de custos atual."
         )
         cb0, cb1, cb2 = st.columns([1.4, 0.8, 1.4])
         with cb0:
@@ -5391,7 +5522,7 @@ with aba1:
                 )
     with col_bkp_zip:
         if not df_estoque_bruto.empty:
-            if st.button("📦 Preparar Banco + Histórico 180d (.zip)", use_container_width=True):
+            if st.button("📦 Preparar Banco + Histórico 2 Anos (.zip)", use_container_width=True):
                 with st.spinner("Compactando planilha do banco (.xlsx) + histórico (.csv)..."):
                     st.session_state["backup_zip_bytes"] = gerar_pacote_backup_leve(estado)
                     st.session_state["backup_zip_nome"] = (
@@ -5713,6 +5844,16 @@ with aba1:
                             mensagens_auditoria_upload.append(
                                 f"🛡️ **Proteção contra Custo Retroativo:** {formatar_num_br(info_upsert_custo_ent['qtd_ignorados_data_antiga'])} produto(s) "
                                 f"não tiveram o custo sobrescrito porque esta NF ({data_entrada.strftime('%d/%m/%Y')}) é mais antiga que a última entrada: {ex_ign_dt}."
+                            )
+                        if info_upsert_custo_ent.get("registros_auditoria"):
+                            st.session_state["auditoria_custos_ultima_nf"] = info_upsert_custo_ent["registros_auditoria"]
+                            st.session_state["data_auditoria_custos_nf"] = data_entrada.strftime("%d/%m/%Y")
+                        if info_upsert_custo_ent.get("qtd_inalterados", 0) > 0:
+                            teve_alerta = True
+                            ex_inalt_c = ", ".join(info_upsert_custo_ent["exemplos_inalterados"])
+                            mensagens_auditoria_upload.append(
+                                f"🔎 **Auditoria Fiscal — Custo Inalterado na NF (0,0%):** {formatar_num_br(info_upsert_custo_ent['qtd_inalterados'])} produto(s) "
+                                f"entraram com exatamente o mesmo custo anterior (conferir se o fiscal atualizou o custo): {ex_inalt_c}."
                             )
                         if info_upsert_custo_ent.get("qtd_alertas_variacao", 0) > 0:
                             teve_alerta = True
@@ -6048,26 +6189,129 @@ with aba1:
                         st.error(f"❌ Erro ao restaurar: {e_rst_gp}")
 
         st.markdown("---")
-        st.markdown("##### 2. Mover Produto(s) Específico(s) para Outro Grupo (Exceções por Código SKU)")
+        st.markdown("##### 2. Visualizar Produtos por Grupo & Mover em Lote para Outro Grupo")
         st.caption(
-            "Útil quando um produto foi cadastrado no Siagri com código de outra família (ex: `903001 - MP MILHO MOIDO 40KG` "
-            "que começa com `90`, mas você quer que fique em `26 - Nutrição & Matéria-Prima (MP)`)."
+            "Filtre qualquer grupo atual (ex.: `Outros (90)` ou `50 - Veterinária & Reprodução`) para ver todos os produtos que estão dentro dele, "
+            "marque os itens desejados na tabela e mova-os para outro grupo (ou devolva-os ao grupo original do prefixo)."
         )
         if not df_cat_grp.empty:
-            mapa_desc_cat = dict(zip(df_cat_grp["codigo"], df_cat_grp["descricao"]))
-            opcoes_sku_mover = [
-                f"[{r['codigo']}] {r['descricao']} (Grupo Atual: {identificar_departamento_sku(r['codigo'], grupos_pref_custom, grupos_sku_custom)})"
-                for _, r in df_cat_grp.sort_values("descricao").iterrows()
-            ]
-            cods_sku_ordenados = df_cat_grp.sort_values("descricao")["codigo"].tolist()
-            cm_sku1, cm_sku2, cm_sku3 = st.columns([1.8, 1.3, 0.9])
-            with cm_sku1:
-                indices_skus_sel = st.multiselect(
-                    "Selecione um ou mais produtos para mudar de grupo:",
-                    options=range(len(opcoes_sku_mover)),
-                    format_func=lambda i: opcoes_sku_mover[i],
-                    key="sel_skus_mover_grupo",
+            linhas_grp_cat = []
+            for _, r_gc in df_cat_grp.sort_values("descricao").iterrows():
+                c_gc = str(r_gc["codigo"]).strip()
+                d_gc = str(r_gc["descricao"]).strip()
+                pref_gc = c_gc[:2] if len(c_gc) >= 2 else c_gc
+                grp_padrao_gc = mapa_depto_ativo.get(pref_gc, f"Outros ({pref_gc or 'S/C'})")
+                grp_atual_gc = identificar_departamento_sku(c_gc, grupos_pref_custom, grupos_sku_custom)
+                eh_mov_manual = c_gc in grupos_sku_custom
+                linhas_grp_cat.append(
+                    {
+                        "codigo": c_gc,
+                        "descricao": d_gc,
+                        "grupo_atual": grp_atual_gc,
+                        "grupo_padrao": grp_padrao_gc,
+                        "movido_manual": eh_mov_manual,
+                        "origem_label": "📌 Movido Manualmente" if eh_mov_manual else "🏷️ Padrão do Prefixo",
+                    }
                 )
+            df_grp_cat_full = pd.DataFrame(linhas_grp_cat)
+            contagem_grp_atual = df_grp_cat_full.groupby("grupo_atual")["codigo"].count().to_dict()
+            opcoes_grp_filtro = ["Todos os Grupos"] + sorted(df_grp_cat_full["grupo_atual"].unique())
+
+            fg1, fg2, fg3 = st.columns([1.5, 1.3, 1.2])
+            with fg1:
+                grp_atual_filtro = st.selectbox(
+                    "📂 Filtrar Grupo Atual (ver itens dentro do grupo):",
+                    options=opcoes_grp_filtro,
+                    format_func=lambda g: (
+                        f"Todos os Grupos ({formatar_num_br(len(df_grp_cat_full))} SKUs)"
+                        if g == "Todos os Grupos"
+                        else f"{g} ({formatar_num_br(contagem_grp_atual.get(g, 0))} SKUs)"
+                    ),
+                    key="sel_filtro_grp_atual_aba7",
+                )
+            with fg2:
+                busca_grp_sku_txt = st.text_input(
+                    "🔍 Buscar produto dentro do filtro:",
+                    placeholder="Digite código ou nome...",
+                    key="busca_txt_grp_sku_aba7",
+                )
+            with fg3:
+                filtro_origem_grp = st.selectbox(
+                    "🏷️ Filtrar Origem:",
+                    options=[
+                        "📋 Todos os Produtos do Filtro",
+                        f"📌 Apenas Movidos Manualmente ({formatar_num_br(len(grupos_sku_custom))})",
+                        "🏷️ Apenas no Grupo Padrão do Prefixo",
+                    ],
+                    index=0,
+                    key="sel_origem_grp_aba7",
+                )
+
+            df_grp_view = df_grp_cat_full.copy()
+            if grp_atual_filtro != "Todos os Grupos":
+                df_grp_view = df_grp_view[df_grp_view["grupo_atual"] == grp_atual_filtro].copy()
+            if filtro_origem_grp.startswith("📌"):
+                df_grp_view = df_grp_view[df_grp_view["movido_manual"] == True].copy()
+            elif filtro_origem_grp.startswith("🏷️"):
+                df_grp_view = df_grp_view[df_grp_view["movido_manual"] == False].copy()
+            if busca_grp_sku_txt and busca_grp_sku_txt.strip():
+                t_g = busca_grp_sku_txt.lower().strip()
+                df_grp_view = df_grp_view[
+                    df_grp_view["codigo"].str.lower().str.contains(t_g, na=False, regex=False)
+                    | df_grp_view["descricao"].str.lower().str.contains(t_g, na=False, regex=False)
+                ].copy()
+
+            df_grp_view = df_grp_view.reset_index(drop=True)
+            cg_sel1, cg_sel2 = st.columns([1.5, 2.5])
+            with cg_sel1:
+                marcar_todos_grp_view = st.checkbox(
+                    f"Selecionar todos os {formatar_num_br(len(df_grp_view))} produto(s) filtrados",
+                    value=False,
+                    key="chk_sel_todos_grp_aba7",
+                )
+            with cg_sel2:
+                st.caption(
+                    f"Exibindo **{formatar_num_br(len(df_grp_view))} produto(s)** | "
+                    f"Total de exceções personalizadas ativas: **{formatar_num_br(len(grupos_sku_custom))}**"
+                )
+
+            df_grp_ed_in = pd.DataFrame(
+                {
+                    "selecionar": [bool(marcar_todos_grp_view)] * len(df_grp_view),
+                    "Cód.": df_grp_view["codigo"].values,
+                    "Descrição": df_grp_view["descricao"].values,
+                    "Grupo Atual": df_grp_view["grupo_atual"].values,
+                    "Grupo Original (Prefixo)": df_grp_view["grupo_padrao"].values,
+                    "Origem": df_grp_view["origem_label"].values,
+                }
+            )
+            ed_grp_out = st.data_editor(
+                df_grp_ed_in,
+                use_container_width=True,
+                hide_index=True,
+                height=340,
+                key="editor_mover_grupos_aba7",
+                disabled=["Cód.", "Descrição", "Grupo Atual", "Grupo Original (Prefixo)", "Origem"],
+                column_config={
+                    "selecionar": st.column_config.CheckboxColumn(
+                        "Mover?",
+                        help="Marque os produtos que deseja transferir de grupo ou devolver ao grupo original.",
+                        default=False,
+                        width="small",
+                    ),
+                    "Cód.": st.column_config.TextColumn("Cód.", width="small"),
+                    "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+                    "Grupo Atual": st.column_config.TextColumn("Grupo Atual", width="medium"),
+                    "Grupo Original (Prefixo)": st.column_config.TextColumn("Grupo Original (Prefixo)", width="medium"),
+                    "Origem": st.column_config.TextColumn("Origem", width="small"),
+                },
+            )
+
+            sel_grp_rows = ed_grp_out[ed_grp_out["selecionar"] == True]
+            cods_sel_grp = [normalizar_codigo_sku(c) for c in sel_grp_rows["Cód."].tolist() if normalizar_codigo_sku(c)]
+            qtd_sel_grp = len(cods_sel_grp)
+            qtd_sel_com_excecao = sum(1 for c in cods_sel_grp if c in grupos_sku_custom)
+
             grupos_disponiveis_destino = sorted(
                 list(
                     set(mapa_depto_ativo.values())
@@ -6075,9 +6319,10 @@ with aba1:
                     | {f"Outros ({p})" for p in todos_prefixos if p not in mapa_depto_ativo}
                 )
             )
-            with cm_sku2:
+            cm_sku1, cm_sku2, cm_sku3 = st.columns([1.5, 1.3, 1.2])
+            with cm_sku1:
                 grupo_destino_sel = st.selectbox(
-                    "Grupo de Destino:",
+                    "Grupo de Destino para os Selecionados:",
                     options=grupos_disponiveis_destino + ["➕ Digitar Novo Nome de Grupo..."],
                     key="sel_grupo_destino_sku",
                 )
@@ -6089,22 +6334,20 @@ with aba1:
                     ).strip()
                 else:
                     grupo_destino_final = grupo_destino_sel
-            with cm_sku3:
+            with cm_sku2:
                 st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
                 if st.button(
-                    "📌 Fixar no Grupo",
+                    f"📌 Mover ({formatar_num_br(qtd_sel_grp)}) para o Destino",
                     type="primary",
                     use_container_width=True,
-                    disabled=(not indices_skus_sel or not grupo_destino_final),
+                    disabled=(qtd_sel_grp == 0 or not grupo_destino_final),
                     key="btn_fixar_sku_grupo",
                 ):
-                    with st.spinner("Salvando exceção de grupo no Supabase..."):
+                    with st.spinner("Movendo produtos selecionados no Supabase..."):
                         try:
                             novo_sku_custom = dict(grupos_sku_custom)
-                            for idx_sel in indices_skus_sel:
-                                cod_alvo_m = normalizar_codigo_sku(cods_sku_ordenados[int(idx_sel)])
-                                if cod_alvo_m:
-                                    novo_sku_custom[cod_alvo_m] = grupo_destino_final
+                            for cod_alvo_m in cods_sel_grp:
+                                novo_sku_custom[cod_alvo_m] = grupo_destino_final
                             df_meta_sku = montar_dataframe_meta_completo(
                                 dias_base_val=int(dias_base_atual),
                                 ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
@@ -6113,68 +6356,44 @@ with aba1:
                             )
                             gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
                             carregar_estado_completo.clear()
+                            calcular_motor_giro_sazonal.clear()
                             st.session_state["msg_sucesso_sync"] = (
-                                f"✅ {formatar_num_br(len(indices_skus_sel))} produto(s) movido(s) para o grupo '{grupo_destino_final}'!"
+                                f"✅ {formatar_num_br(qtd_sel_grp)} produto(s) movido(s) para o grupo '{grupo_destino_final}'!"
                             )
                             st.rerun()
                         except Exception as e_sk_g:
                             st.error(f"❌ Erro ao mover produto de grupo: {e_sk_g}")
-
-            if grupos_sku_custom:
-                st.markdown("###### 📌 Produtos com Grupo Personalizado Ativo")
-                linhas_sku_cust = []
-                for c_sk, g_sk in sorted(grupos_sku_custom.items()):
-                    pref_orig = c_sk[:2] if len(c_sk) >= 2 else c_sk
-                    linhas_sku_cust.append(
-                        {
-                            "remover": False,
-                            "Código": c_sk,
-                            "Descrição": mapa_desc_cat.get(c_sk, "Produto Cadastrado"),
-                            "Grupo Original (Prefixo)": mapa_depto_ativo.get(pref_orig, f"Outros ({pref_orig})"),
-                            "Grupo Personalizado Atual": g_sk,
-                        }
-                    )
-                df_sku_cust_in = pd.DataFrame(linhas_sku_cust)
-                ed_sku_cust = st.data_editor(
-                    df_sku_cust_in,
+            with cm_sku3:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if st.button(
+                    f"↩️ Devolver ({formatar_num_br(qtd_sel_com_excecao)}) ao Original",
                     use_container_width=True,
-                    hide_index=True,
-                    key="editor_excecoes_sku_grupo",
-                    disabled=["Código", "Descrição", "Grupo Original (Prefixo)", "Grupo Personalizado Atual"],
-                    column_config={
-                        "remover": st.column_config.CheckboxColumn(
-                            "Voltar ao Padrão?",
-                            help="Marque para remover a exceção e devolver este produto ao grupo do seu prefixo original.",
-                            default=False,
-                            width="small",
-                        )
-                    },
-                )
-                sel_rem_sku_g = ed_sku_cust[ed_sku_cust["remover"] == True]
-                if not sel_rem_sku_g.empty:
-                    if st.button(
-                        f"↩️ Devolver {formatar_num_br(len(sel_rem_sku_g))} Produto(s) Marcado(s) ao Grupo Original",
-                        key="btn_rem_excecao_sku_grp",
-                    ):
-                        with st.spinner("Atualizando grupos no Supabase..."):
-                            try:
-                                novo_sku_custom = {
-                                    k: v
-                                    for k, v in grupos_sku_custom.items()
-                                    if k not in set(sel_rem_sku_g["Código"].unique())
-                                }
-                                df_meta_sku = montar_dataframe_meta_completo(
-                                    dias_base_val=int(dias_base_atual),
-                                    ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
-                                    grupos_pref_custom=grupos_pref_custom,
-                                    grupos_sku_custom=novo_sku_custom,
-                                )
-                                gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
-                                carregar_estado_completo.clear()
-                                st.session_state["msg_sucesso_sync"] = "✅ Produto(s) devolvido(s) ao grupo original!"
-                                st.rerun()
-                            except Exception as e_rm_sk:
-                                st.error(f"❌ Erro ao remover exceção: {e_rm_sk}")
+                    disabled=(qtd_sel_com_excecao == 0),
+                    key="btn_rem_excecao_sku_grp",
+                ):
+                    with st.spinner("Devolvendo produtos ao grupo original no Supabase..."):
+                        try:
+                            set_dev_g = set(cods_sel_grp)
+                            novo_sku_custom = {
+                                k: v
+                                for k, v in grupos_sku_custom.items()
+                                if k not in set_dev_g
+                            }
+                            df_meta_sku = montar_dataframe_meta_completo(
+                                dias_base_val=int(dias_base_atual),
+                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                grupos_pref_custom=grupos_pref_custom,
+                                grupos_sku_custom=novo_sku_custom,
+                            )
+                            gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
+                            carregar_estado_completo.clear()
+                            calcular_motor_giro_sazonal.clear()
+                            st.session_state["msg_sucesso_sync"] = (
+                                f"✅ {formatar_num_br(qtd_sel_com_excecao)} produto(s) devolvido(s) ao grupo original do prefixo!"
+                            )
+                            st.rerun()
+                        except Exception as e_rm_sk:
+                            st.error(f"❌ Erro ao devolver produtos ao grupo original: {e_rm_sk}")
 
         st.markdown("---")
         st.markdown("##### 3. Definir Produtos de Matéria-Prima / Produção de Ração (MP — Saída por Ordem de Produção)")
@@ -6407,7 +6626,7 @@ with aba1:
     qtd_custos = len(df_custos) if not df_custos.empty else 0
     r1.metric("Produtos Ativos com Saldo/Catálogo", f"{formatar_num_br(qtd_skus_visiveis)} (Ocultos: {formatar_num_br(len(codigos_ocultos))})")
     r2.metric(
-        "Histórico 180d (Est. / Ent. / Saí.)",
+        "Histórico 2 Anos (Est. / Ent. / Saí.)",
         f"{formatar_num_br(qtd_datas_hist)}d / {formatar_num_br(qtd_datas_ent)}d / {formatar_num_br(qtd_datas_sai)}d",
     )
     r3.metric("Itens com Custo Cadastrado", f"{formatar_num_br(qtd_custos)}")
@@ -6445,9 +6664,9 @@ with aba2:
     p1, p2, p3, p4, p5 = st.columns([1.0, 1.0, 1.0, 1.1, 2.0])
     janela_dias = p1.selectbox(
         "Janela de Giro (dias):",
-        options=[15, 30, 45, 60, 90, 120, 180],
+        options=[15, 30, 45, 60, 90, 120, 180, 365],
         index=5,
-        help="Escolha 120 ou 180 dias para negociações de longo prazo com fornecedores.",
+        help="Escolha 120, 180 ou 365 dias para negociações de longo prazo e análise anual com fornecedores.",
     )
     cobertura_desejada = p2.number_input("Cobertura Alvo (dias):", min_value=5, max_value=180, value=120)
     lead_time = p3.number_input("Entrega / Lead (dias):", min_value=0, max_value=90, value=10)
@@ -7078,7 +7297,7 @@ with aba3:
         with c_p2:
             janela_giro_fefo = st.selectbox(
                 "📊 Janela de Giro Base:",
-                options=[30, 60, 90, 120, 180],
+                options=[30, 60, 90, 120, 180, 365],
                 index=3,
                 key="fefo_janela_giro",
                 help="Período usado para calcular a velocidade de venda diária de cada produto até a data de vencimento.",
