@@ -304,13 +304,6 @@ def obter_secret(chave: str, padrao=None):
         return padrao
 
 
-def tem_secret(chave: str) -> bool:
-    try:
-        return chave in st.secrets
-    except Exception:
-        return False
-
-
 def verificar_autenticacao() -> bool:
     senha_correta = str(obter_secret("app_password", "")).strip()
     if not senha_correta:
@@ -356,7 +349,6 @@ if not verificar_autenticacao():
 # ==============================================================================
 DIAS_MAX_HISTORICO = 180
 DIAS_PADRAO_SONECA_COMPRA = 15
-TAMANHO_LOTE_MIGRACAO = 4000
 LIMITE_COINCIDENCIA_CATALOGO = 80.0
 COLUNAS_NUMERICAS = {
     "saldo_geral",
@@ -696,7 +688,7 @@ def limpar_serie_codigo(serie: pd.Series) -> pd.Series:
 def converter_numero_br(
     serie: pd.Series,
     nome_coluna: str = "",
-    origem_gsheets: bool = False,
+    origem_banco: bool = False,
     bloquear_invalidos: bool = False,
     codigos_ref: pd.Series = None,
 ) -> pd.Series:
@@ -723,7 +715,7 @@ def converter_numero_br(
     tem_ponto_nao_3_digitos = s_apenas_str.str.match(
         r"^[+-]?\d+\.\d{1,2}$|^[+-]?\d+\.\d{4,}$|^[+-]?0\.\d+$"
     ).any()
-    if origem_gsheets:
+    if origem_banco:
         tratar_1ponto_3dig_como_milhar = False
     elif nome_coluna in ("saldo_geral", "saldo_lote", "qtd_vendida", "qtd_entrada", "qtd_saida"):
         tratar_1ponto_3dig_como_milhar = (not tem_ponto_nao_3_digitos) or tem_virgula_decimal_na_coluna
@@ -838,7 +830,7 @@ def converter_datas_deterministico(serie: pd.Series) -> pd.Series:
 
 def restaurar_tipos(
     df: pd.DataFrame,
-    origem_gsheets: bool = False,
+    origem_banco: bool = False,
     bloquear_invalidos: bool = False,
 ) -> pd.DataFrame:
     if df is None or df.empty:
@@ -858,7 +850,7 @@ def restaurar_tipos(
             df[col] = converter_numero_br(
                 df[col],
                 nome_coluna=col,
-                origem_gsheets=origem_gsheets,
+                origem_banco=origem_banco,
                 bloquear_invalidos=bloquear_invalidos,
                 codigos_ref=codigos_ref,
             )
@@ -869,24 +861,13 @@ def estruturar_dataframe_bruto(
     df: pd.DataFrame,
     nome_aba: str,
     exigir_colunas_obrigatorias: bool = False,
-    origem_gsheets: bool = False,
+    origem_banco: bool = False,
 ) -> pd.DataFrame:
     aba_esquema = nome_aba[5:] if nome_aba.startswith("_bkp_") else nome_aba
     colunas_esperadas = ESQUEMA_ABAS.get(aba_esquema, [])
     if df is None or df.empty:
-        return restaurar_tipos(pd.DataFrame(columns=colunas_esperadas), origem_gsheets=origem_gsheets)
+        return restaurar_tipos(pd.DataFrame(columns=colunas_esperadas), origem_banco=origem_banco)
     df_orig = df.loc[:, ~df.columns.duplicated()].copy()
-    if aba_esquema == "historico" and not exigir_colunas_obrigatorias:
-        cols_norm_hist = [normalizar_chave_coluna(c) for c in df_orig.columns]
-        if "codigo" not in cols_norm_hist:
-            if df_orig.shape[1] >= 7:
-                df_pos = df_orig.iloc[:, :7].copy()
-                df_pos.columns = ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"]
-                df_orig = df_pos
-            elif df_orig.shape[1] == 5:
-                df_pos = df_orig.iloc[:, :5].copy()
-                df_pos.columns = ["codigo", "saldo_geral", "lote", "saldo_lote", "data"]
-                df_orig = df_pos
     cols_norm = {col: normalizar_chave_coluna(col) for col in df_orig.columns}
     renomear = {}
     colunas_orig_usadas = set()
@@ -976,8 +957,8 @@ def estruturar_dataframe_bruto(
         ].copy()
     df = restaurar_tipos(
         df,
-        origem_gsheets=origem_gsheets,
-        bloquear_invalidos=exigir_colunas_obrigatorias and (not origem_gsheets),
+        origem_banco=origem_banco,
+        bloquear_invalidos=exigir_colunas_obrigatorias and (not origem_banco),
     )
     return df.reset_index(drop=True)
 
@@ -997,10 +978,10 @@ def compactar_estoque_para_historico(df_est: pd.DataFrame) -> pd.DataFrame:
 def padronizar_dataframe(
     df: pd.DataFrame,
     nome_aba: str,
-    origem_gsheets: bool = False,
+    origem_banco: bool = False,
 ) -> pd.DataFrame:
     aba_esquema = nome_aba[5:] if nome_aba.startswith("_bkp_") else nome_aba
-    df = estruturar_dataframe_bruto(df, aba_esquema, origem_gsheets=origem_gsheets)
+    df = estruturar_dataframe_bruto(df, aba_esquema, origem_banco=origem_banco)
     if df.empty:
         return df
     if aba_esquema == "estoque_atual":
@@ -1297,13 +1278,13 @@ class ConexaoSupabasePG:
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
-def _conectar_planilha_cached(db_url: str) -> ConexaoSupabasePG:
+def _conectar_supabase_cached(db_url: str) -> ConexaoSupabasePG:
     cliente_pg = ConexaoSupabasePG(db_url)
     cliente_pg.conectar()
     return cliente_pg
 
 
-def obter_planilha_gsheets():
+def obter_conexao_supabase():
     db_url = obter_url_supabase_secrets()
     if not db_url:
         return None, (
@@ -1311,7 +1292,7 @@ def obter_planilha_gsheets():
             'Adicione `database_url = "postgresql://..."` no topo dos Secrets do Streamlit!'
         )
     try:
-        cliente_pg = _conectar_planilha_cached(db_url)
+        cliente_pg = _conectar_supabase_cached(db_url)
         cliente_pg.conectar()
         return cliente_pg, None
     except Exception as e:
@@ -1337,7 +1318,7 @@ def _preparar_tuplas_para_insert(df: pd.DataFrame, colunas: list) -> list:
     return [tuple(x) for x in df_c.to_numpy()]
 
 
-def ler_aba_bruta_gsheets(planilha: ConexaoSupabasePG, nome_aba: str) -> pd.DataFrame:
+def ler_tabela_sql(planilha: ConexaoSupabasePG, nome_aba: str) -> pd.DataFrame:
     tabela = _validar_nome_tabela_sql(nome_aba)
     aba_esquema = tabela[5:] if tabela.startswith("_bkp_") else tabela
     colunas = ESQUEMA_ABAS.get(aba_esquema, ["chave", "valor"])
@@ -1350,12 +1331,12 @@ def ler_aba_bruta_gsheets(planilha: ConexaoSupabasePG, nome_aba: str) -> pd.Data
         sql = f"SELECT {cols_sql} FROM {tabela}"
         linhas = planilha.executar_leitura(sql)
     if not linhas:
-        return padronizar_dataframe(pd.DataFrame(columns=colunas), aba_esquema, origem_gsheets=True)
+        return padronizar_dataframe(pd.DataFrame(columns=colunas), aba_esquema, origem_banco=True)
     df = pd.DataFrame(linhas, columns=colunas)
-    return padronizar_dataframe(df, aba_esquema, origem_gsheets=True)
+    return padronizar_dataframe(df, aba_esquema, origem_banco=True)
 
 
-def gravar_aba_pequena_gsheets(
+def gravar_tabela_sql(
     planilha: ConexaoSupabasePG,
     nome_aba: str,
     df: pd.DataFrame,
@@ -1368,7 +1349,7 @@ def gravar_aba_pequena_gsheets(
         return
     tabela = _validar_nome_tabela_sql(nome_aba)
     aba_esquema = tabela[5:] if tabela.startswith("_bkp_") else tabela
-    df_padrao = padronizar_dataframe(df, aba_esquema, origem_gsheets=True) if aba_esquema in ESQUEMA_ABAS else df.copy()
+    df_padrao = padronizar_dataframe(df, aba_esquema, origem_banco=True) if aba_esquema in ESQUEMA_ABAS else df.copy()
     colunas = ESQUEMA_ABAS.get(aba_esquema, list(df_padrao.columns))
     pk_cols = CHAVES_PRIMARIAS_SQL.get(aba_esquema, [colunas[0]])
     df_padrao = df_padrao.drop_duplicates(subset=pk_cols, keep="last").reset_index(drop=True)
@@ -1395,7 +1376,7 @@ def gravar_aba_pequena_gsheets(
         raise
 
 
-def salvar_backup_automatico_aba_gsheets(
+def salvar_backup_automatico_sql(
     planilha: ConexaoSupabasePG,
     nome_aba_origem: str,
     df_atual_memoria: pd.DataFrame = None,
@@ -1407,7 +1388,7 @@ def salvar_backup_automatico_aba_gsheets(
     tabela_orig = _validar_nome_tabela_sql(nome_aba_origem)
     tabela_bkp = _validar_nome_tabela_sql(f"_bkp_{nome_aba_origem}")
     if df_atual_memoria is not None and not df_atual_memoria.empty:
-        gravar_aba_pequena_gsheets(planilha, tabela_bkp, df_atual_memoria, permitir_vazio=permitir_vazio)
+        gravar_tabela_sql(planilha, tabela_bkp, df_atual_memoria, permitir_vazio=permitir_vazio)
         return
     conn = planilha.conectar()
     try:
@@ -1424,7 +1405,7 @@ def salvar_backup_automatico_aba_gsheets(
         raise
 
 
-def remover_datas_aba_incremental_gsheets(
+def remover_datas_tabela_sql(
     planilha: ConexaoSupabasePG,
     nome_aba: str,
     datas_remover: set,
@@ -1443,7 +1424,7 @@ def remover_datas_aba_incremental_gsheets(
         return 0
 
     if tabela in ("entradas_diarias", "saidas_diarias"):
-        salvar_backup_automatico_aba_gsheets(planilha, tabela, df_atual_memoria, permitir_vazio=True)
+        salvar_backup_automatico_sql(planilha, tabela, df_atual_memoria, permitir_vazio=True)
 
     conn = planilha.conectar()
     try:
@@ -1462,7 +1443,7 @@ def remover_datas_aba_incremental_gsheets(
     return qtd_removidas
 
 
-def restaurar_backup_automatico_aba_gsheets(
+def restaurar_backup_automatico_sql(
     planilha: ConexaoSupabasePG,
     nome_aba_destino: str,
     df_atual_memoria: pd.DataFrame = None,
@@ -1470,7 +1451,7 @@ def restaurar_backup_automatico_aba_gsheets(
     tabela_dest = _validar_nome_tabela_sql(nome_aba_destino)
     tabela_bkp = _validar_nome_tabela_sql(f"_bkp_{nome_aba_destino}")
     aba_permite_vazio = tabela_dest in ("ocultos", "pedidos_transito", "entradas_diarias", "saidas_diarias")
-    df_bkp = ler_aba_bruta_gsheets(planilha, tabela_bkp)
+    df_bkp = ler_tabela_sql(planilha, tabela_bkp)
     if df_bkp.empty and not aba_permite_vazio:
         raise ValueError(f"Ainda não há registros salvos na cópia automática anterior (`{tabela_bkp}`) para restaurar.")
 
@@ -1478,7 +1459,7 @@ def restaurar_backup_automatico_aba_gsheets(
         datas_atuais = set()
         if df_atual_memoria is not None and not df_atual_memoria.empty and "data" in df_atual_memoria.columns:
             datas_atuais.update(str(d).strip() for d in df_atual_memoria["data"].unique() if str(d).strip())
-        df_est_nuvem = ler_aba_bruta_gsheets(planilha, "estoque_atual")
+        df_est_nuvem = ler_tabela_sql(planilha, "estoque_atual")
         if not df_est_nuvem.empty and "data" in df_est_nuvem.columns:
             datas_atuais.update(str(d).strip() for d in df_est_nuvem["data"].unique() if str(d).strip())
         datas_rest = (
@@ -1488,13 +1469,13 @@ def restaurar_backup_automatico_aba_gsheets(
         )
         datas_indevidas = datas_atuais - datas_rest
         if datas_indevidas:
-            remover_datas_aba_incremental_gsheets(planilha, "historico", datas_indevidas)
-        gravar_aba_pequena_gsheets(planilha, "estoque_atual", df_bkp)
+            remover_datas_tabela_sql(planilha, "historico", datas_indevidas)
+        gravar_tabela_sql(planilha, "estoque_atual", df_bkp)
         for dt_r in sorted(datas_rest):
             df_dia_rest = df_bkp[df_bkp["data"] == dt_r].copy()
-            gravar_historico_incremental_gsheets(planilha, df_dia_rest, dt_r)
+            gravar_historico_incremental_sql(planilha, df_dia_rest, dt_r)
     else:
-        gravar_aba_pequena_gsheets(planilha, tabela_dest, df_bkp, permitir_vazio=aba_permite_vazio)
+        gravar_tabela_sql(planilha, tabela_dest, df_bkp, permitir_vazio=aba_permite_vazio)
 
     if tabela_dest in ("entradas_diarias", "saidas_diarias"):
         reg_hashes = st.session_state.setdefault("hashes_soma_por_data", {})
@@ -1507,7 +1488,7 @@ def restaurar_backup_automatico_aba_gsheets(
 def _calcular_hash_dataframe_dia(df_dia: pd.DataFrame, nome_aba: str) -> str:
     if df_dia is None or df_dia.empty:
         return ""
-    df_p = padronizar_dataframe(df_dia, nome_aba, origem_gsheets=True).sort_values("codigo").reset_index(drop=True)
+    df_p = padronizar_dataframe(df_dia, nome_aba, origem_banco=True).sort_values("codigo").reset_index(drop=True)
     if df_p.empty:
         return ""
     txt_serial = df_p.to_csv(index=False)
@@ -1577,12 +1558,10 @@ def _verificar_sobreposicao_soma_mesmo_dia(
     return False, cods_inter
 
 
-def gravar_historico_incremental_gsheets(
-    planilha: ConexaoSupabasePG,
+def gravar_historico_incremental_sql(
+    db: ConexaoSupabasePG,
     df_novo_dia: pd.DataFrame,
     data_ref: str,
-    df_atual_memoria: pd.DataFrame = None,
-    criar_backup: bool = False,
 ):
     """Grava o histórico diário compacto no PostgreSQL em uma única transação atômica (< 0,1s)."""
     from psycopg2.extras import execute_values
@@ -1595,7 +1574,7 @@ def gravar_historico_incremental_gsheets(
     df_novo_padrao = df_novo_padrao.drop_duplicates(subset=["codigo", "data"], keep="last").reset_index(drop=True)
     tuplas = _preparar_tuplas_para_insert(df_novo_padrao, ["codigo", "saldo_geral", "data"])
 
-    conn = planilha.conectar()
+    conn = db.conectar()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1616,7 +1595,7 @@ def gravar_historico_incremental_gsheets(
         raise
 
 
-def gravar_aba_incremental_por_data_gsheets(
+def gravar_tabela_incremental_por_data_sql(
     planilha: ConexaoSupabasePG,
     nome_aba: str,
     df_novo_dia: pd.DataFrame,
@@ -1632,7 +1611,7 @@ def gravar_aba_incremental_por_data_gsheets(
     if df_novo_dia is None or df_novo_dia.empty:
         return False
     if nome_aba == "historico":
-        gravar_historico_incremental_gsheets(planilha, df_novo_dia, data_ref)
+        gravar_historico_incremental_sql(planilha, df_novo_dia, data_ref)
         return False
 
     tabela = _validar_nome_tabela_sql(nome_aba)
@@ -1642,15 +1621,15 @@ def gravar_aba_incremental_por_data_gsheets(
     df_base_existente = (
         df_atual_memoria.copy()
         if (df_atual_memoria is not None and not df_atual_memoria.empty)
-        else ler_aba_bruta_gsheets(planilha, tabela)
+        else ler_tabela_sql(planilha, tabela)
     )
     if not df_base_existente.empty:
         df_base_existente = podar_historico_180_dias(
-            padronizar_dataframe(df_base_existente, tabela, origem_gsheets=True), tabela
+            padronizar_dataframe(df_base_existente, tabela, origem_banco=True), tabela
         )
 
     if criar_backup and not df_base_existente.empty:
-        salvar_backup_automatico_aba_gsheets(planilha, tabela, df_base_existente)
+        salvar_backup_automatico_sql(planilha, tabela, df_base_existente)
 
     registro_hashes_sessao = st.session_state.setdefault("hashes_soma_por_data", {})
     if hashes_soma_atuais:
@@ -1722,7 +1701,7 @@ def gravar_aba_incremental_por_data_gsheets(
     if ja_somado_ignorado:
         return True
 
-    df_novo_padrao = padronizar_dataframe(df_novo_dia, tabela, origem_gsheets=True)
+    df_novo_padrao = padronizar_dataframe(df_novo_dia, tabela, origem_banco=True)
     if df_novo_padrao.empty:
         return False
     df_novo_padrao["data"] = data_ref_str
@@ -1809,7 +1788,7 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
                 aba_esq = nome_tab[5:] if nome_tab.startswith("_bkp_") else nome_tab
                 if aba_esq not in ESQUEMA_ABAS:
                     continue
-                df_pad = padronizar_dataframe(df_bruto, aba_esq, origem_gsheets=True)
+                df_pad = padronizar_dataframe(df_bruto, aba_esq, origem_banco=True)
                 if aba_esq in ("historico", "entradas_diarias", "saidas_diarias"):
                     df_pad = podar_historico_180_dias(df_pad, aba_esq)
                 colunas = ESQUEMA_ABAS[aba_esq]
@@ -1842,24 +1821,24 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def carregar_estado_completo() -> dict:
-    planilha, erro = obter_planilha_gsheets()
+    planilha, erro = obter_conexao_supabase()
     if planilha is None:
         raise RuntimeError(f"Não foi possível conectar ao Supabase (PostgreSQL): {erro}")
-    df_est = ler_aba_bruta_gsheets(planilha, "estoque_atual")
-    df_hist = podar_historico_180_dias(ler_aba_bruta_gsheets(planilha, "historico"), "historico")
-    df_ent = podar_historico_180_dias(ler_aba_bruta_gsheets(planilha, "entradas_diarias"), "entradas_diarias")
-    df_sai = podar_historico_180_dias(ler_aba_bruta_gsheets(planilha, "saidas_diarias"), "saidas_diarias")
-    df_cus = ler_aba_bruta_gsheets(planilha, "custos")
-    df_base = ler_aba_bruta_gsheets(planilha, "base_inicial")
-    df_ocul = ler_aba_bruta_gsheets(planilha, "ocultos")
-    df_trans_bruto = ler_aba_bruta_gsheets(planilha, "pedidos_transito")
+    df_est = ler_tabela_sql(planilha, "estoque_atual")
+    df_hist = podar_historico_180_dias(ler_tabela_sql(planilha, "historico"), "historico")
+    df_ent = podar_historico_180_dias(ler_tabela_sql(planilha, "entradas_diarias"), "entradas_diarias")
+    df_sai = podar_historico_180_dias(ler_tabela_sql(planilha, "saidas_diarias"), "saidas_diarias")
+    df_cus = ler_tabela_sql(planilha, "custos")
+    df_base = ler_tabela_sql(planilha, "base_inicial")
+    df_ocul = ler_tabela_sql(planilha, "ocultos")
+    df_trans_bruto = ler_tabela_sql(planilha, "pedidos_transito")
     df_trans, cods_desp_nf, cods_exp_15d = depurar_pedidos_transito_auto_despertar(df_trans_bruto, df_ent)
     if len(df_trans) != len(df_trans_bruto):
         try:
-            gravar_aba_pequena_gsheets(planilha, "pedidos_transito", df_trans, permitir_vazio=True)
+            gravar_tabela_sql(planilha, "pedidos_transito", df_trans, permitir_vazio=True)
         except Exception:
             pass
-    df_meta = ler_aba_bruta_gsheets(planilha, "meta")
+    df_meta = ler_tabela_sql(planilha, "meta")
     dias_base = 87
     ult_att = "Sincronizado via Supabase SQL"
     grupos_pref_custom = {}
@@ -3538,8 +3517,8 @@ def calcular_motor_giro_sazonal(
 # ==============================================================================
 # 6. CABEÇALHO PRINCIPAL E VERIFICAÇÃO DE CONEXÃO COM A NUVEM
 # ==============================================================================
-planilha_gsheets, erro_gsheets = obter_planilha_gsheets()
-conectado_nuvem = planilha_gsheets is not None
+db_supabase, erro_db = obter_conexao_supabase()
+conectado_nuvem = db_supabase is not None
 col_titulo, col_status = st.columns([3.4, 1.2])
 with col_titulo:
     st.markdown(
@@ -3575,12 +3554,12 @@ with col_status:
     )
 if not conectado_nuvem:
     st.error(
-        f"❌ **Não foi possível conectar ao Supabase (PostgreSQL):** {erro_gsheets}\n\n"
+        f"❌ **Não foi possível conectar ao Supabase (PostgreSQL):** {erro_db}\n\n"
         "Verifique se a linha `database_url = \"postgresql://...\"` está colada no topo dos `Secrets` do Streamlit Cloud "
         "e se o projeto no Supabase está ativo (não pausado)."
     )
     if st.button("🔄 Tentar Reconectar ao Supabase Agora", type="primary"):
-        _conectar_planilha_cached.clear()
+        _conectar_supabase_cached.clear()
         carregar_estado_completo.clear()
         st.rerun()
     st.stop()
@@ -3590,7 +3569,7 @@ try:
 except Exception as erro_leitura:
     st.error(f"❌ Erro ao ler tabelas do Supabase: {erro_leitura}")
     if st.button("🔄 Tentar Novamente", type="primary"):
-        _conectar_planilha_cached.clear()
+        _conectar_supabase_cached.clear()
         carregar_estado_completo.clear()
         st.rerun()
     st.stop()
@@ -4946,7 +4925,7 @@ with aba1:
         if btn_executar_migracao and arq_migracao_banco is not None:
             with st.spinner("Migrando todas as abas para o Supabase PostgreSQL..."):
                 try:
-                    resumo_mig = migrar_arquivo_banco_para_supabase(planilha_gsheets, arq_migracao_banco)
+                    resumo_mig = migrar_arquivo_banco_para_supabase(db_supabase, arq_migracao_banco)
                     st.session_state.pop("bkp_db_xlsx_bytes", None)
                     st.session_state.pop("backup_zip_bytes", None)
                     carregar_estado_completo.clear()
@@ -5194,8 +5173,8 @@ with aba1:
             aba_alvo_rest, df_mem_alvo = mapa_opcoes_restaurar[rotulo_aba_rest]
             with st.spinner(f"Restaurando `_bkp_{aba_alvo_rest}` para `{aba_alvo_rest}`..."):
                 try:
-                    qtd_rest = restaurar_backup_automatico_aba_gsheets(
-                        planilha_gsheets,
+                    qtd_rest = restaurar_backup_automatico_sql(
+                        db_supabase,
                         aba_alvo_rest,
                         df_atual_memoria=df_mem_alvo,
                     )
@@ -5246,8 +5225,8 @@ with aba1:
         if btn_excluir_dt and datas_disp_del:
             with st.spinner(f"Removendo registros de {data_del_escolhida} em `{aba_del_escolhida}`..."):
                 try:
-                    qtd_apagadas = remover_datas_aba_incremental_gsheets(
-                        planilha_gsheets,
+                    qtd_apagadas = remover_datas_tabela_sql(
+                        db_supabase,
                         aba_del_escolhida,
                         {data_del_escolhida},
                         df_atual_memoria=df_del_ref,
@@ -5270,7 +5249,7 @@ with aba1:
             st.warning("⚠️ Selecione pelo menos uma planilha para importar ou altere o período da base.")
         else:
             abas_ja_gravadas = []
-            with st.spinner("Validando colunas, códigos e saldos antes de sincronizar com o Google Sheets..."):
+            with st.spinner("Validando colunas, códigos e saldos antes de sincronizar com o Supabase..."):
                 try:
                     if arq_estoque is not None and not ignorar_trava_data:
                         if arq_entradas is not None and data_entrada >= data_posicao:
@@ -5558,18 +5537,18 @@ with aba1:
                     agora_str = agora_br().strftime("%d/%m/%Y %H:%M:%S")
                     if novo_estoque is not None:
                         if atualizar_aba_estoque_atual:
-                            salvar_backup_automatico_aba_gsheets(planilha_gsheets, "estoque_atual", df_estoque_bruto)
-                            gravar_aba_pequena_gsheets(planilha_gsheets, "estoque_atual", novo_estoque)
+                            salvar_backup_automatico_sql(db_supabase, "estoque_atual", df_estoque_bruto)
+                            gravar_tabela_sql(db_supabase, "estoque_atual", novo_estoque)
                             abas_ja_gravadas.append("estoque_atual")
-                        gravar_historico_incremental_gsheets(
-                            planilha_gsheets,
+                        gravar_historico_incremental_sql(
+                            db_supabase,
                             novo_estoque,
                             data_str,
                         )
                         abas_ja_gravadas.append("historico")
                     if novas_entradas is not None:
-                        gravar_aba_incremental_por_data_gsheets(
-                            planilha_gsheets,
+                        gravar_tabela_incremental_por_data_sql(
+                            db_supabase,
                             "entradas_diarias",
                             novas_entradas,
                             data_entrada.strftime("%Y-%m-%d"),
@@ -5587,11 +5566,11 @@ with aba1:
                                 df_pedidos_transito, df_ent_comb_temp
                             )
                             if cods_desp_sync:
-                                salvar_backup_automatico_aba_gsheets(
-                                    planilha_gsheets, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                                salvar_backup_automatico_sql(
+                                    db_supabase, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
                                 )
-                                gravar_aba_pequena_gsheets(
-                                    planilha_gsheets, "pedidos_transito", df_trans_pos_nf, permitir_vazio=True
+                                gravar_tabela_sql(
+                                    db_supabase, "pedidos_transito", df_trans_pos_nf, permitir_vazio=True
                                 )
                                 abas_ja_gravadas.append("pedidos_transito")
                                 mensagens_auditoria_upload.append(
@@ -5600,8 +5579,8 @@ with aba1:
                                 )
                     if novas_saidas is not None:
                         hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
-                        sai_ja_somada = gravar_aba_incremental_por_data_gsheets(
-                            planilha_gsheets,
+                        sai_ja_somada = gravar_tabela_incremental_por_data_sql(
+                            db_supabase,
                             "saidas_diarias",
                             novas_saidas,
                             data_saida.strftime("%Y-%m-%d"),
@@ -5632,16 +5611,16 @@ with aba1:
                             mensagens_auditoria_upload.append(
                                 "🛡️ **Prioridade C1 Mantida:** Como a Planilha Geral de Custos C1 foi enviada junto com a Entrada, o Custo C1 prevaleceu sobre o custo da NF."
                             )
-                        salvar_backup_automatico_aba_gsheets(planilha_gsheets, "custos", df_custos)
-                        gravar_aba_pequena_gsheets(planilha_gsheets, "custos", novos_custos)
+                        salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
+                        gravar_tabela_sql(db_supabase, "custos", novos_custos)
                         abas_ja_gravadas.append("custos")
                     elif not df_custos_via_entrada.empty:
-                        salvar_backup_automatico_aba_gsheets(planilha_gsheets, "custos", df_custos)
-                        gravar_aba_pequena_gsheets(planilha_gsheets, "custos", df_custos_via_entrada)
+                        salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
+                        gravar_tabela_sql(db_supabase, "custos", df_custos_via_entrada)
                         abas_ja_gravadas.append("custos")
                     if nova_base is not None:
-                        salvar_backup_automatico_aba_gsheets(planilha_gsheets, "base_inicial", df_base_vendas)
-                        gravar_aba_pequena_gsheets(planilha_gsheets, "base_inicial", nova_base)
+                        salvar_backup_automatico_sql(db_supabase, "base_inicial", df_base_vendas)
+                        gravar_tabela_sql(db_supabase, "base_inicial", nova_base)
                         abas_ja_gravadas.append("base_inicial")
                     df_meta_novo = montar_dataframe_meta_completo(
                         dias_base_val=int(dias_base_input),
@@ -5649,7 +5628,7 @@ with aba1:
                         grupos_pref_custom=grupos_pref_custom,
                         grupos_sku_custom=grupos_sku_custom,
                     )
-                    gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_novo)
+                    gravar_tabela_sql(db_supabase, "meta", df_meta_novo)
                     abas_ja_gravadas.append("meta")
                     st.session_state.pop("bkp_db_xlsx_bytes", None)
                     st.session_state.pop("backup_zip_bytes", None)
@@ -5759,7 +5738,7 @@ with aba1:
         cg_b1, cg_b2 = st.columns([1.6, 1.0])
         with cg_b1:
             if st.button("💾 Salvar Nomes dos Grupos por Prefixo na Nuvem", type="primary", use_container_width=True, key="btn_salvar_grp_pref"):
-                with st.spinner("Salvando configuração de grupos no Google Sheets..."):
+                with st.spinner("Salvando configuração de grupos no Supabase..."):
                     try:
                         novo_pref_dict = {}
                         for _, r_gp in ed_pref_out.iterrows():
@@ -5773,7 +5752,7 @@ with aba1:
                             grupos_pref_custom=novo_pref_dict,
                             grupos_sku_custom=grupos_sku_custom,
                         )
-                        gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_grp)
+                        gravar_tabela_sql(db_supabase, "meta", df_meta_grp)
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
                         carregar_estado_completo.clear()
@@ -5791,7 +5770,7 @@ with aba1:
                             grupos_pref_custom={},
                             grupos_sku_custom=grupos_sku_custom,
                         )
-                        gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_grp)
+                        gravar_tabela_sql(db_supabase, "meta", df_meta_grp)
                         carregar_estado_completo.clear()
                         st.session_state["msg_sucesso_sync"] = "✅ Nomes padrão dos prefixos restaurados!"
                         st.rerun()
@@ -5849,7 +5828,7 @@ with aba1:
                     disabled=(not indices_skus_sel or not grupo_destino_final),
                     key="btn_fixar_sku_grupo",
                 ):
-                    with st.spinner("Salvando exceção de grupo no Google Sheets..."):
+                    with st.spinner("Salvando exceção de grupo no Supabase..."):
                         try:
                             novo_sku_custom = dict(grupos_sku_custom)
                             for idx_sel in indices_skus_sel:
@@ -5862,7 +5841,7 @@ with aba1:
                                 grupos_pref_custom=grupos_pref_custom,
                                 grupos_sku_custom=novo_sku_custom,
                             )
-                            gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_sku)
+                            gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
                             carregar_estado_completo.clear()
                             st.session_state["msg_sucesso_sync"] = (
                                 f"✅ {formatar_num_br(len(indices_skus_sel))} produto(s) movido(s) para o grupo '{grupo_destino_final}'!"
@@ -5907,7 +5886,7 @@ with aba1:
                         f"↩️ Devolver {formatar_num_br(len(sel_rem_sku_g))} Produto(s) Marcado(s) ao Grupo Original",
                         key="btn_rem_excecao_sku_grp",
                     ):
-                        with st.spinner("Atualizando grupos no Google Sheets..."):
+                        with st.spinner("Atualizando grupos no Supabase..."):
                             try:
                                 novo_sku_custom = {
                                     k: v
@@ -5920,7 +5899,7 @@ with aba1:
                                     grupos_pref_custom=grupos_pref_custom,
                                     grupos_sku_custom=novo_sku_custom,
                                 )
-                                gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_sku)
+                                gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
                                 carregar_estado_completo.clear()
                                 st.session_state["msg_sucesso_sync"] = "✅ Produto(s) devolvido(s) ao grupo original!"
                                 st.rerun()
@@ -5971,7 +5950,7 @@ with aba1:
                                 grupos_sku_custom=grupos_sku_custom,
                                 mp_custom_map=novo_mp_map,
                             )
-                            gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_mp)
+                            gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
                             carregar_estado_completo.clear()
                             calcular_motor_giro_sazonal.clear()
                             st.session_state["msg_sucesso_sync"] = f"✅ {formatar_num_br(len(idx_mp_sel))} produto(s) marcado(s) como Matéria-Prima de Fábrica!"
@@ -6000,7 +5979,7 @@ with aba1:
                                 grupos_sku_custom=grupos_sku_custom,
                                 mp_custom_map=novo_mp_map,
                             )
-                            gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_mp)
+                            gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
                             carregar_estado_completo.clear()
                             calcular_motor_giro_sazonal.clear()
                             st.session_state["msg_sucesso_sync"] = f"✅ {formatar_num_br(len(idx_mp_sel))} produto(s) marcado(s) como Loja Varejo!"
@@ -6521,7 +6500,7 @@ with aba2:
                 use_container_width=True,
                 disabled=(qtd_marcados_compra == 0),
             ):
-                with st.spinner("Registrando pedido em trânsito no Google Sheets..."):
+                with st.spinner("Registrando pedido em trânsito no Supabase..."):
                     try:
                         hoje_str_c = hoje_br().strftime("%Y-%m-%d")
                         sil_ate_str_c = (hoje_br() + timedelta(days=DIAS_PADRAO_SONECA_COMPRA)).strftime("%Y-%m-%d")
@@ -6540,11 +6519,11 @@ with aba2:
                             .drop_duplicates(subset=["codigo"], keep="last")
                             .reset_index(drop=True)
                         )
-                        salvar_backup_automatico_aba_gsheets(
-                            planilha_gsheets, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                        salvar_backup_automatico_sql(
+                            db_supabase, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
                         )
-                        gravar_aba_pequena_gsheets(
-                            planilha_gsheets, "pedidos_transito", df_trans_atualizado, permitir_vazio=True
+                        gravar_tabela_sql(
+                            db_supabase, "pedidos_transito", df_trans_atualizado, permitir_vazio=True
                         )
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
@@ -6637,18 +6616,18 @@ with aba2:
                     use_container_width=True,
                 )
             if btn_dev_marcados or btn_dev_todos:
-                with st.spinner("Atualizando lista de trânsito no Google Sheets..."):
+                with st.spinner("Atualizando lista de trânsito no Supabase..."):
                     try:
                         if btn_dev_todos:
                             df_tr_restante = padronizar_dataframe(pd.DataFrame(), "pedidos_transito")
                         else:
                             cods_dev = set(sel_devolver_tr["Código"].unique())
                             df_tr_restante = df_pedidos_transito[~df_pedidos_transito["codigo"].isin(cods_dev)].copy()
-                        salvar_backup_automatico_aba_gsheets(
-                            planilha_gsheets, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                        salvar_backup_automatico_sql(
+                            db_supabase, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
                         )
-                        gravar_aba_pequena_gsheets(
-                            planilha_gsheets, "pedidos_transito", df_tr_restante, permitir_vazio=True
+                        gravar_tabela_sql(
+                            db_supabase, "pedidos_transito", df_tr_restante, permitir_vazio=True
                         )
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
@@ -7350,7 +7329,7 @@ with aba6:
     st.markdown("### 👁️‍🗨️ Ocultar ou Restaurar Produtos dos Relatórios")
     st.caption(
         "Marque as caixas de seleção para ocultar vários produtos de uma só vez (ex: brindes, uso interno ou itens fora de linha). "
-        "A lista fica salva diretamente no Google Sheets e pode ser restaurada a qualquer momento."
+        "A lista fica salva diretamente no Supabase (PostgreSQL) e pode ser restaurada a qualquer momento."
     )
     frames_catalogo = []
     if not df_estoque_bruto.empty:
@@ -7419,7 +7398,7 @@ with aba6:
                 use_container_width=True,
                 disabled=selecionados_para_ocultar.empty,
             ):
-                with st.spinner("Salvando produtos ocultos no Google Sheets..."):
+                with st.spinner("Salvando produtos ocultos no Supabase..."):
                     try:
                         novos_ocultos = selecionados_para_ocultar[["codigo", "descricao"]].copy()
                         novos_ocultos["data_ocultado"] = hoje_br().strftime("%Y-%m-%d")
@@ -7428,11 +7407,11 @@ with aba6:
                             .drop_duplicates(subset=["codigo"], keep="last")
                             .reset_index(drop=True)
                         )
-                        salvar_backup_automatico_aba_gsheets(
-                            planilha_gsheets, "ocultos", df_ocultos, permitir_vazio=True
+                        salvar_backup_automatico_sql(
+                            db_supabase, "ocultos", df_ocultos, permitir_vazio=True
                         )
-                        gravar_aba_pequena_gsheets(
-                            planilha_gsheets, "ocultos", df_ocultos_atualizado, permitir_vazio=True
+                        gravar_tabela_sql(
+                            db_supabase, "ocultos", df_ocultos_atualizado, permitir_vazio=True
                         )
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
@@ -7496,18 +7475,18 @@ with aba6:
                     use_container_width=True,
                 )
             if btn_restaurar_sel or btn_restaurar_todos:
-                with st.spinner("Restaurando produtos no Google Sheets..."):
+                with st.spinner("Restaurando produtos no Supabase..."):
                     try:
                         if btn_restaurar_todos:
                             df_ocultos_restante = padronizar_dataframe(pd.DataFrame(), "ocultos")
                         else:
                             cods_remover = set(selecionados_para_restaurar["codigo"].unique())
                             df_ocultos_restante = df_ocultos[~df_ocultos["codigo"].isin(cods_remover)].copy()
-                        salvar_backup_automatico_aba_gsheets(
-                            planilha_gsheets, "ocultos", df_ocultos, permitir_vazio=True
+                        salvar_backup_automatico_sql(
+                            db_supabase, "ocultos", df_ocultos, permitir_vazio=True
                         )
-                        gravar_aba_pequena_gsheets(
-                            planilha_gsheets, "ocultos", df_ocultos_restante, permitir_vazio=True
+                        gravar_tabela_sql(
+                            db_supabase, "ocultos", df_ocultos_restante, permitir_vazio=True
                         )
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
