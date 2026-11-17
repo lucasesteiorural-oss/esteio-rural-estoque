@@ -1104,228 +1104,377 @@ def podar_historico_180_dias(df_hist: pd.DataFrame, nome_aba: str = "historico")
 
 
 # ==============================================================================
-# 3. CONEXÃO 100% NUVEM COM GOOGLE SHEETS (RESIZE ANTES DO UPDATE)
+# 3. CONEXÃO 100% NUVEM COM SUPABASE (POSTGRESQL) E MIGRAÇÃO AUTOMÁTICA
 # ==============================================================================
+TABELAS_SQL_VALIDAS = {
+    "estoque_atual",
+    "historico",
+    "entradas_diarias",
+    "saidas_diarias",
+    "custos",
+    "base_inicial",
+    "ocultos",
+    "pedidos_transito",
+    "meta",
+    "_bkp_estoque_atual",
+    "_bkp_entradas_diarias",
+    "_bkp_saidas_diarias",
+    "_bkp_custos",
+    "_bkp_base_inicial",
+    "_bkp_ocultos",
+    "_bkp_pedidos_transito",
+}
+
+CHAVES_PRIMARIAS_SQL = {
+    "estoque_atual": ["codigo", "lote", "data"],
+    "historico": ["codigo", "data"],
+    "entradas_diarias": ["codigo", "data"],
+    "saidas_diarias": ["codigo", "data"],
+    "custos": ["codigo"],
+    "base_inicial": ["codigo"],
+    "ocultos": ["codigo"],
+    "pedidos_transito": ["codigo"],
+    "meta": ["chave"],
+}
+
+DDL_INICIALIZACAO_SUPABASE = """
+CREATE TABLE IF NOT EXISTS estoque_atual (
+    codigo TEXT NOT NULL,
+    saldo_geral DOUBLE PRECISION DEFAULT 0,
+    descricao TEXT DEFAULT '',
+    lote TEXT NOT NULL DEFAULT '',
+    saldo_lote DOUBLE PRECISION DEFAULT 0,
+    validade TEXT DEFAULT '',
+    data TEXT NOT NULL,
+    PRIMARY KEY (codigo, lote, data)
+);
+CREATE TABLE IF NOT EXISTS historico (
+    codigo TEXT NOT NULL,
+    saldo_geral DOUBLE PRECISION DEFAULT 0,
+    data TEXT NOT NULL,
+    PRIMARY KEY (codigo, data)
+);
+CREATE INDEX IF NOT EXISTS idx_historico_data ON historico (data);
+CREATE TABLE IF NOT EXISTS entradas_diarias (
+    codigo TEXT NOT NULL,
+    descricao TEXT DEFAULT '',
+    qtd_entrada DOUBLE PRECISION DEFAULT 0,
+    valor_entrada DOUBLE PRECISION DEFAULT 0,
+    data TEXT NOT NULL,
+    PRIMARY KEY (codigo, data)
+);
+CREATE INDEX IF NOT EXISTS idx_entradas_data ON entradas_diarias (data);
+CREATE TABLE IF NOT EXISTS saidas_diarias (
+    codigo TEXT NOT NULL,
+    descricao TEXT DEFAULT '',
+    qtd_saida DOUBLE PRECISION DEFAULT 0,
+    valor_venda DOUBLE PRECISION DEFAULT 0,
+    data TEXT NOT NULL,
+    PRIMARY KEY (codigo, data)
+);
+CREATE INDEX IF NOT EXISTS idx_saidas_data ON saidas_diarias (data);
+CREATE TABLE IF NOT EXISTS custos (
+    codigo TEXT PRIMARY KEY,
+    descricao TEXT DEFAULT '',
+    custo_unitario DOUBLE PRECISION DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS base_inicial (
+    codigo TEXT PRIMARY KEY,
+    descricao TEXT DEFAULT '',
+    qtd_vendida DOUBLE PRECISION DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ocultos (
+    codigo TEXT PRIMARY KEY,
+    descricao TEXT DEFAULT '',
+    data_ocultado TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS pedidos_transito (
+    codigo TEXT PRIMARY KEY,
+    descricao TEXT DEFAULT '',
+    qtd_comprada DOUBLE PRECISION DEFAULT 0,
+    data_compra TEXT DEFAULT '',
+    silenciar_ate TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS meta (
+    chave TEXT PRIMARY KEY,
+    valor TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS _bkp_estoque_atual (LIKE estoque_atual INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS _bkp_entradas_diarias (LIKE entradas_diarias INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS _bkp_saidas_diarias (LIKE saidas_diarias INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS _bkp_custos (LIKE custos INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS _bkp_base_inicial (LIKE base_inicial INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS _bkp_ocultos (LIKE ocultos INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS _bkp_pedidos_transito (LIKE pedidos_transito INCLUDING ALL);
+"""
+
+
+def _sanitizar_database_url(url_bruta: str) -> str:
+    if not url_bruta:
+        return ""
+    s = str(url_bruta).strip().strip('"').strip("'")
+    s = re.sub(r":\[([^\[\]@]+)\]@", r":\1@", s)
+    if s.startswith("postgres://"):
+        s = "postgresql://" + s[len("postgres://"):]
+    return s
+
+
+def obter_url_supabase_secrets() -> str:
+    for ch in ("database_url", "DATABASE_URL", "supabase_db_url", "SUPABASE_DB_URL", "postgres_url"):
+        val = obter_secret(ch, "")
+        if val and str(val).strip():
+            return _sanitizar_database_url(str(val))
+    try:
+        conns = obter_secret("connections", {})
+        if isinstance(conns, dict):
+            for sub in ("postgresql", "supabase", "postgres"):
+                if sub in conns and isinstance(conns[sub], dict) and conns[sub].get("url"):
+                    return _sanitizar_database_url(str(conns[sub]["url"]))
+    except Exception:
+        pass
+    return ""
+
+
+class ConexaoSupabasePG:
+    """Gerencia a conexão PostgreSQL (Supabase Transaction Pooler) com reconexão automática transparente."""
+
+    def __init__(self, db_url: str):
+        self.db_url = _sanitizar_database_url(db_url)
+        self._conn = None
+        self._esquema_verificado = False
+
+    def conectar(self):
+        import psycopg2
+        if self._conn is not None and getattr(self._conn, "closed", 1) == 0:
+            try:
+                with self._conn.cursor() as cur_ping:
+                    cur_ping.execute("SELECT 1")
+                return self._conn
+            except Exception:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+
+        kwargs_conn = {"dsn": self.db_url, "connect_timeout": 15}
+        if "sslmode=" not in self.db_url.lower() and (
+            "supabase.com" in self.db_url.lower() or "supabase.co" in self.db_url.lower()
+        ):
+            kwargs_conn["sslmode"] = "require"
+        self._conn = psycopg2.connect(**kwargs_conn)
+        self._conn.autocommit = False
+        if not self._esquema_verificado:
+            with self._conn.cursor() as cur_init:
+                cur_init.execute(DDL_INICIALIZACAO_SUPABASE)
+            self._conn.commit()
+            self._esquema_verificado = True
+        return self._conn
+
+    def executar_leitura(self, sql: str, params=None) -> list:
+        for tentativa in range(2):
+            conn = self.conectar()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params or ())
+                    linhas = cur.fetchall()
+                conn.commit()
+                return linhas
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                if tentativa == 0:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    self._conn = None
+                else:
+                    raise
+        return []
+
+
 @st.cache_resource(ttl=3600, show_spinner=False)
-def _conectar_planilha_cached(nome_planilha: str):
-    import gspread
-    from google.oauth2.service_account import Credentials
-    escopos = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    credenciais = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"], scopes=escopos
-    )
-    cliente = gspread.authorize(credenciais)
-    return cliente.open(nome_planilha)
+def _conectar_planilha_cached(db_url: str) -> ConexaoSupabasePG:
+    cliente_pg = ConexaoSupabasePG(db_url)
+    cliente_pg.conectar()
+    return cliente_pg
 
 
 def obter_planilha_gsheets():
-    if not tem_secret("gcp_service_account"):
-        return None, "Bloco [gcp_service_account] ausente nas configurações de Secrets da nuvem."
+    db_url = obter_url_supabase_secrets()
+    if not db_url:
+        return None, (
+            'A chave `database_url` ainda não foi adicionada nos `Secrets` do Streamlit Cloud. '
+            'Adicione `database_url = "postgresql://..."` no topo dos Secrets do Streamlit!'
+        )
     try:
-        nome_planilha = str(obter_secret("sheet_name", "Banco_Dados_Esteio_Rural")).strip()
-        planilha = _conectar_planilha_cached(nome_planilha)
-        return planilha, None
+        cliente_pg = _conectar_planilha_cached(db_url)
+        cliente_pg.conectar()
+        return cliente_pg, None
     except Exception as e:
         return None, str(e)
 
 
-def obter_ou_criar_aba(planilha, nome_aba: str, linhas: int = 100, cols: int = 10):
-    import gspread
-    try:
-        return planilha.worksheet(nome_aba)
-    except gspread.exceptions.WorksheetNotFound:
-        return planilha.add_worksheet(
-            title=nome_aba, rows=max(linhas, 100), cols=max(cols, 10)
-        )
+def _validar_nome_tabela_sql(nome_aba: str) -> str:
+    nome_limpo = str(nome_aba).strip()
+    if nome_limpo not in TABELAS_SQL_VALIDAS:
+        raise ValueError(f"Tabela SQL não reconhecida: {nome_limpo}")
+    return nome_limpo
 
 
-def ler_aba_bruta_gsheets(planilha, nome_aba: str) -> pd.DataFrame:
-    ws = obter_ou_criar_aba(planilha, nome_aba)
-    valores = ws.get_all_values()
-    if not valores or len(valores) < 2:
-        return padronizar_dataframe(pd.DataFrame(), nome_aba, origem_gsheets=True)
-    cabecalho = [
-        str(c).strip() if str(c).strip() else f"col_{i}"
-        for i, c in enumerate(valores[0])
-    ]
-    df = pd.DataFrame(valores[1:], columns=cabecalho)
-    return padronizar_dataframe(df, nome_aba, origem_gsheets=True)
+def _preparar_tuplas_para_insert(df: pd.DataFrame, colunas: list) -> list:
+    if df is None or df.empty:
+        return []
+    df_c = df[colunas].copy()
+    for col in colunas:
+        if col in COLUNAS_NUMERICAS:
+            df_c[col] = pd.to_numeric(df_c[col], errors="coerce").fillna(0.0).astype(float)
+        else:
+            df_c[col] = df_c[col].fillna("").astype(str)
+    return [tuple(x) for x in df_c.to_numpy()]
 
 
-def gravar_aba_pequena_gsheets(planilha, nome_aba: str, df: pd.DataFrame, permitir_vazio: bool = False):
+def ler_aba_bruta_gsheets(planilha: ConexaoSupabasePG, nome_aba: str) -> pd.DataFrame:
+    tabela = _validar_nome_tabela_sql(nome_aba)
+    aba_esquema = tabela[5:] if tabela.startswith("_bkp_") else tabela
+    colunas = ESQUEMA_ABAS.get(aba_esquema, ["chave", "valor"])
+    cols_sql = ", ".join(colunas)
+    if aba_esquema in ("historico", "entradas_diarias", "saidas_diarias"):
+        limite_str = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
+        sql = f"SELECT {cols_sql} FROM {tabela} WHERE data >= %s ORDER BY data ASC, codigo ASC"
+        linhas = planilha.executar_leitura(sql, (limite_str,))
+    else:
+        sql = f"SELECT {cols_sql} FROM {tabela}"
+        linhas = planilha.executar_leitura(sql)
+    if not linhas:
+        return padronizar_dataframe(pd.DataFrame(columns=colunas), aba_esquema, origem_gsheets=True)
+    df = pd.DataFrame(linhas, columns=colunas)
+    return padronizar_dataframe(df, aba_esquema, origem_gsheets=True)
+
+
+def gravar_aba_pequena_gsheets(
+    planilha: ConexaoSupabasePG,
+    nome_aba: str,
+    df: pd.DataFrame,
+    permitir_vazio: bool = False,
+):
+    from psycopg2.extras import execute_values
     if df is None:
         return
     if df.empty and not permitir_vazio:
         return
-    aba_esquema = nome_aba[5:] if nome_aba.startswith("_bkp_") else nome_aba
-    df_padrao = padronizar_dataframe(df, aba_esquema) if aba_esquema in ESQUEMA_ABAS else df
-    df_str = df_padrao.fillna("").astype(str)
-    cabecalho = df_str.columns.tolist()
-    if df_str.empty:
-        dados = [cabecalho, ["" for _ in cabecalho]]
-    else:
-        dados = [cabecalho] + df_str.values.tolist()
-    linhas_nec = max(len(dados), 2)
-    cols_nec = max(len(cabecalho), 1)
-    ws = obter_ou_criar_aba(planilha, nome_aba, linhas_nec + 10, cols_nec + 2)
-    if ws.row_count < linhas_nec or ws.col_count < cols_nec:
-        ws.resize(rows=max(ws.row_count, linhas_nec + 10), cols=max(ws.col_count, cols_nec))
-    ws.update(values=dados, range_name="A1", value_input_option="RAW")
-    ws.resize(rows=linhas_nec, cols=cols_nec)
+    tabela = _validar_nome_tabela_sql(nome_aba)
+    aba_esquema = tabela[5:] if tabela.startswith("_bkp_") else tabela
+    df_padrao = padronizar_dataframe(df, aba_esquema, origem_gsheets=True) if aba_esquema in ESQUEMA_ABAS else df.copy()
+    colunas = ESQUEMA_ABAS.get(aba_esquema, list(df_padrao.columns))
+    pk_cols = CHAVES_PRIMARIAS_SQL.get(aba_esquema, [colunas[0]])
+    df_padrao = df_padrao.drop_duplicates(subset=pk_cols, keep="last").reset_index(drop=True)
+    tuplas = _preparar_tuplas_para_insert(df_padrao, colunas)
+    cols_sql = ", ".join(colunas)
+    pk_sql = ", ".join(pk_cols)
+    set_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in colunas if c not in pk_cols)
+    clausula_conflito = (
+        f"ON CONFLICT ({pk_sql}) DO UPDATE SET {set_sql}"
+        if set_sql
+        else f"ON CONFLICT ({pk_sql}) DO NOTHING"
+    )
 
-
-def migrar_aba_incremental_em_lotes(planilha, ws_antiga, df_combinado: pd.DataFrame, nome_aba: str = "historico"):
-    import gspread
-    aba_esquema = nome_aba[5:] if nome_aba.startswith("_bkp_") else nome_aba
-    df_padrao = podar_historico_180_dias(padronizar_dataframe(df_combinado, aba_esquema), aba_esquema)
-    df_str = df_padrao.fillna("").astype(str)
-    cabecalho = df_str.columns.tolist()
-    todas_linhas = df_str.values.tolist()
-    nome_temp = f"{nome_aba[:18]}_mig_temp"
+    conn = planilha.conectar()
     try:
-        ws_temp_existente = planilha.worksheet(nome_temp)
-        planilha.del_worksheet(ws_temp_existente)
-    except gspread.exceptions.WorksheetNotFound:
-        pass
-    ws_temp = planilha.add_worksheet(
-        title=nome_temp,
-        rows=max(len(todas_linhas) + 50, 100),
-        cols=max(len(cabecalho), 5),
-    )
-    primeiro_bloco = todas_linhas[:TAMANHO_LOTE_MIGRACAO]
-    ws_temp.update(
-        values=[cabecalho] + primeiro_bloco,
-        range_name="A1",
-        value_input_option="RAW",
-    )
-    for ini in range(TAMANHO_LOTE_MIGRACAO, len(todas_linhas), TAMANHO_LOTE_MIGRACAO):
-        bloco = todas_linhas[ini : ini + TAMANHO_LOTE_MIGRACAO]
-        ws_temp.append_rows(values=bloco, value_input_option="RAW")
-    ws_temp.resize(rows=max(len(todas_linhas) + 1, 2), cols=len(cabecalho))
-    planilha.del_worksheet(ws_antiga)
-    ws_temp.update_title(nome_aba)
+        with conn.cursor() as cur:
+            cur.execute(f"TRUNCATE TABLE {tabela}")
+            if tuplas:
+                sql_ins = f"INSERT INTO {tabela} ({cols_sql}) VALUES %s {clausula_conflito}"
+                execute_values(cur, sql_ins, tuplas, page_size=2000)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def salvar_backup_automatico_aba_gsheets(
-    planilha,
+    planilha: ConexaoSupabasePG,
     nome_aba_origem: str,
-    df_atual_memoria: pd.DataFrame,
+    df_atual_memoria: pd.DataFrame = None,
     permitir_vazio: bool = False,
 ):
-    """Salva uma cópia rápida em _bkp_<nome_aba> apenas para abas leves (estoque_atual, entradas, saídas, custos, base, ocultos, trânsito)."""
-    if nome_aba_origem == "historico" or df_atual_memoria is None:
+    """Salva uma cópia instantânea em _bkp_<nome_aba> diretamente no PostgreSQL antes de qualquer alteração."""
+    if nome_aba_origem == "historico":
         return
-    if df_atual_memoria.empty and not permitir_vazio:
+    tabela_orig = _validar_nome_tabela_sql(nome_aba_origem)
+    tabela_bkp = _validar_nome_tabela_sql(f"_bkp_{nome_aba_origem}")
+    if df_atual_memoria is not None and not df_atual_memoria.empty:
+        gravar_aba_pequena_gsheets(planilha, tabela_bkp, df_atual_memoria, permitir_vazio=permitir_vazio)
         return
-    nome_bkp = f"_bkp_{nome_aba_origem}"
-    if len(df_atual_memoria) > TAMANHO_LOTE_MIGRACAO:
-        ws_bkp = obter_ou_criar_aba(planilha, nome_bkp)
-        migrar_aba_incremental_em_lotes(planilha, ws_bkp, df_atual_memoria, nome_aba=nome_bkp)
-    else:
-        gravar_aba_pequena_gsheets(planilha, nome_bkp, df_atual_memoria, permitir_vazio=permitir_vazio)
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {tabela_orig}")
+            qtd_atual = int(cur.fetchone()[0])
+            if qtd_atual > 0 or permitir_vazio:
+                cur.execute(f"TRUNCATE TABLE {tabela_bkp}")
+                if qtd_atual > 0:
+                    cur.execute(f"INSERT INTO {tabela_bkp} SELECT * FROM {tabela_orig}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def remover_datas_aba_incremental_gsheets(
-    planilha,
+    planilha: ConexaoSupabasePG,
     nome_aba: str,
     datas_remover: set,
     df_atual_memoria: pd.DataFrame = None,
 ) -> int:
-    """
-    Remove de uma aba incremental todas as linhas das datas informadas:
-    - Para 'historico': usa exclusão direta de linhas na planilha (sem regravar a aba inteira).
-    - Para abas pequenas ('entradas_diarias', 'saidas_diarias'): salva backup automático _bkp_* e regrava a tabela limpa.
-    """
-    datas_iso_alvo = set()
+    tabela = _validar_nome_tabela_sql(nome_aba)
+    datas_iso_alvo = []
     for d in (datas_remover or set()):
         dt_p = converter_datas_deterministico(pd.Series([str(d).strip()]))
         if not dt_p.empty and pd.notna(dt_p.iloc[0]):
-            datas_iso_alvo.add(dt_p.iloc[0].strftime("%Y-%m-%d"))
+            datas_iso_alvo.append(dt_p.iloc[0].strftime("%Y-%m-%d"))
         elif str(d).strip():
-            datas_iso_alvo.add(str(d).strip())
+            datas_iso_alvo.append(str(d).strip())
+    datas_iso_alvo = sorted(set(datas_iso_alvo))
     if not datas_iso_alvo:
         return 0
 
-    if nome_aba == "historico":
-        ws = obter_ou_criar_aba(planilha, nome_aba)
-        primeira_linha = [str(c).strip() for c in ws.row_values(1)]
-        if not primeira_linha:
-            return 0
-        idx_col_data = (primeira_linha.index("data") + 1) if "data" in primeira_linha else len(primeira_linha)
-        col_datas_antes = ws.col_values(idx_col_data)
-        dt_col_parsed = converter_datas_deterministico(pd.Series(col_datas_antes))
-        dt_col_iso = dt_col_parsed.dt.strftime("%Y-%m-%d").fillna("")
-        linhas_para_apagar = [
-            i
-            for i, val_iso in enumerate(dt_col_iso, start=1)
-            if i >= 2 and val_iso in datas_iso_alvo
-        ]
-        if linhas_para_apagar:
-            blocos = []
-            inicio = fim = linhas_para_apagar[0]
-            for r in linhas_para_apagar[1:]:
-                if r == fim + 1:
-                    fim = r
-                else:
-                    blocos.append((inicio, fim))
-                    inicio = fim = r
-            blocos.append((inicio, fim))
-            for ini, f in reversed(blocos):
-                ws.delete_rows(ini, f)
-        return len(linhas_para_apagar)
+    if tabela in ("entradas_diarias", "saidas_diarias"):
+        salvar_backup_automatico_aba_gsheets(planilha, tabela, df_atual_memoria, permitir_vazio=True)
 
-    df_base = (
-        df_atual_memoria.copy()
-        if (df_atual_memoria is not None and not df_atual_memoria.empty)
-        else ler_aba_bruta_gsheets(planilha, nome_aba)
-    )
-    if df_base.empty or "data" not in df_base.columns:
-        return 0
-    mask_rem = df_base["data"].isin(datas_iso_alvo)
-    qtd_removidas = int(mask_rem.sum())
-    if qtd_removidas <= 0:
-        return 0
-    salvar_backup_automatico_aba_gsheets(planilha, nome_aba, df_base, permitir_vazio=True)
-    df_restante = df_base[~mask_rem].copy().reset_index(drop=True)
-    if len(df_restante) <= TAMANHO_LOTE_MIGRACAO:
-        gravar_aba_pequena_gsheets(planilha, nome_aba, df_restante, permitir_vazio=True)
-    else:
-        ws = obter_ou_criar_aba(planilha, nome_aba)
-        migrar_aba_incremental_em_lotes(planilha, ws, df_restante, nome_aba=nome_aba)
-    reg_hashes = st.session_state.setdefault("hashes_soma_por_data", {})
-    for dt_rm in datas_iso_alvo:
-        reg_hashes.pop(f"{nome_aba}::{dt_rm}", None)
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {tabela} WHERE data = ANY(%s)", (datas_iso_alvo,))
+            qtd_removidas = int(cur.rowcount or 0)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    if tabela in ("entradas_diarias", "saidas_diarias"):
+        reg_hashes = st.session_state.setdefault("hashes_soma_por_data", {})
+        for dt_rm in datas_iso_alvo:
+            reg_hashes.pop(f"{tabela}::{dt_rm}", None)
     return qtd_removidas
 
 
 def restaurar_backup_automatico_aba_gsheets(
-    planilha,
+    planilha: ConexaoSupabasePG,
     nome_aba_destino: str,
     df_atual_memoria: pd.DataFrame = None,
 ) -> int:
-    """Restaura o conteúdo de _bkp_<nome_aba_destino> para as abas com cópia automática e limpa datas indevidas no histórico."""
-    import gspread
-    nome_bkp = f"_bkp_{nome_aba_destino}"
-    try:
-        ws_bkp = planilha.worksheet(nome_bkp)
-    except gspread.exceptions.WorksheetNotFound:
-        raise ValueError(f"Ainda não existe cópia automática anterior (`{nome_bkp}`) para restaurar.")
-    valores = ws_bkp.get_all_values()
-    aba_permite_vazio = nome_aba_destino in ("ocultos", "pedidos_transito", "entradas_diarias", "saidas_diarias")
-    if not valores or len(valores) < 2:
-        if aba_permite_vazio:
-            df_vazio = padronizar_dataframe(pd.DataFrame(), nome_aba_destino)
-            gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_vazio, permitir_vazio=True)
-            return 0
-        raise ValueError(f"A cópia automática (`{nome_bkp}`) está vazia.")
-    cabecalho = [str(c).strip() if str(c).strip() else f"col_{i}" for i, c in enumerate(valores[0])]
-    df_bkp = padronizar_dataframe(pd.DataFrame(valores[1:], columns=cabecalho), nome_aba_destino, origem_gsheets=True)
+    tabela_dest = _validar_nome_tabela_sql(nome_aba_destino)
+    tabela_bkp = _validar_nome_tabela_sql(f"_bkp_{nome_aba_destino}")
+    aba_permite_vazio = tabela_dest in ("ocultos", "pedidos_transito", "entradas_diarias", "saidas_diarias")
+    df_bkp = ler_aba_bruta_gsheets(planilha, tabela_bkp)
     if df_bkp.empty and not aba_permite_vazio:
-        raise ValueError(f"Nenhum registro válido encontrado na cópia automática (`{nome_bkp}`).")
-    if nome_aba_destino == "estoque_atual":
+        raise ValueError(f"Ainda não há registros salvos na cópia automática anterior (`{tabela_bkp}`) para restaurar.")
+
+    if tabela_dest == "estoque_atual":
         datas_atuais = set()
         if df_atual_memoria is not None and not df_atual_memoria.empty and "data" in df_atual_memoria.columns:
             datas_atuais.update(str(d).strip() for d in df_atual_memoria["data"].unique() if str(d).strip())
@@ -1340,18 +1489,16 @@ def restaurar_backup_automatico_aba_gsheets(
         datas_indevidas = datas_atuais - datas_rest
         if datas_indevidas:
             remover_datas_aba_incremental_gsheets(planilha, "historico", datas_indevidas)
-        gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp)
+        gravar_aba_pequena_gsheets(planilha, "estoque_atual", df_bkp)
         for dt_r in sorted(datas_rest):
             df_dia_rest = df_bkp[df_bkp["data"] == dt_r].copy()
             gravar_historico_incremental_gsheets(planilha, df_dia_rest, dt_r)
-    elif len(df_bkp) > TAMANHO_LOTE_MIGRACAO:
-        ws_dest = obter_ou_criar_aba(planilha, nome_aba_destino)
-        migrar_aba_incremental_em_lotes(planilha, ws_dest, df_bkp, nome_aba=nome_aba_destino)
     else:
-        gravar_aba_pequena_gsheets(planilha, nome_aba_destino, df_bkp, permitir_vazio=aba_permite_vazio)
-    if nome_aba_destino in ("entradas_diarias", "saidas_diarias"):
+        gravar_aba_pequena_gsheets(planilha, tabela_dest, df_bkp, permitir_vazio=aba_permite_vazio)
+
+    if tabela_dest in ("entradas_diarias", "saidas_diarias"):
         reg_hashes = st.session_state.setdefault("hashes_soma_por_data", {})
-        chaves_limpar = [k for k in reg_hashes if k.startswith(f"{nome_aba_destino}::")]
+        chaves_limpar = [k for k in reg_hashes if k.startswith(f"{tabela_dest}::")]
         for k_l in chaves_limpar:
             reg_hashes.pop(k_l, None)
     return len(df_bkp)
@@ -1360,83 +1507,117 @@ def restaurar_backup_automatico_aba_gsheets(
 def _calcular_hash_dataframe_dia(df_dia: pd.DataFrame, nome_aba: str) -> str:
     if df_dia is None or df_dia.empty:
         return ""
-    df_p = padronizar_dataframe(df_dia, nome_aba).sort_values("codigo").reset_index(drop=True)
+    df_p = padronizar_dataframe(df_dia, nome_aba, origem_gsheets=True).sort_values("codigo").reset_index(drop=True)
     if df_p.empty:
         return ""
     txt_serial = df_p.to_csv(index=False)
     return hashlib.sha256(txt_serial.encode("utf-8")).hexdigest()[:16]
 
 
+def _verificar_sobreposicao_soma_mesmo_dia(
+    df_existente_dia: pd.DataFrame,
+    df_novo_dia: pd.DataFrame,
+    col_qtd: str,
+    hashes_ja_no_dia: list,
+    hash_efetivo: str,
+    permitir_somar_codigos_repetidos_dia: bool = False,
+    rotulo_aba: str = "Movimento",
+    data_ref_str: str = "",
+) -> tuple[bool, list]:
+    """
+    Proteção em 3 camadas para o modo '➕ Somar ao dia':
+    1) Bloqueia se o hash do arquivo já estiver registrado naquela data.
+    2) Bloqueia se todos os pares (codigo, qtd) do arquivo enviado já constarem idênticos naquela data
+       (protege inclusive datas importadas antes de existir registro de hash).
+    3) Se houver códigos repetidos com quantidades diferentes na mesma data (>= 50% ou >= 5 itens) e
+       'permitir_somar_codigos_repetidos_dia' estiver desmarcado, bloqueia com aviso claro.
+    """
+    if df_existente_dia is None or df_existente_dia.empty or df_novo_dia is None or df_novo_dia.empty:
+        return False, []
+    if hash_efetivo and hash_efetivo in hashes_ja_no_dia:
+        return True, []
+
+    mapa_qtd_exist = dict(zip(df_existente_dia["codigo"].astype(str), df_existente_dia[col_qtd].astype(float)))
+    mapa_qtd_novo = dict(zip(df_novo_dia["codigo"].astype(str), df_novo_dia[col_qtd].astype(float)))
+
+    cods_exist = set(mapa_qtd_exist.keys())
+    cods_novos = set(mapa_qtd_novo.keys())
+    cods_inter = sorted(cods_exist & cods_novos)
+
+    if not cods_inter:
+        return False, []
+
+    todos_iguais = (len(cods_inter) == len(cods_novos)) and all(
+        abs(mapa_qtd_exist[c] - mapa_qtd_novo[c]) < 1e-4 for c in cods_novos
+    )
+    if todos_iguais:
+        return True, cods_inter
+
+    sigs_novo = {f"sku:{c}:{mapa_qtd_novo[c]:.4f}" for c in cods_novos}
+    if sigs_novo and sigs_novo.issubset(set(hashes_ja_no_dia)):
+        return True, cods_inter
+
+    taxa_sobreposicao = len(cods_inter) / max(len(cods_novos), 1)
+    if (
+        not permitir_somar_codigos_repetidos_dia
+        and len(cods_inter) >= 1
+        and (taxa_sobreposicao >= 0.50 or len(cods_inter) >= 5)
+    ):
+        dt_fmt = pd.to_datetime(data_ref_str, format="%Y-%m-%d", errors="coerce")
+        str_dt = dt_fmt.strftime("%d/%m/%Y") if pd.notna(dt_fmt) else data_ref_str
+        amostra_c = ", ".join(cods_inter[:6])
+        raise ValueError(
+            f"Trava contra Reexportação Duplicada no Modo 'Somar ao Dia' ({rotulo_aba} — {str_dt}): "
+            f"**{len(cods_inter)} de {len(cods_novos)} produto(s)** deste arquivo ({taxa_sobreposicao*100:.0f}%) "
+            f"**já possuem lançamento gravado na data {str_dt}** (ex: {amostra_c}). "
+            f"Se você reexportou o relatório completo do dia no Siagri com alterações, **desmarque a caixa '➕ Somar ao dia'** "
+            f"para atualizar o dia sem dobrar as quantidades! Caso realmente sejam duas notas diferentes do mesmo produto no mesmo dia, "
+            f"marque nas Opções Avançadas a permissão para somar códigos já existentes na data."
+        )
+    return False, cods_inter
+
+
 def gravar_historico_incremental_gsheets(
-    planilha,
+    planilha: ConexaoSupabasePG,
     df_novo_dia: pd.DataFrame,
     data_ref: str,
     df_atual_memoria: pd.DataFrame = None,
     criar_backup: bool = False,
 ):
-    """
-    Grava o histórico diário usando append_rows + delete_rows apenas das linhas da mesma data ou >180d.
-    Consome apenas 1 a 2 chamadas de escrita na API do Google Sheets independentemente do tamanho do histórico.
-    """
+    """Grava o histórico diário compacto no PostgreSQL em uma única transação atômica (< 0,1s)."""
+    from psycopg2.extras import execute_values
     df_novo_padrao = compactar_estoque_para_historico(df_novo_dia)
     if df_novo_padrao.empty:
         return
     data_ref_str = str(data_ref).strip()
-    df_str = df_novo_padrao.fillna("").astype(str)
-    cabecalho = df_str.columns.tolist()
-    linhas_novas = df_str.values.tolist()
-    linhas_nec_inicial = len(linhas_novas) + 10
-    cols_nec = max(len(cabecalho), 3)
-    ws = obter_ou_criar_aba(planilha, "historico", linhas_nec_inicial + 50, cols_nec + 2)
-    primeira_linha = [str(c).strip() for c in ws.row_values(1)]
-    if not primeira_linha:
-        if ws.row_count < linhas_nec_inicial or ws.col_count < cols_nec:
-            ws.resize(rows=max(ws.row_count, linhas_nec_inicial), cols=max(ws.col_count, cols_nec))
-        ws.update(
-            values=[cabecalho] + linhas_novas,
-            range_name="A1",
-            value_input_option="RAW",
-        )
-        return
     limite_str = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
-    if primeira_linha != cabecalho:
-        df_antigo = ler_aba_bruta_gsheets(planilha, "historico")
-        if not df_antigo.empty:
-            df_antigo = df_antigo[
-                (df_antigo["data"] != data_ref_str)
-                & (df_antigo["data"] >= limite_str)
-            ].copy()
-            df_combinado = pd.concat([df_antigo, df_novo_padrao], ignore_index=True)
-        else:
-            df_combinado = df_novo_padrao
-        migrar_aba_incremental_em_lotes(planilha, ws, df_combinado, nome_aba="historico")
-        return
-    idx_col_data = (primeira_linha.index("data") + 1) if "data" in primeira_linha else len(cabecalho)
-    col_datas_antes = ws.col_values(idx_col_data)
-    dt_col_parsed = converter_datas_deterministico(pd.Series(col_datas_antes))
-    dt_col_iso = dt_col_parsed.dt.strftime("%Y-%m-%d").fillna("")
-    linhas_antigas_para_apagar = [
-        i
-        for i, val_iso in enumerate(dt_col_iso, start=1)
-        if i >= 2 and (val_iso == data_ref_str or (val_iso != "" and val_iso < limite_str))
-    ]
-    ws.append_rows(values=linhas_novas, value_input_option="RAW")
-    if linhas_antigas_para_apagar:
-        blocos = []
-        inicio = fim = linhas_antigas_para_apagar[0]
-        for r in linhas_antigas_para_apagar[1:]:
-            if r == fim + 1:
-                fim = r
-            else:
-                blocos.append((inicio, fim))
-                inicio = fim = r
-        blocos.append((inicio, fim))
-        for ini, f in reversed(blocos):
-            ws.delete_rows(ini, f)
+    df_novo_padrao["data"] = data_ref_str
+    df_novo_padrao = df_novo_padrao.drop_duplicates(subset=["codigo", "data"], keep="last").reset_index(drop=True)
+    tuplas = _preparar_tuplas_para_insert(df_novo_padrao, ["codigo", "saldo_geral", "data"])
+
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM historico WHERE data = %s OR data < %s",
+                (data_ref_str, limite_str),
+            )
+            if tuplas:
+                execute_values(
+                    cur,
+                    "INSERT INTO historico (codigo, saldo_geral, data) VALUES %s "
+                    "ON CONFLICT (codigo, data) DO UPDATE SET saldo_geral = EXCLUDED.saldo_geral",
+                    tuplas,
+                    page_size=2500,
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def gravar_aba_incremental_por_data_gsheets(
-    planilha,
+    planilha: ConexaoSupabasePG,
     nome_aba: str,
     df_novo_dia: pd.DataFrame,
     data_ref: str,
@@ -1445,36 +1626,31 @@ def gravar_aba_incremental_por_data_gsheets(
     hash_arquivo: str = "",
     criar_backup: bool = True,
     hashes_soma_atuais: dict = None,
+    permitir_somar_codigos_repetidos_dia: bool = False,
 ) -> bool:
-    """
-    Grava dados incrementais por data:
-    - Para 'historico': delega para gravar_historico_incremental_gsheets (1 a 2 chamadas fixas, sem _bkp_historico).
-    - Para 'entradas_diarias' e 'saidas_diarias': faz backup _bkp_*, grava de forma atômica e mantém a lista
-      acumulativa de todos os hashes de arquivos já somados naquela data (impedindo que reenviar o Arquivo A
-      depois do Arquivo B no modo 'Somar ao dia' dobre o Arquivo A).
-    Retorna True se o arquivo já havia sido somado anteriormente naquela data e foi ignorado para evitar duplicação.
-    """
+    from psycopg2.extras import execute_values
     if df_novo_dia is None or df_novo_dia.empty:
         return False
     if nome_aba == "historico":
         gravar_historico_incremental_gsheets(planilha, df_novo_dia, data_ref)
         return False
 
+    tabela = _validar_nome_tabela_sql(nome_aba)
     data_ref_str = str(data_ref).strip()
     limite_str = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
 
     df_base_existente = (
         df_atual_memoria.copy()
         if (df_atual_memoria is not None and not df_atual_memoria.empty)
-        else ler_aba_bruta_gsheets(planilha, nome_aba)
+        else ler_aba_bruta_gsheets(planilha, tabela)
     )
     if not df_base_existente.empty:
         df_base_existente = podar_historico_180_dias(
-            padronizar_dataframe(df_base_existente, nome_aba), nome_aba
+            padronizar_dataframe(df_base_existente, tabela, origem_gsheets=True), tabela
         )
 
     if criar_backup and not df_base_existente.empty:
-        salvar_backup_automatico_aba_gsheets(planilha, nome_aba, df_base_existente)
+        salvar_backup_automatico_aba_gsheets(planilha, tabela, df_base_existente)
 
     registro_hashes_sessao = st.session_state.setdefault("hashes_soma_por_data", {})
     if hashes_soma_atuais:
@@ -1482,8 +1658,8 @@ def gravar_aba_incremental_por_data_gsheets(
             if k_h not in registro_hashes_sessao:
                 registro_hashes_sessao[k_h] = list(lista_h)
 
-    chave_op = f"{nome_aba}::{data_ref_str}"
-    hash_efetivo = str(hash_arquivo).strip() or _calcular_hash_dataframe_dia(df_novo_dia, nome_aba)
+    chave_op = f"{tabela}::{data_ref_str}"
+    hash_efetivo = str(hash_arquivo).strip() or _calcular_hash_dataframe_dia(df_novo_dia, tabela)
     ja_somado_ignorado = False
 
     df_mesmo_dia_existente = (
@@ -1492,17 +1668,35 @@ def gravar_aba_incremental_por_data_gsheets(
         else pd.DataFrame()
     )
 
-    if somar_mesma_data and nome_aba in ("entradas_diarias", "saidas_diarias"):
-        col_qtd = "qtd_entrada" if nome_aba == "entradas_diarias" else "qtd_saida"
+    col_qtd = "qtd_entrada" if tabela == "entradas_diarias" else "qtd_saida"
+    sigs_atuais_sku = [
+        f"sku:{r['codigo']}:{float(r[col_qtd]):.4f}"
+        for _, r in df_novo_dia.iterrows()
+    ]
+
+    if somar_mesma_data and tabela in ("entradas_diarias", "saidas_diarias"):
         if df_mesmo_dia_existente.empty:
-            registro_hashes_sessao[chave_op] = [hash_efetivo] if hash_efetivo else []
+            registro_hashes_sessao[chave_op] = ([hash_efetivo] if hash_efetivo else []) + sigs_atuais_sku[:80]
         else:
             hashes_ja_no_dia = list(registro_hashes_sessao.get(chave_op, []))
             if not hashes_ja_no_dia:
-                hash_base_antiga = _calcular_hash_dataframe_dia(df_mesmo_dia_existente, nome_aba)
+                hash_base_antiga = _calcular_hash_dataframe_dia(df_mesmo_dia_existente, tabela)
                 if hash_base_antiga:
                     hashes_ja_no_dia.append(hash_base_antiga)
-            if hash_efetivo and hash_efetivo in hashes_ja_no_dia:
+                for _, r_ex in df_mesmo_dia_existente.iterrows():
+                    hashes_ja_no_dia.append(f"sku:{r_ex['codigo']}:{float(r_ex[col_qtd]):.4f}")
+
+            bloqueado_dup, _ = _verificar_sobreposicao_soma_mesmo_dia(
+                df_existente_dia=df_mesmo_dia_existente,
+                df_novo_dia=df_novo_dia,
+                col_qtd=col_qtd,
+                hashes_ja_no_dia=hashes_ja_no_dia,
+                hash_efetivo=hash_efetivo,
+                permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                rotulo_aba="Entradas" if tabela == "entradas_diarias" else "Saídas",
+                data_ref_str=data_ref_str,
+            )
+            if bloqueado_dup:
                 ja_somado_ignorado = True
                 df_novo_dia = df_mesmo_dia_existente.copy()
             else:
@@ -1520,40 +1714,137 @@ def gravar_aba_incremental_por_data_gsheets(
                 df_novo_dia = df_unido.groupby("codigo", as_index=False).agg(**agg_inc)
                 if hash_efetivo:
                     hashes_ja_no_dia.append(hash_efetivo)
+                hashes_ja_no_dia.extend(sigs_atuais_sku[:80])
             registro_hashes_sessao[chave_op] = hashes_ja_no_dia
-    elif nome_aba in ("entradas_diarias", "saidas_diarias"):
-        registro_hashes_sessao[chave_op] = [hash_efetivo] if hash_efetivo else []
+    elif tabela in ("entradas_diarias", "saidas_diarias"):
+        registro_hashes_sessao[chave_op] = ([hash_efetivo] if hash_efetivo else []) + sigs_atuais_sku[:80]
 
-    df_novo_padrao = padronizar_dataframe(df_novo_dia, nome_aba)
+    if ja_somado_ignorado:
+        return True
+
+    df_novo_padrao = padronizar_dataframe(df_novo_dia, tabela, origem_gsheets=True)
     if df_novo_padrao.empty:
-        return ja_somado_ignorado
+        return False
+    df_novo_padrao["data"] = data_ref_str
+    colunas = ESQUEMA_ABAS[tabela]
+    tuplas = _preparar_tuplas_para_insert(df_novo_padrao, colunas)
+    cols_sql = ", ".join(colunas)
+    set_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in colunas if c not in ("codigo", "data"))
 
-    if not df_base_existente.empty and "data" in df_base_existente.columns:
-        df_antigo_sem_data = df_base_existente[
-            (df_base_existente["data"] != data_ref_str)
-            & (df_base_existente["data"] >= limite_str)
-        ].copy()
-        df_combinado = pd.concat([df_antigo_sem_data, df_novo_padrao], ignore_index=True)
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {tabela} WHERE data = %s OR data < %s",
+                (data_ref_str, limite_str),
+            )
+            if tuplas:
+                execute_values(
+                    cur,
+                    f"INSERT INTO {tabela} ({cols_sql}) VALUES %s "
+                    f"ON CONFLICT (codigo, data) DO UPDATE SET {set_sql}",
+                    tuplas,
+                    page_size=2000,
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return False
+
+
+def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_upload) -> dict:
+    """
+    Importa de uma só vez todas as abas de um arquivo Banco_Dados_Esteio_Rural.xlsx (ou pacote .zip)
+    diretamente para as tabelas do Supabase PostgreSQL em uma transação atômica.
+    """
+    from psycopg2.extras import execute_values
+    nome_arq = getattr(arquivo_upload, "name", "backup.xlsx").lower()
+    conteudo = arquivo_upload.getvalue()
+    abas_lidas = {}
+
+    if nome_arq.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(conteudo), mode="r") as zf:
+            nomes_zip = zf.namelist()
+            for nz in nomes_zip:
+                if nz.lower().endswith(".xlsx"):
+                    bytes_xlsx = zf.read(nz)
+                    xls = pd.ExcelFile(io.BytesIO(bytes_xlsx))
+                    for sh in xls.sheet_names:
+                        if sh in TABELAS_SQL_VALIDAS:
+                            df_p = pd.read_excel(xls, sheet_name=sh, nrows=0)
+                            conv = {c: _preservar_celula_excel for c in df_p.columns}
+                            abas_lidas[sh] = pd.read_excel(xls, sheet_name=sh, converters=conv)
+                elif nz.lower().endswith(".csv") and "historico" in nz.lower():
+                    bytes_csv = zf.read(nz)
+                    for enc in ("utf-8-sig", "latin1", "cp1252"):
+                        for sep in (";", ",", "\t"):
+                            try:
+                                df_h_csv = pd.read_csv(io.BytesIO(bytes_csv), sep=sep, encoding=enc, dtype=str)
+                                if df_h_csv.shape[1] >= 3:
+                                    abas_lidas["historico"] = df_h_csv
+                                    break
+                            except Exception:
+                                continue
+                        if "historico" in abas_lidas:
+                            break
     else:
-        df_combinado = df_novo_padrao.copy()
+        xls = pd.ExcelFile(io.BytesIO(conteudo))
+        for sh in xls.sheet_names:
+            if sh in TABELAS_SQL_VALIDAS:
+                df_p = pd.read_excel(xls, sheet_name=sh, nrows=0)
+                conv = {c: _preservar_celula_excel for c in df_p.columns}
+                abas_lidas[sh] = pd.read_excel(xls, sheet_name=sh, converters=conv)
 
-    df_combinado = podar_historico_180_dias(
-        padronizar_dataframe(df_combinado, nome_aba), nome_aba
-    )
+    if not abas_lidas:
+        raise ValueError(
+            "Nenhuma aba reconhecida do banco (`estoque_atual`, `historico`, `custos`, etc.) foi encontrada no arquivo enviado."
+        )
 
-    if len(df_combinado) <= TAMANHO_LOTE_MIGRACAO:
-        gravar_aba_pequena_gsheets(planilha, nome_aba, df_combinado, permitir_vazio=True)
-    else:
-        ws = obter_ou_criar_aba(planilha, nome_aba, len(df_combinado) + 50, len(df_combinado.columns) + 2)
-        migrar_aba_incremental_em_lotes(planilha, ws, df_combinado, nome_aba=nome_aba)
-    return ja_somado_ignorado
+    resumo_migrado = {}
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            for nome_tab, df_bruto in abas_lidas.items():
+                aba_esq = nome_tab[5:] if nome_tab.startswith("_bkp_") else nome_tab
+                if aba_esq not in ESQUEMA_ABAS:
+                    continue
+                df_pad = padronizar_dataframe(df_bruto, aba_esq, origem_gsheets=True)
+                if aba_esq in ("historico", "entradas_diarias", "saidas_diarias"):
+                    df_pad = podar_historico_180_dias(df_pad, aba_esq)
+                colunas = ESQUEMA_ABAS[aba_esq]
+                pk_cols = CHAVES_PRIMARIAS_SQL.get(aba_esq, [colunas[0]])
+                df_pad = df_pad.drop_duplicates(subset=pk_cols, keep="last").reset_index(drop=True)
+                tuplas = _preparar_tuplas_para_insert(df_pad, colunas)
+                cols_sql = ", ".join(colunas)
+                pk_sql = ", ".join(pk_cols)
+                set_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in colunas if c not in pk_cols)
+                clausula_conflito = (
+                    f"ON CONFLICT ({pk_sql}) DO UPDATE SET {set_sql}"
+                    if set_sql
+                    else f"ON CONFLICT ({pk_sql}) DO NOTHING"
+                )
+                cur.execute(f"TRUNCATE TABLE {nome_tab}")
+                if tuplas:
+                    execute_values(
+                        cur,
+                        f"INSERT INTO {nome_tab} ({cols_sql}) VALUES %s {clausula_conflito}",
+                        tuplas,
+                        page_size=2500,
+                    )
+                resumo_migrado[nome_tab] = len(tuplas)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return resumo_migrado
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def carregar_estado_completo() -> dict:
     planilha, erro = obter_planilha_gsheets()
     if planilha is None:
-        raise RuntimeError(f"Não foi possível conectar ao Google Sheets: {erro}")
+        raise RuntimeError(f"Não foi possível conectar ao Supabase (PostgreSQL): {erro}")
     df_est = ler_aba_bruta_gsheets(planilha, "estoque_atual")
     df_hist = podar_historico_180_dias(ler_aba_bruta_gsheets(planilha, "historico"), "historico")
     df_ent = podar_historico_180_dias(ler_aba_bruta_gsheets(planilha, "entradas_diarias"), "entradas_diarias")
@@ -1570,9 +1861,10 @@ def carregar_estado_completo() -> dict:
             pass
     df_meta = ler_aba_bruta_gsheets(planilha, "meta")
     dias_base = 87
-    ult_att = "Sincronizado via Nuvem"
+    ult_att = "Sincronizado via Supabase SQL"
     grupos_pref_custom = {}
     grupos_sku_custom = {}
+    mp_custom_map = {}
     hashes_soma_meta = {}
     limite_iso_meta = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
     if not df_meta.empty and "chave" in df_meta.columns and "valor" in df_meta.columns:
@@ -1593,6 +1885,10 @@ def carregar_estado_completo() -> dict:
                 sku_k = normalizar_codigo_sku(ch_s[len("grp_sku_"):])
                 if sku_k:
                     grupos_sku_custom[sku_k] = val_s
+            elif ch_s.startswith("mp_flag_") and val_s in ("0", "1"):
+                sku_mp = normalizar_codigo_sku(ch_s[len("mp_flag_"):])
+                if sku_mp:
+                    mp_custom_map[sku_mp] = val_s
             elif ch_s.startswith("soma_hashes_") and val_s:
                 chave_aba_dt = ch_s[len("soma_hashes_"):].strip()
                 partes_dt = chave_aba_dt.split("::")
@@ -1615,6 +1911,7 @@ def carregar_estado_completo() -> dict:
         "ultima_atualizacao": ult_att,
         "grupos_pref_custom": grupos_pref_custom,
         "grupos_sku_custom": grupos_sku_custom,
+        "mp_custom_map": mp_custom_map,
         "hashes_soma_meta": hashes_soma_meta,
         "df_meta_bruto": df_meta,
     }
@@ -1937,12 +2234,39 @@ def identificar_departamento_sku(
     return mapa_base.get(pref, f"Outros ({pref or 'S/C'})")
 
 
+def identificar_produto_mp(
+    codigo: str,
+    descricao: str,
+    grupos_sku_custom: dict = None,
+    mp_custom_map: dict = None,
+) -> bool:
+    """
+    Identifica se um produto é Matéria-Prima de Fábrica (saída via Ordem de Produção):
+    1) Respeita marcação explícita em mp_custom_map ('1' = MP, '0' = Revenda Loja).
+    2) Respeita se o SKU foi fixado manualmente em grupo de Matéria-Prima (MP).
+    3) Regra padrão limpa: descrição iniciada em 'MP ' ou 'ME ' (microelementos de fábrica),
+       sem marcar automaticamente todo o prefixo '26' (que contém itens de varejo como laços e medicamentos).
+    """
+    cod_s = normalizar_codigo_sku(codigo)
+    if not cod_s:
+        cod_s = str(codigo).strip()
+    if mp_custom_map and cod_s in mp_custom_map:
+        return str(mp_custom_map[cod_s]).strip() == "1"
+    if grupos_sku_custom and cod_s in grupos_sku_custom:
+        grp_s = str(grupos_sku_custom[cod_s]).strip().lower()
+        if "matéria-prima" in grp_s or "materia-prima" in grp_s or "(mp)" in grp_s:
+            return True
+    desc_up = str(descricao).strip().upper()
+    return desc_up.startswith("MP ") or desc_up.startswith("ME ")
+
+
 def montar_dataframe_meta_completo(
     dias_base_val: int,
     ult_att_val: str,
     grupos_pref_custom: dict = None,
     grupos_sku_custom: dict = None,
     hashes_soma_por_data: dict = None,
+    mp_custom_map: dict = None,
 ) -> pd.DataFrame:
     linhas = [
         {"chave": "dias_base", "valor": str(int(dias_base_val))},
@@ -1957,6 +2281,12 @@ def montar_dataframe_meta_completo(
             sk_norm = normalizar_codigo_sku(sk)
             if sk_norm and str(sv).strip():
                 linhas.append({"chave": f"grp_sku_{sk_norm}", "valor": str(sv).strip()})
+    mp_ref = mp_custom_map if mp_custom_map is not None else st.session_state.get("mp_custom_map_sessao", {})
+    if mp_ref:
+        for sk_m, flag_m in sorted(mp_ref.items()):
+            sk_norm = normalizar_codigo_sku(sk_m)
+            if sk_norm and str(flag_m).strip() in ("0", "1"):
+                linhas.append({"chave": f"mp_flag_{sk_norm}", "valor": str(flag_m).strip()})
     hashes_ref = hashes_soma_por_data if hashes_soma_por_data is not None else st.session_state.get("hashes_soma_por_data", {})
     if hashes_ref:
         limite_iso_m = (hoje_br() - timedelta(days=DIAS_MAX_HISTORICO)).strftime("%Y-%m-%d")
@@ -2250,10 +2580,10 @@ def calcular_plano_promocional_fefo(
     df_f["diagnostico_giro_fefo"] = diagnostico_escala_list
     df_f["mecanica_ia"] = mecanica_ia_list
     df_f["precisa_promocao"] = precisa_promo_list
-    df_f["eh_mp"] = (
-        df_f["descricao"].astype(str).str.strip().str.upper().str.startswith("MP ")
-        | df_f["codigo"].astype(str).str.startswith("26")
-    )
+    df_f["eh_mp"] = [
+        identificar_produto_mp(c, d)
+        for c, d in zip(df_f["codigo"], df_f["descricao"])
+    ]
     return df_f.drop(columns=["_ord_dias", "_saldo_vendavel"]).reset_index(drop=True)
 
 
@@ -2822,6 +3152,8 @@ def calcular_motor_giro_sazonal(
     incluir_sem_estoque: bool = True,
     df_entradas: pd.DataFrame = None,
     df_saidas: pd.DataFrame = None,
+    grupos_sku_custom: dict = None,
+    mp_custom_map: dict = None,
 ) -> tuple[pd.DataFrame, int, float]:
     if not df_estoque.empty:
         df_est_sku = df_estoque.groupby("codigo", as_index=False).agg(
@@ -2981,7 +3313,7 @@ def calcular_motor_giro_sazonal(
             # 1. Comparação direta das planilhas de Estoque Diário (captura quedas de saldo e consumo interno de fábrica)
             queda_direta = (-deltas_geral[cols_transicao]).clip(lower=0.0)
 
-            # Identifica quais SKUs são Matéria-Prima (MP / grupo 26), que dão saída por Ordem de Produção e não aparecem no relatório de Saídas
+            # Identifica quais SKUs são Matéria-Prima de Fábrica (saída via Ordem de Produção)
             mapa_desc_prod = (
                 dict(zip(df_prod["codigo"], df_prod["descricao"]))
                 if (df_prod is not None and not df_prod.empty and "descricao" in df_prod.columns)
@@ -2989,16 +3321,18 @@ def calcular_motor_giro_sazonal(
             )
             eh_mp_por_idx = pd.Series(
                 [
-                    str(c).strip().startswith("26")
-                    or str(mapa_desc_prod.get(c, "")).strip().upper().startswith("MP ")
+                    identificar_produto_mp(c, mapa_desc_prod.get(c, ""), grupos_sku_custom, mp_custom_map)
                     for c in entradas_transicao.index
                 ],
                 index=entradas_transicao.index,
             )
 
             # 2. Consumo em dia com NF de Entrada:
-            # - Para itens sem saída na planilha de vendas daquele dia (saidas_transicao <= 0) em que o estoque subiu menos que a NF (delta > 0 e delta < entrada): consumo = entrada - delta
-            # - Para Matérias-Primas (MP), cuja NF (Fatu416) já compõe o saldo do dia e a saída é por produção: mesmo que o saldo físico caia no dia da NF (delta <= 0), consumo = (entrada - delta).clip(lower=0)
+            # - Para qualquer SKU sem saída na planilha de vendas daquele dia (saidas_transicao <= 0) em que o estoque subiu menos que a NF
+            #   (delta > 0 e delta < entrada): consumo = entrada - delta.
+            # - Para Matérias-Primas (MP) quando o saldo caiu apesar da NF (delta <= 0):
+            #   se a NF ainda não entrou no saldo físico, somar (entrada - delta) inflaria o consumo; por isso,
+            #   apuramos apenas queda_direta (-delta) e disparamos alerta explícito de NF pendente/consumo > 3x giro!
             del_trans = deltas_geral[cols_transicao]
             sem_saida_no_sku_dia = saidas_transicao <= 0.0
             mask_alta_parcial_sku = (
@@ -3007,31 +3341,55 @@ def calcular_motor_giro_sazonal(
                 & (del_trans > 0.0)
                 & (del_trans < entradas_transicao)
             )
-            mask_mp_com_entrada = (
-                (entradas_transicao > 0.0)
-                & sem_saida_no_sku_dia
-                & eh_mp_por_idx.values[:, None]
-            )
             consumo_em_alta = (entradas_transicao - del_trans).clip(lower=0.0).where(
-                mask_alta_parcial_sku | mask_mp_com_entrada, 0.0
+                mask_alta_parcial_sku, 0.0
             )
 
-            # Detecção de NF de Entrada de mercadoria de revenda que ainda não refletiu no saldo do ERP
-            # (mesmo quando houve saída parcial no dia: se delta + saidas <= 0, a entrada ainda não somou no saldo)
+            # Calcula giro médio de referência nos dias sem anomalia para detectar picos anormais de MP (> 3x giro)
+            quedas_prelim = queda_direta.combine(consumo_em_alta, lambda s1, s2: s1.combine(s2, max))
+            quedas_prelim = quedas_prelim.combine(saidas_transicao, lambda s1, s2: s1.combine(s2, max))
+            dias_sem_nf_mask = entradas_transicao <= 0.0
+            soma_sem_nf = quedas_prelim.where(dias_sem_nf_mask, 0.0).sum(axis=1)
+            qtd_dias_sem_nf = dias_sem_nf_mask.sum(axis=1).replace(0, float("nan"))
+            giro_ref_mp = (soma_sem_nf / qtd_dias_sem_nf).fillna(0.0)
+
+            # Detecção de NF de Entrada sem reflexo no saldo ou consumo anormal de MP (> 3x giro médio)
             mask_nf_nao_refletida = (
                 (entradas_transicao > 0.0)
-                & (~eh_mp_por_idx.values[:, None])
                 & ((del_trans + saidas_transicao) <= 0.0)
             )
-            if mask_nf_nao_refletida.any().any():
-                alertas_nf_dict = {}
-                for cod_nf in mask_nf_nao_refletida.index[mask_nf_nao_refletida.any(axis=1)]:
+            mask_mp_consumo_3x = (
+                (entradas_transicao > 0.0)
+                & eh_mp_por_idx.values[:, None]
+                & (
+                    ((del_trans + saidas_transicao) <= 0.0)
+                    | (
+                        (giro_ref_mp.values[:, None] > 0.0)
+                        & ((entradas_transicao - del_trans) >= (giro_ref_mp.values[:, None] * 3.0))
+                    )
+                )
+            )
+            alertas_nf_dict = {}
+            for cod_nf in entradas_transicao.index:
+                if eh_mp_por_idx.loc[cod_nf] and mask_mp_consumo_3x.loc[cod_nf].any():
+                    cols_mp_a = [c for c in cols_transicao if mask_mp_consumo_3x.loc[cod_nf, c]]
+                    ult_dt_mp = cols_mp_a[-1]
+                    qtd_nf_mp = float(entradas_transicao.loc[cod_nf, ult_dt_mp])
+                    del_mp_v = float(del_trans.loc[cod_nf, ult_dt_mp])
+                    cons_bruto_mp = max(0.0, qtd_nf_mp - del_mp_v)
+                    dt_mp_fmt = pd.to_datetime(ult_dt_mp, format="%Y-%m-%d", errors="coerce")
+                    str_dt_mp = dt_mp_fmt.strftime("%d/%m") if pd.notna(dt_mp_fmt) else str(ult_dt_mp)
+                    alertas_nf_dict[cod_nf] = (
+                        f"⚠️ MP NF +{formatar_qtd_br(qtd_nf_mp)} ({str_dt_mp}) | Apurado {formatar_qtd_br(cons_bruto_mp)} (>3x giro / conferir saldo)"
+                    )
+                elif (not eh_mp_por_idx.loc[cod_nf]) and mask_nf_nao_refletida.loc[cod_nf].any():
                     cols_nf = [c for c in cols_transicao if mask_nf_nao_refletida.loc[cod_nf, c]]
                     ult_dt_nf = cols_nf[-1]
                     qtd_nf = float(entradas_transicao.loc[cod_nf, ult_dt_nf])
                     dt_nf_fmt = pd.to_datetime(ult_dt_nf, format="%Y-%m-%d", errors="coerce")
                     str_dt_nf = dt_nf_fmt.strftime("%d/%m") if pd.notna(dt_nf_fmt) else str(ult_dt_nf)
                     alertas_nf_dict[cod_nf] = f"⏳ NF +{formatar_qtd_br(qtd_nf)} ({str_dt_nf}) s/ reflexo no saldo"
+            if alertas_nf_dict:
                 nf_nao_refletida_sku = pd.Series(alertas_nf_dict)
 
             # 3. Cruzamento com Saídas/Vendas Diárias via max() (nunca soma duplicado com a queda de estoque)
@@ -3204,12 +3562,12 @@ with col_titulo:
     )
 with col_status:
     texto_status = (
-        "🟢 Google Sheets Online" if conectado_nuvem else "❌ Sem Conexão"
+        "🟢 Supabase SQL Online" if conectado_nuvem else "❌ Sem Conexão"
     )
     st.markdown(
         f"""
         <div class="status-box">
-            <div class="status-label">Banco de Dados 100% Nuvem</div>
+            <div class="status-label">PostgreSQL 100% Nuvem</div>
             <div class="status-value" title="{texto_status}">{texto_status}</div>
         </div>
         """,
@@ -3217,20 +3575,20 @@ with col_status:
     )
 if not conectado_nuvem:
     st.error(
-        f"❌ **Não foi possível conectar ao Google Sheets:** {erro_gsheets}\n\n"
-        "O sistema opera 100% em nuvem para garantir que nenhuma operação seja feita sobre dados "
-        "desatualizados ou vazios. Verifique as credenciais em `st.secrets` ou clique abaixo para reconectar."
+        f"❌ **Não foi possível conectar ao Supabase (PostgreSQL):** {erro_gsheets}\n\n"
+        "Verifique se a linha `database_url = \"postgresql://...\"` está colada no topo dos `Secrets` do Streamlit Cloud "
+        "e se o projeto no Supabase está ativo (não pausado)."
     )
-    if st.button("🔄 Tentar Reconectar ao Google Sheets Agora", type="primary"):
+    if st.button("🔄 Tentar Reconectar ao Supabase Agora", type="primary"):
         _conectar_planilha_cached.clear()
         carregar_estado_completo.clear()
         st.rerun()
     st.stop()
 try:
-    with st.spinner("Sincronizando dados com o Google Sheets..."):
+    with st.spinner("Carregando dados do Supabase (PostgreSQL)..."):
         estado = carregar_estado_completo()
 except Exception as erro_leitura:
-    st.error(f"❌ Erro ao ler abas do Google Sheets: {erro_leitura}")
+    st.error(f"❌ Erro ao ler tabelas do Supabase: {erro_leitura}")
     if st.button("🔄 Tentar Novamente", type="primary"):
         _conectar_planilha_cached.clear()
         carregar_estado_completo.clear()
@@ -3248,6 +3606,8 @@ df_pedidos_transito = estado.get("pedidos_transito", pd.DataFrame(columns=ESQUEM
 dias_base_atual = int(estado.get("dias_base", 87))
 grupos_pref_custom = estado.get("grupos_pref_custom", {})
 grupos_sku_custom = estado.get("grupos_sku_custom", {})
+mp_custom_map = estado.get("mp_custom_map", {})
+st.session_state["mp_custom_map_sessao"] = dict(mp_custom_map)
 hashes_soma_meta = estado.get("hashes_soma_meta", {})
 if hashes_soma_meta:
     reg_h_init = st.session_state.setdefault("hashes_soma_por_data", {})
@@ -3332,6 +3692,8 @@ with aba_dash:
             incluir_sem_estoque=True,
             df_entradas=df_entradas,
             df_saidas=df_saidas,
+            grupos_sku_custom=grupos_sku_custom,
+            mp_custom_map=mp_custom_map,
         )
         df_bi = df_bi_base.copy()
         if not df_custos_rel.empty:
@@ -3344,22 +3706,8 @@ with aba_dash:
             lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
         )
         df_bi["eh_mp"] = [
-            True
-            if (
-                str(dep).strip().startswith("26")
-                or "matéria-prima" in str(dep).lower()
-                or "materia-prima" in str(dep).lower()
-                or "(mp)" in str(dep).lower()
-            )
-            else (
-                False
-                if str(cod) in grupos_sku_custom
-                else (
-                    str(desc).strip().upper().startswith("MP ")
-                    or str(cod).strip().startswith("26")
-                )
-            )
-            for cod, desc, dep in zip(df_bi["codigo"], df_bi["descricao"], df_bi["departamento"])
+            identificar_produto_mp(cod, desc, grupos_sku_custom, mp_custom_map)
+            for cod, desc in zip(df_bi["codigo"], df_bi["descricao"])
         ]
         if visao_operacional_bi.startswith("🏪"):
             df_bi = df_bi[~df_bi["eh_mp"]].copy()
@@ -4565,11 +4913,53 @@ with aba_dash:
 # ABA 1: CENTRAL DE IMPORTAÇÃO SEGURA E DOWNLOAD DO BANCO DE DADOS
 # ------------------------------------------------------------------------------
 with aba1:
-    st.markdown("### Central de Importação Segura e Sincronização 100% Nuvem")
+    st.markdown("### Central de Importação Segura e Sincronização 100% Supabase (PostgreSQL)")
     st.caption(
-        "Importação por data de Estoque, Entradas (NF) e Saídas/Vendas diárias, histórico compacto (1 linha por SKU > 0), "
-        "proteção contra estoque retroativo sobrescrever o atual, alerta de linhas repetidas somadas e cópia automática antes de sobrescrever."
+        "Banco de dados PostgreSQL de alta velocidade: importação por data de Estoque, Entradas (NF) e Saídas diárias, "
+        "histórico compacto (1 linha por SKU > 0), travas independentes de segurança e backup instantâneo."
     )
+    with st.expander(
+        "📤 Migrar / Restaurar Banco Completo (.xlsx ou .zip) para o Supabase (1 Clique)",
+        expanded=df_estoque_bruto.empty,
+    ):
+        st.caption(
+            "Suba aqui o seu arquivo **`Banco_Dados_Esteio_Rural.xlsx`** (ou o pacote `.zip` com o histórico) para importar "
+            "todas as tabelas (`estoque_atual`, `historico`, `entradas_diarias`, `saidas_diarias`, `custos`, `base_inicial`, "
+            "`ocultos`, `pedidos_transito` e `meta`) diretamente para o Supabase em poucos segundos."
+        )
+        cmig1, cmig2 = st.columns([2.2, 1.0])
+        with cmig1:
+            arq_migracao_banco = st.file_uploader(
+                "Selecionar arquivo de backup completo (.xlsx ou .zip):",
+                type=["xlsx", "zip"],
+                key="up_migracao_completa_supabase",
+            )
+        with cmig2:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            btn_executar_migracao = st.button(
+                "🚀 Importar Tudo para o Supabase",
+                type="primary",
+                use_container_width=True,
+                disabled=(arq_migracao_banco is None),
+                key="btn_exec_mig_supabase",
+            )
+        if btn_executar_migracao and arq_migracao_banco is not None:
+            with st.spinner("Migrando todas as abas para o Supabase PostgreSQL..."):
+                try:
+                    resumo_mig = migrar_arquivo_banco_para_supabase(planilha_gsheets, arq_migracao_banco)
+                    st.session_state.pop("bkp_db_xlsx_bytes", None)
+                    st.session_state.pop("backup_zip_bytes", None)
+                    carregar_estado_completo.clear()
+                    calcular_motor_giro_sazonal.clear()
+                    detalhes_mig = ", ".join(
+                        f"`{k}` ({formatar_num_br(v)})" for k, v in resumo_mig.items()
+                    )
+                    st.session_state["msg_sucesso_sync"] = (
+                        f"✅ Banco de dados migrado com sucesso para o Supabase PostgreSQL! Tabelas importadas: {detalhes_mig}."
+                    )
+                    st.rerun()
+                except Exception as erro_mig:
+                    st.error(f"❌ Erro ao migrar banco para o Supabase: {erro_mig}")
     if "msg_sucesso_sync" in st.session_state:
         st.success(st.session_state.pop("msg_sucesso_sync"))
     if "aviso_duplicatas_sync" in st.session_state:
@@ -4691,27 +5081,34 @@ with aba1:
                 key="up_base",
             )
     with st.expander("⚙️ Opções Avançadas de Exceção de Travas (Desmarcado por Padrão — Use Apenas se Necessário)", expanded=False):
-        ct1, ct2, ct3 = st.columns(3)
+        ct1, ct2, ct3, ct4 = st.columns(4)
         with ct1:
             ignorar_trava_catalogo = st.checkbox(
-                "🔓 Ignorar trava de 80% de coincidência de códigos",
+                "🔓 Ignorar trava de 80% de códigos",
                 value=False,
                 key="chk_ign_trava_cat",
                 help="Marque apenas se estiver trocando de ERP ou importando uma linha de produtos totalmente nova.",
             )
         with ct2:
             ignorar_trava_data = st.checkbox(
-                "📅 Ignorar trava de data no nome do arquivo / lote",
+                "📅 Ignorar trava de data no nome",
                 value=False,
                 key="chk_ign_trava_dt",
                 help="Marque apenas se quiser forçar a gravação de um arquivo cuja data no nome seja diferente da data escolhida no seletor.",
             )
         with ct3:
             forcar_estoque_retroativo = st.checkbox(
-                "⏪ Forçar Estoque retroativo como Estoque Atual",
+                "⏪ Forçar Estoque retroativo como Atual",
                 value=False,
                 key="chk_forcar_est_retro",
                 help="Por padrão, estoques de datas anteriores vão apenas para o Histórico. Marque apenas se quiser que um estoque antigo substitua o estoque_atual.",
+            )
+        with ct4:
+            permitir_somar_codigos_repetidos_dia = st.checkbox(
+                "➕ Autorizar somar códigos já lançados no dia",
+                value=False,
+                key="chk_perm_somar_rep_dia",
+                help="Por padrão, se você marcar 'Somar ao dia' e enviar um arquivo em que >= 50% dos códigos já estão lançados naquela data, o sistema bloqueia para evitar somar um relatório reexportado. Marque apenas se forem duas notas diferentes dos mesmos produtos no mesmo dia.",
             )
     btn_sincronizar = st.button(
         "🚀 Processar e Sincronizar com Segurança",
@@ -4973,17 +5370,27 @@ with aba1:
                         )
                         if (
                             somar_entradas_mesmo_dia
-                            and not hashes_ent_ja_no_dia
                             and not df_entradas_bruto.empty
                             and "data" in df_entradas_bruto.columns
                         ):
                             df_ent_dia_atual = df_entradas_bruto[df_entradas_bruto["data"] == dt_ent_iso]
                             if not df_ent_dia_atual.empty:
-                                h_ant_e = _calcular_hash_dataframe_dia(df_ent_dia_atual, "entradas_diarias")
-                                if h_ant_e:
-                                    hashes_ent_ja_no_dia.append(h_ant_e)
-                        if somar_entradas_mesmo_dia and hash_arq_ent and hash_arq_ent in hashes_ent_ja_no_dia:
-                            ent_ja_somada_antes = True
+                                if not hashes_ent_ja_no_dia:
+                                    h_ant_e = _calcular_hash_dataframe_dia(df_ent_dia_atual, "entradas_diarias")
+                                    if h_ant_e:
+                                        hashes_ent_ja_no_dia.append(h_ant_e)
+                                    for _, r_ea in df_ent_dia_atual.iterrows():
+                                        hashes_ent_ja_no_dia.append(f"sku:{r_ea['codigo']}:{float(r_ea['qtd_entrada']):.4f}")
+                                ent_ja_somada_antes, _ = _verificar_sobreposicao_soma_mesmo_dia(
+                                    df_existente_dia=df_ent_dia_atual,
+                                    df_novo_dia=novas_entradas,
+                                    col_qtd="qtd_entrada",
+                                    hashes_ja_no_dia=hashes_ent_ja_no_dia,
+                                    hash_efetivo=hash_arq_ent,
+                                    permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                                    rotulo_aba="Entradas",
+                                    data_ref_str=dt_ent_iso,
+                                )
 
                         modo_ent_str = "somadas ao dia" if somar_entradas_mesmo_dia else "gravadas"
                         col_val_ent_nome = info_ent.get("coluna_valor_entrada", "")
@@ -5171,6 +5578,7 @@ with aba1:
                             hash_arquivo=hash_arq_ent,
                             criar_backup=True,
                             hashes_soma_atuais=hashes_soma_meta,
+                            permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
                         )
                         abas_ja_gravadas.append("entradas_diarias")
                         if not df_pedidos_transito.empty:
@@ -5202,6 +5610,7 @@ with aba1:
                             hash_arquivo=hash_arq_sai,
                             criar_backup=True,
                             hashes_soma_atuais=hashes_soma_meta,
+                            permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
                         )
                         if sai_ja_somada:
                             teve_alerta = True
@@ -5518,6 +5927,87 @@ with aba1:
                             except Exception as e_rm_sk:
                                 st.error(f"❌ Erro ao remover exceção: {e_rm_sk}")
 
+        st.markdown("---")
+        st.markdown("##### 3. Definir Produtos de Matéria-Prima de Fábrica (MP — Saída por Ordem de Produção)")
+        st.caption(
+            "Por padrão, o sistema considera **Matéria-Prima de Fábrica** os itens cuja descrição começa com **`MP `** ou **`ME `** "
+            "(não mais todo o prefixo `26`, pois há itens de revenda da loja que começam com `26`). "
+            "Se houver algum outro insumo da fábrica com nome diferente (ex: sal, ureia, núcleo), marque-o abaixo:"
+        )
+        if not df_cat_grp.empty:
+            opcoes_sku_mp = [
+                f"[{r['codigo']}] {r['descricao']} ({'🏭 MP Fábrica' if identificar_produto_mp(r['codigo'], r['descricao'], grupos_sku_custom, mp_custom_map) else '🏪 Loja Varejo'})"
+                for _, r in df_cat_grp.sort_values("descricao").iterrows()
+            ]
+            cods_sku_mp_ord = df_cat_grp.sort_values("descricao")["codigo"].tolist()
+            cmp1, cmp2, cmp3 = st.columns([2.0, 1.0, 1.0])
+            with cmp1:
+                idx_mp_sel = st.multiselect(
+                    "Selecione os produtos:",
+                    options=range(len(opcoes_sku_mp)),
+                    format_func=lambda i: opcoes_sku_mp[i],
+                    key="sel_skus_flag_mp",
+                )
+            with cmp2:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if st.button(
+                    "🏭 Marcar como MP",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=(not idx_mp_sel),
+                    key="btn_marcar_como_mp",
+                ):
+                    with st.spinner("Salvando classificação MP no Supabase..."):
+                        try:
+                            novo_mp_map = dict(mp_custom_map)
+                            for i_m in idx_mp_sel:
+                                c_m = normalizar_codigo_sku(cods_sku_mp_ord[int(i_m)])
+                                if c_m:
+                                    novo_mp_map[c_m] = "1"
+                            df_meta_mp = montar_dataframe_meta_completo(
+                                dias_base_val=int(dias_base_atual),
+                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                grupos_pref_custom=grupos_pref_custom,
+                                grupos_sku_custom=grupos_sku_custom,
+                                mp_custom_map=novo_mp_map,
+                            )
+                            gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_mp)
+                            carregar_estado_completo.clear()
+                            calcular_motor_giro_sazonal.clear()
+                            st.session_state["msg_sucesso_sync"] = f"✅ {formatar_num_br(len(idx_mp_sel))} produto(s) marcado(s) como Matéria-Prima de Fábrica!"
+                            st.rerun()
+                        except Exception as e_mp1:
+                            st.error(f"❌ Erro ao salvar MP: {e_mp1}")
+            with cmp3:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if st.button(
+                    "🏪 Marcar como Loja",
+                    use_container_width=True,
+                    disabled=(not idx_mp_sel),
+                    key="btn_marcar_como_loja",
+                ):
+                    with st.spinner("Salvando classificação Loja no Supabase..."):
+                        try:
+                            novo_mp_map = dict(mp_custom_map)
+                            for i_m in idx_mp_sel:
+                                c_m = normalizar_codigo_sku(cods_sku_mp_ord[int(i_m)])
+                                if c_m:
+                                    novo_mp_map[c_m] = "0"
+                            df_meta_mp = montar_dataframe_meta_completo(
+                                dias_base_val=int(dias_base_atual),
+                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                grupos_pref_custom=grupos_pref_custom,
+                                grupos_sku_custom=grupos_sku_custom,
+                                mp_custom_map=novo_mp_map,
+                            )
+                            gravar_aba_pequena_gsheets(planilha_gsheets, "meta", df_meta_mp)
+                            carregar_estado_completo.clear()
+                            calcular_motor_giro_sazonal.clear()
+                            st.session_state["msg_sucesso_sync"] = f"✅ {formatar_num_br(len(idx_mp_sel))} produto(s) marcado(s) como Loja Varejo!"
+                            st.rerun()
+                        except Exception as e_mp0:
+                            st.error(f"❌ Erro ao salvar classificação: {e_mp0}")
+
     r1, r2, r3, r4 = st.columns(4)
     qtd_skus_visiveis = df_estoque["codigo"].nunique() if (not df_estoque.empty and "codigo" in df_estoque.columns) else 0
     qtd_datas_hist = df_historico_bruto["data"].nunique() if (not df_historico_bruto.empty and "data" in df_historico_bruto.columns) else 0
@@ -5632,6 +6122,8 @@ with aba2:
             incluir_sem_estoque=True if arq_lista_cotacao is not None else incluir_zerados_com_giro,
             df_entradas=df_ent_fonte,
             df_saidas=df_sai_fonte,
+            grupos_sku_custom=grupos_sku_custom,
+            mp_custom_map=mp_custom_map,
         )
         df_calc = df_base_giro.copy()
         codigos_nao_encontrados_lista = []
@@ -6231,6 +6723,8 @@ with aba3:
             incluir_sem_estoque=False,
             df_entradas=df_entradas,
             df_saidas=df_saidas,
+            grupos_sku_custom=grupos_sku_custom,
+            mp_custom_map=mp_custom_map,
         )
 
         df_fefo = calcular_plano_promocional_fefo(
