@@ -3307,11 +3307,10 @@ def calcular_motor_giro_sazonal(
             )
 
             # 2. Consumo em dia com NF de Entrada:
-            # - Para qualquer SKU sem saída na planilha de vendas daquele dia (saidas_transicao <= 0) em que o estoque subiu menos que a NF
-            #   (delta > 0 e delta < entrada): consumo = entrada - delta.
-            # - Para Matérias-Primas (MP) quando o saldo caiu apesar da NF (delta <= 0):
-            #   se a NF ainda não entrou no saldo físico, somar (entrada - delta) inflaria o consumo; por isso,
-            #   apuramos apenas queda_direta (-delta) e disparamos alerta explícito de NF pendente/consumo > 3x giro!
+            # - Para itens de revenda (não MP) sem saída na planilha de vendas daquele dia (saidas_transicao <= 0)
+            #   em que o estoque subiu menos que a NF (delta > 0 e delta < entrada): consumo = entrada - delta.
+            # - Para itens de Produção / Matéria-Prima (MP), cuja saída ocorre por Ordem de Produção (fora das saídas faturadas):
+            #   consumo_bruto = entrada - delta, protegido contra NF ainda não refletida no saldo físico (> 3x giro de referência).
             del_trans = deltas_geral[cols_transicao]
             sem_saida_no_sku_dia = saidas_transicao <= 0.0
             mask_alta_parcial_sku = (
@@ -3320,38 +3319,57 @@ def calcular_motor_giro_sazonal(
                 & (del_trans > 0.0)
                 & (del_trans < entradas_transicao)
             )
-            consumo_em_alta = (entradas_transicao - del_trans).clip(lower=0.0).where(
+            consumo_parcial_prelim = (entradas_transicao - del_trans).clip(lower=0.0).where(
                 mask_alta_parcial_sku, 0.0
             )
 
-            # Calcula giro médio de referência nos dias sem anomalia para detectar picos anormais de MP (> 3x giro)
-            quedas_prelim = queda_direta.combine(consumo_em_alta, lambda s1, s2: s1.combine(s2, max))
+            # Calcula giro médio de referência nos dias sem NF (ou fallback giro_base) para auditar consumo de MP
+            quedas_prelim = queda_direta.combine(consumo_parcial_prelim, lambda s1, s2: s1.combine(s2, max))
             quedas_prelim = quedas_prelim.combine(saidas_transicao, lambda s1, s2: s1.combine(s2, max))
             dias_sem_nf_mask = entradas_transicao <= 0.0
             soma_sem_nf = quedas_prelim.where(dias_sem_nf_mask, 0.0).sum(axis=1)
             qtd_dias_sem_nf = dias_sem_nf_mask.sum(axis=1).replace(0, float("nan"))
+            mapa_giro_base_idx = (
+                dict(zip(df_prod["codigo"], df_prod["giro_base"]))
+                if (df_prod is not None and not df_prod.empty and "giro_base" in df_prod.columns)
+                else {}
+            )
+            giro_base_s = pd.Series(
+                [float(mapa_giro_base_idx.get(c, 0.0)) for c in entradas_transicao.index],
+                index=entradas_transicao.index,
+            )
             giro_ref_mp = (soma_sem_nf / qtd_dias_sem_nf).fillna(0.0)
+            giro_ref_mp = giro_ref_mp.where(giro_ref_mp > 0.0, giro_base_s)
+
+            consumo_bruto_mp_mat = (entradas_transicao - del_trans).clip(lower=0.0)
+            mask_mp_anomalia_nf = (
+                (entradas_transicao > 0.0)
+                & eh_mp_por_idx.values[:, None]
+                & (
+                    ((giro_ref_mp.values[:, None] > 0.0) & (consumo_bruto_mp_mat >= (giro_ref_mp.values[:, None] * 3.0)))
+                    | ((giro_ref_mp.values[:, None] <= 0.0) & ((del_trans + saidas_transicao) <= 0.0))
+                )
+            )
+            mask_mp_producao_normal = (
+                (entradas_transicao > 0.0)
+                & sem_saida_no_sku_dia
+                & eh_mp_por_idx.values[:, None]
+                & (~mask_mp_anomalia_nf)
+            )
+            consumo_em_alta = consumo_bruto_mp_mat.where(
+                mask_alta_parcial_sku | mask_mp_producao_normal, 0.0
+            )
 
             # Detecção de NF de Entrada sem reflexo no saldo ou consumo anormal de MP (> 3x giro médio)
             mask_nf_nao_refletida = (
                 (entradas_transicao > 0.0)
+                & (~eh_mp_por_idx.values[:, None])
                 & ((del_trans + saidas_transicao) <= 0.0)
-            )
-            mask_mp_consumo_3x = (
-                (entradas_transicao > 0.0)
-                & eh_mp_por_idx.values[:, None]
-                & (
-                    ((del_trans + saidas_transicao) <= 0.0)
-                    | (
-                        (giro_ref_mp.values[:, None] > 0.0)
-                        & ((entradas_transicao - del_trans) >= (giro_ref_mp.values[:, None] * 3.0))
-                    )
-                )
             )
             alertas_nf_dict = {}
             for cod_nf in entradas_transicao.index:
-                if eh_mp_por_idx.loc[cod_nf] and mask_mp_consumo_3x.loc[cod_nf].any():
-                    cols_mp_a = [c for c in cols_transicao if mask_mp_consumo_3x.loc[cod_nf, c]]
+                if eh_mp_por_idx.loc[cod_nf] and mask_mp_anomalia_nf.loc[cod_nf].any():
+                    cols_mp_a = [c for c in cols_transicao if mask_mp_anomalia_nf.loc[cod_nf, c]]
                     ult_dt_mp = cols_mp_a[-1]
                     qtd_nf_mp = float(entradas_transicao.loc[cod_nf, ult_dt_mp])
                     del_mp_v = float(del_trans.loc[cod_nf, ult_dt_mp])
@@ -3661,6 +3679,12 @@ with aba_dash:
                 index=0,
                 key="bi_escopo_op",
             )
+        incluir_zerados_inativados_bi = st.checkbox(
+            "⚪ Incluir Saldo = 0 c/ giro e produtos inativados no Siagri",
+            value=False,
+            key="chk_incluir_zerados_inativados_bi",
+            help="Desmarcado por padrão (igual à Aba 2): exibe apenas produtos ativos com saldo positivo na prateleira, evitando que itens inativados ou zerados poluam o Top Ruptura e a Disponibilidade Líderes.",
+        )
         df_bi_base, dias_hist_bi, peso_hist_bi = calcular_motor_giro_sazonal(
             df_estoque=df_estoque,
             df_historico=df_historico,
@@ -3681,6 +3705,12 @@ with aba_dash:
         else:
             df_bi["custo_unitario"] = 0.0
 
+        cods_ativos_no_estoque = (
+            set(df_estoque["codigo"].unique())
+            if (df_estoque is not None and not df_estoque.empty and "codigo" in df_estoque.columns)
+            else set()
+        )
+        df_bi["ativo_no_erp"] = df_bi["codigo"].isin(cods_ativos_no_estoque)
         df_bi["departamento"] = df_bi["codigo"].map(
             lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
         )
@@ -3702,6 +3732,13 @@ with aba_dash:
             )
         if deptos_sel_bi:
             df_bi = df_bi[df_bi["departamento"].isin(deptos_sel_bi)].copy()
+
+        # Preserva todos os códigos do escopo para auditoria financeira histórica (Seção 5)
+        cods_escopo_fin_bi = set(df_bi["codigo"].unique())
+
+        # Para os indicadores de ruptura e estoque ativo (Seções 1 a 4), respeita o filtro de Saldo = 0 / Inativados
+        if not incluir_zerados_inativados_bi:
+            df_bi = df_bi[df_bi["ativo_no_erp"] & (df_bi["saldo_atual"] > 0)].copy()
 
         with f_col3:
             meta_cobertura_bi = st.number_input(
@@ -4528,30 +4565,19 @@ with aba_dash:
                 st.info("Importe planilhas de Entradas e Saídas na Aba 7 para visualizar o fluxo financeiro diário.")
 
         st.markdown("---")
-        st.markdown("#### 5. Resultado Comercial Real: Faturamento, Margem Líquida Pós-Impostos & Comparativo Mês a Mês")
+        st.markdown("#### 5. Resultado Comercial Real: Margem Média por Grupo, Visão Mensal / Anual & Impostos")
         st.caption(
-            "Cruza o **Valor Total da Proposta** (4ª coluna da planilha de Saídas/Vendas) com o **Custo Unitário C1** e desconta "
-            "a alíquota estimada de impostos sobre vendas (**ICMS, PIS/COFINS, ST**) para revelar a margem real deixada por produto, departamento e mês."
+            "Cruza o **Valor Total da Proposta** (4ª coluna da planilha de Saídas/Vendas) com o **Custo Unitário C1** para calcular a "
+            "**Margem Média e o Markup** por **Grupo/Departamento**, **Mês a Mês** ou **Consolidado Anual**, com opção de ligar ou desligar impostos."
         )
-        imp_col1, imp_col2 = st.columns([1.2, 2.8])
-        with imp_col1:
-            aliq_imp_dash = st.number_input(
-                "🏛️ Alíquota Média de Impostos s/ Venda (%):",
-                min_value=0.0,
-                max_value=35.0,
-                value=0.0,
-                step=0.5,
-                key="bi_aliq_imposto_vendas",
-                help="Padrão 0% (maioria dos medicamentos veterinários isentos/monofásicos). Ajuste se desejar simular ICMS, PIS/COFINS ou ST.",
-            )
 
         df_sai_escopo = (
-            df_saidas[df_saidas["codigo"].isin(cods_escopo_bi)].copy()
+            df_saidas[df_saidas["codigo"].isin(cods_escopo_fin_bi)].copy()
             if (df_saidas is not None and not df_saidas.empty)
             else pd.DataFrame()
         )
         df_ent_escopo = (
-            df_entradas[df_entradas["codigo"].isin(cods_escopo_bi)].copy()
+            df_entradas[df_entradas["codigo"].isin(cods_escopo_fin_bi)].copy()
             if (df_entradas is not None and not df_entradas.empty)
             else pd.DataFrame()
         )
@@ -4559,25 +4585,29 @@ with aba_dash:
         if df_sai_escopo.empty and df_ent_escopo.empty:
             st.info(
                 "💡 Importe suas planilhas de **Saídas / Vendas Diárias** (com a 4ª coluna `Valor Total da Proposta`) na Aba 7 "
-                "para destravar a auditoria de Faturamento Bruto, Margem Líquida Pós-Impostos e o Comparativo Mês a Mês!"
+                "para destravar a auditoria de Faturamento Bruto, Margem Média por Grupo e o Comparativo Mensal / Anual!"
             )
         else:
             if not df_sai_escopo.empty:
                 if "valor_venda" not in df_sai_escopo.columns:
                     df_sai_escopo["valor_venda"] = 0.0
+                df_sai_escopo["departamento"] = df_sai_escopo["codigo"].map(
+                    lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
+                )
                 df_sai_escopo["custo_u"] = df_sai_escopo["codigo"].map(mapa_custo_bi).fillna(0.0)
                 df_sai_escopo["cmv_total"] = df_sai_escopo["qtd_saida"] * df_sai_escopo["custo_u"]
                 df_sai_escopo["fat_bruto"] = df_sai_escopo["valor_venda"].fillna(0.0)
-                df_sai_escopo["imposto_est"] = df_sai_escopo["fat_bruto"] * (float(aliq_imp_dash) / 100.0)
-                df_sai_escopo["lucro_bruto"] = df_sai_escopo["fat_bruto"] - df_sai_escopo["cmv_total"]
-                df_sai_escopo["lucro_liquido"] = df_sai_escopo["fat_bruto"] - df_sai_escopo["imposto_est"] - df_sai_escopo["cmv_total"]
                 df_sai_escopo["mes_ano"] = df_sai_escopo["data"].astype(str).str.slice(0, 7)
+                df_sai_escopo["ano"] = df_sai_escopo["data"].astype(str).str.slice(0, 4)
             else:
                 df_sai_escopo = pd.DataFrame(
-                    columns=["codigo", "descricao", "qtd_saida", "valor_venda", "data", "custo_u", "cmv_total", "fat_bruto", "imposto_est", "lucro_bruto", "lucro_liquido", "mes_ano"]
+                    columns=["codigo", "descricao", "departamento", "qtd_saida", "valor_venda", "data", "custo_u", "cmv_total", "fat_bruto", "mes_ano", "ano"]
                 )
 
             if not df_ent_escopo.empty:
+                df_ent_escopo["departamento"] = df_ent_escopo["codigo"].map(
+                    lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
+                )
                 df_ent_escopo["custo_u"] = df_ent_escopo["codigo"].map(mapa_custo_bi).fillna(0.0)
                 custo_est_nf = df_ent_escopo["qtd_entrada"] * df_ent_escopo["custo_u"]
                 if "valor_entrada" in df_ent_escopo.columns:
@@ -4586,32 +4616,163 @@ with aba_dash:
                 else:
                     df_ent_escopo["compras_nf_custo"] = custo_est_nf
                 df_ent_escopo["mes_ano"] = df_ent_escopo["data"].astype(str).str.slice(0, 7)
+                df_ent_escopo["ano"] = df_ent_escopo["data"].astype(str).str.slice(0, 4)
             else:
-                df_ent_escopo = pd.DataFrame(columns=["codigo", "descricao", "qtd_entrada", "data", "custo_u", "compras_nf_custo", "mes_ano"])
+                df_ent_escopo = pd.DataFrame(columns=["codigo", "descricao", "departamento", "qtd_entrada", "data", "custo_u", "compras_nf_custo", "mes_ano", "ano"])
 
-            df_sai_com_fat = df_sai_escopo[df_sai_escopo["fat_bruto"] > 0].copy()
-            fat_total_periodo = float(df_sai_com_fat["fat_bruto"].sum())
-            cmv_das_vendas_fat = float(df_sai_com_fat["cmv_total"].sum())
-            imp_total_periodo = float(df_sai_com_fat["imposto_est"].sum())
+            deptos_disponiveis_margem = sorted(
+                list(
+                    (set(df_sai_escopo["departamento"].unique()) if not df_sai_escopo.empty else set())
+                    | (set(df_ent_escopo["departamento"].unique()) if not df_ent_escopo.empty else set())
+                )
+            )
+            meses_disponiveis_margem = sorted(
+                [
+                    m for m in (
+                        (set(df_sai_escopo["mes_ano"].unique()) if not df_sai_escopo.empty else set())
+                        | (set(df_ent_escopo["mes_ano"].unique()) if not df_ent_escopo.empty else set())
+                    )
+                    if str(m).strip() and len(str(m).strip()) >= 7
+                ],
+                reverse=True,
+            )
+            anos_disponiveis_margem = sorted(
+                [
+                    a for a in (
+                        (set(df_sai_escopo["ano"].unique()) if not df_sai_escopo.empty else set())
+                        | (set(df_ent_escopo["ano"].unique()) if not df_ent_escopo.empty else set())
+                    )
+                    if str(a).strip() and len(str(a).strip()) == 4
+                ],
+                reverse=True,
+            )
+
+            mg_f1, mg_f2, mg_f3, mg_f4 = st.columns([1.8, 1.2, 1.0, 1.0])
+            with mg_f1:
+                deptos_sel_margem = st.multiselect(
+                    "📂 Filtrar Grupo / Departamento (ex: Medicamentos):",
+                    options=deptos_disponiveis_margem,
+                    default=[],
+                    key="bi_deptos_margem_sec5",
+                    help="Selecione um ou mais grupos (ex: 50 - Veterinária & Reprodução) para apurar a margem média exclusiva daquele grupo. Deixe vazio para ver todos.",
+                )
+            with mg_f2:
+                visao_tempo_margem = st.selectbox(
+                    "📅 Período de Apuração:",
+                    options=[
+                        "📅 Todos os Meses (Evolução Mensal)",
+                        "🗓️ Mês Específico",
+                        "📆 Consolidado Anual",
+                    ],
+                    index=0,
+                    key="bi_visao_tempo_margem",
+                )
+            with mg_f3:
+                if visao_tempo_margem == "🗓️ Mês Específico":
+                    mes_escolhido_margem = st.selectbox(
+                        "Selecione o Mês:",
+                        options=meses_disponiveis_margem if meses_disponiveis_margem else ["-"],
+                        key="bi_mes_especifico_margem",
+                    )
+                    ano_escolhido_margem = None
+                elif visao_tempo_margem == "📆 Consolidado Anual":
+                    ano_escolhido_margem = st.selectbox(
+                        "Selecione o Ano:",
+                        options=["Todos os Anos"] + anos_disponiveis_margem,
+                        key="bi_ano_especifico_margem",
+                    )
+                    mes_escolhido_margem = None
+                else:
+                    mes_escolhido_margem = None
+                    ano_escolhido_margem = None
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    st.caption(f"🗓️ {len(meses_disponiveis_margem)} mês(es) na base")
+            with mg_f4:
+                aplicar_imposto_margem = st.checkbox(
+                    "🏛️ Descontar Impostos",
+                    value=False,
+                    key="bi_chk_aplicar_imposto",
+                    help="Desmarcado: calcula a margem comercial pura (Faturamento - CMV). Marcado: desconta a alíquota % informada abaixo.",
+                )
+                aliq_imp_dash = st.number_input(
+                    "Alíquota (%):",
+                    min_value=0.0,
+                    max_value=35.0,
+                    value=6.0,
+                    step=0.5,
+                    disabled=not aplicar_imposto_margem,
+                    key="bi_aliq_imposto_vendas",
+                )
+
+            aliq_imp_efetiva = float(aliq_imp_dash) if aplicar_imposto_margem else 0.0
+
+            # Aplica os filtros da Seção 5 (Grupo + Período)
+            df_sai_sec5 = df_sai_escopo.copy()
+            df_ent_sec5 = df_ent_escopo.copy()
+            if deptos_sel_margem:
+                if not df_sai_sec5.empty:
+                    df_sai_sec5 = df_sai_sec5[df_sai_sec5["departamento"].isin(deptos_sel_margem)].copy()
+                if not df_ent_sec5.empty:
+                    df_ent_sec5 = df_ent_sec5[df_ent_sec5["departamento"].isin(deptos_sel_margem)].copy()
+
+            if visao_tempo_margem == "🗓️ Mês Específico" and mes_escolhido_margem and mes_escolhido_margem != "-":
+                if not df_sai_sec5.empty:
+                    df_sai_sec5 = df_sai_sec5[df_sai_sec5["mes_ano"] == mes_escolhido_margem].copy()
+                if not df_ent_sec5.empty:
+                    df_ent_sec5 = df_ent_sec5[df_ent_sec5["mes_ano"] == mes_escolhido_margem].copy()
+            elif visao_tempo_margem == "📆 Consolidado Anual" and ano_escolhido_margem and ano_escolhido_margem != "Todos os Anos":
+                if not df_sai_sec5.empty:
+                    df_sai_sec5 = df_sai_sec5[df_sai_sec5["ano"] == ano_escolhido_margem].copy()
+                if not df_ent_sec5.empty:
+                    df_ent_sec5 = df_ent_sec5[df_ent_sec5["ano"] == ano_escolhido_margem].copy()
+
+            if not df_sai_sec5.empty:
+                df_sai_sec5["imposto_est"] = df_sai_sec5["fat_bruto"] * (aliq_imp_efetiva / 100.0)
+                df_sai_sec5["lucro_bruto"] = df_sai_sec5["fat_bruto"] - df_sai_sec5["cmv_total"]
+                df_sai_sec5["lucro_liquido"] = df_sai_sec5["fat_bruto"] - df_sai_sec5["imposto_est"] - df_sai_sec5["cmv_total"]
+            else:
+                df_sai_sec5["imposto_est"] = pd.Series(dtype=float)
+                df_sai_sec5["lucro_bruto"] = pd.Series(dtype=float)
+                df_sai_sec5["lucro_liquido"] = pd.Series(dtype=float)
+
+            df_sai_com_fat = df_sai_sec5[df_sai_sec5["fat_bruto"] > 0].copy() if not df_sai_sec5.empty else pd.DataFrame()
+            fat_total_periodo = float(df_sai_com_fat["fat_bruto"].sum()) if not df_sai_com_fat.empty else 0.0
+            cmv_das_vendas_fat = float(df_sai_com_fat["cmv_total"].sum()) if not df_sai_com_fat.empty else 0.0
+            imp_total_periodo = float(df_sai_com_fat["imposto_est"].sum()) if not df_sai_com_fat.empty else 0.0
             lucro_bruto_periodo = fat_total_periodo - cmv_das_vendas_fat
             lucro_liq_periodo = fat_total_periodo - imp_total_periodo - cmv_das_vendas_fat
             margem_bruta_pct = ((lucro_bruto_periodo / fat_total_periodo) * 100.0) if fat_total_periodo > 0 else 0.0
             margem_liq_pct = ((lucro_liq_periodo / fat_total_periodo) * 100.0) if fat_total_periodo > 0 else 0.0
             markup_medio_pct = (((fat_total_periodo / cmv_das_vendas_fat) - 1.0) * 100.0) if cmv_das_vendas_fat > 0 else 0.0
 
-            with imp_col2:
-                if fat_total_periodo > 0:
-                    st.info(
-                        f"📈 **Resumo Faturado no Período:** Receita Bruta: **{formatar_moeda_br(fat_total_periodo)}**  |  "
-                        f"CMV (C1): **{formatar_moeda_br(cmv_das_vendas_fat)}**  |  "
-                        f"Impostos ({formatar_num_br(aliq_imp_dash, 1)}%): **{formatar_moeda_br(imp_total_periodo)}**  |  "
-                        f"Lucro Líquido Real: **{formatar_moeda_br(lucro_liq_periodo)} ({formatar_pct_br(margem_liq_pct, 1)})**"
-                    )
-                else:
-                    st.warning(
-                        "ℹ️ As saídas registradas neste filtro ainda não possuem a 4ª coluna (`Valor Total da Proposta` > R$ 0,00). "
-                        "Ao subir planilhas como `Saida venda 12-11-2026.xlsx` na Aba 7, o faturamento e as margens aparecerão aqui automaticamente!"
-                    )
+            rotulo_escopo_mg = ", ".join(deptos_sel_margem) if deptos_sel_margem else "Todos os Grupos"
+            rotulo_tempo_mg = (
+                f"Mês {mes_escolhido_margem}"
+                if (visao_tempo_margem == "🗓️ Mês Específico" and mes_escolhido_margem)
+                else (
+                    f"Ano {ano_escolhido_margem}"
+                    if (visao_tempo_margem == "📆 Consolidado Anual" and ano_escolhido_margem)
+                    else "Período Completo"
+                )
+            )
+            if fat_total_periodo > 0:
+                txt_imp_res = (
+                    f"Impostos ({formatar_num_br(aliq_imp_efetiva, 1)}%): **{formatar_moeda_br(imp_total_periodo)}**"
+                    if aplicar_imposto_margem
+                    else "Impostos: **Desativado (0%)**"
+                )
+                st.info(
+                    f"📈 **Margem Média ({rotulo_escopo_mg} | {rotulo_tempo_mg}):** "
+                    f"Faturamento: **{formatar_moeda_br(fat_total_periodo)}**  |  "
+                    f"CMV (C1): **{formatar_moeda_br(cmv_das_vendas_fat)}**  |  "
+                    f"{txt_imp_res}  |  "
+                    f"Margem Média: **{formatar_pct_br(margem_liq_pct, 1)}** (Markup: +{formatar_num_br(markup_medio_pct, 1)}%)"
+                )
+            else:
+                st.warning(
+                    "ℹ️ As saídas registradas neste filtro ainda não possuem a 4ª coluna (`Valor Total da Proposta` > R$ 0,00). "
+                    "Ao subir planilhas como `Saida venda 12-11-2026.xlsx` na Aba 7, o faturamento e as margens aparecerão aqui automaticamente!"
+                )
 
             rm1, rm2, rm3, rm4, rm5 = st.columns(5)
             rm1.metric(
@@ -4630,49 +4791,54 @@ with aba_dash:
                 f"Margem Bruta: {formatar_pct_br(margem_bruta_pct, 1)}",
             )
             rm4.metric(
-                f"🏛️ Impostos ({formatar_num_br(aliq_imp_dash, 1)}%)",
+                f"🏛️ Impostos ({formatar_num_br(aliq_imp_efetiva, 1)}%)",
                 formatar_moeda_br(imp_total_periodo),
-                "ICMS + PIS/COFINS + ST",
+                "Ativado" if aplicar_imposto_margem else "Desativado (0%)",
             )
             rm5.metric(
                 "💎 Lucro Líquido Real",
                 formatar_moeda_br(lucro_liq_periodo),
-                f"Margem Líq.: {formatar_pct_br(margem_liq_pct, 1)}",
+                f"Margem Média: {formatar_pct_br(margem_liq_pct, 1)}",
                 delta_color="normal" if lucro_liq_periodo >= 0 else "inverse",
             )
 
-            tab_mom, tab_sku_lucro, tab_sku_alerta = st.tabs(
+            tab_mom, tab_grp_mg, tab_sku_lucro, tab_sku_alerta = st.tabs(
                 [
-                    "📅 Comparativo Mês a Mês (Compras NF × CMV × Faturamento × Lucro)",
+                    "📆 Consolidado Anual (Compras × CMV × Faturamento × Lucro)" if visao_tempo_margem == "📆 Consolidado Anual" else "📅 Comparativo Mês a Mês (Compras NF × CMV × Faturamento × Lucro)",
+                    "📊 Margem Média por Grupo / Departamento",
                     "🏆 Top Produtos Campeões de Lucro Líquido",
-                    "⚠️ Auditoria de Margem Baixa ou Negativa Pós-Impostos",
+                    "⚠️ Auditoria de Margem Baixa ou Negativa",
                 ]
             )
 
             with tab_mom:
-                meses_todos = sorted(
+                col_chave_tempo = "ano" if visao_tempo_margem == "📆 Consolidado Anual" else "mes_ano"
+                rotulo_col_tempo = "Ano" if visao_tempo_margem == "📆 Consolidado Anual" else "Mês/Ano"
+                tam_min_chave = 4 if visao_tempo_margem == "📆 Consolidado Anual" else 7
+
+                periodos_todos = sorted(
                     list(
-                        (set(df_sai_escopo["mes_ano"].unique()) if not df_sai_escopo.empty else set())
-                        | (set(df_ent_escopo["mes_ano"].unique()) if not df_ent_escopo.empty else set())
+                        (set(df_sai_sec5[col_chave_tempo].unique()) if not df_sai_sec5.empty else set())
+                        | (set(df_ent_sec5[col_chave_tempo].unique()) if not df_ent_sec5.empty else set())
                     )
                 )
-                meses_todos = [m for m in meses_todos if str(m).strip() and len(str(m).strip()) >= 7]
-                if not meses_todos:
-                    st.info("Ainda não há meses registrados em Entradas ou Saídas.")
+                periodos_todos = [p for p in periodos_todos if str(p).strip() and len(str(p).strip()) >= tam_min_chave]
+                if not periodos_todos:
+                    st.info("Ainda não há períodos registrados para o filtro selecionado.")
                 else:
-                    df_mom = pd.DataFrame({"mes_ano": meses_todos})
-                    if not df_ent_escopo.empty:
-                        grp_e_m = df_ent_escopo.groupby("mes_ano", as_index=False).agg(
+                    df_mom = pd.DataFrame({col_chave_tempo: periodos_todos})
+                    if not df_ent_sec5.empty:
+                        grp_e_m = df_ent_sec5.groupby(col_chave_tempo, as_index=False).agg(
                             compras_nf=("compras_nf_custo", "sum"),
                             qtd_ent=("qtd_entrada", "sum"),
                         )
-                        df_mom = df_mom.merge(grp_e_m, on="mes_ano", how="left")
+                        df_mom = df_mom.merge(grp_e_m, on=col_chave_tempo, how="left")
                     else:
                         df_mom["compras_nf"] = 0.0
                         df_mom["qtd_ent"] = 0.0
 
-                    if not df_sai_escopo.empty:
-                        grp_s_m = df_sai_escopo.groupby("mes_ano", as_index=False).agg(
+                    if not df_sai_sec5.empty:
+                        grp_s_m = df_sai_sec5.groupby(col_chave_tempo, as_index=False).agg(
                             dias_mov=("data", "nunique"),
                             qtd_sai=("qtd_saida", "sum"),
                             cmv_sai=("cmv_total", "sum"),
@@ -4681,12 +4847,12 @@ with aba_dash:
                             lucro_bruto=("lucro_bruto", "sum"),
                             lucro_liq=("lucro_liquido", "sum"),
                         )
-                        df_mom = df_mom.merge(grp_s_m, on="mes_ano", how="left")
+                        df_mom = df_mom.merge(grp_s_m, on=col_chave_tempo, how="left")
                     else:
                         for c_z in ["dias_mov", "qtd_sai", "cmv_sai", "faturamento", "impostos", "lucro_bruto", "lucro_liq"]:
                             df_mom[c_z] = 0.0
 
-                    df_mom = df_mom.fillna(0.0).sort_values("mes_ano").reset_index(drop=True)
+                    df_mom = df_mom.fillna(0.0).sort_values(col_chave_tempo).reset_index(drop=True)
                     df_mom["margem_bruta_pct"] = [
                         ((lb / ft) * 100.0) if ft > 0 else 0.0
                         for lb, ft in zip(df_mom["lucro_bruto"], df_mom["faturamento"])
@@ -4694,6 +4860,10 @@ with aba_dash:
                     df_mom["margem_liq_pct"] = [
                         ((ll / ft) * 100.0) if ft > 0 else 0.0
                         for ll, ft in zip(df_mom["lucro_liq"], df_mom["faturamento"])
+                    ]
+                    df_mom["markup_pct"] = [
+                        (((ft / cmv) - 1.0) * 100.0) if (ft > 0 and cmv > 0) else 0.0
+                        for ft, cmv in zip(df_mom["faturamento"], df_mom["cmv_sai"])
                     ]
                     base_cresc = df_mom["faturamento"] if float(df_mom["faturamento"].sum()) > 0 else df_mom["cmv_sai"]
                     cresc_vals = [0.0]
@@ -4705,7 +4875,7 @@ with aba_dash:
 
                     df_mom_exib = df_mom.rename(
                         columns={
-                            "mes_ano": "Mês/Ano",
+                            col_chave_tempo: rotulo_col_tempo,
                             "dias_mov": "Dias c/ Saída",
                             "compras_nf": "Compras NF a Custo (R$)",
                             "cmv_sai": "CMV das Saídas (R$)",
@@ -4715,11 +4885,12 @@ with aba_dash:
                             "lucro_liq": "Lucro Líquido Real (R$)",
                             "margem_bruta_pct": "Margem Bruta (%)",
                             "margem_liq_pct": "Margem Líquida (%)",
-                            "cresc_mom_pct": "Evolução Mês a Mês (%)",
+                            "markup_pct": "Markup Médio (%)",
+                            "cresc_mom_pct": "Evolução (%)",
                         }
                     )[
                         [
-                            "Mês/Ano",
+                            rotulo_col_tempo,
                             "Dias c/ Saída",
                             "Compras NF a Custo (R$)",
                             "CMV das Saídas (R$)",
@@ -4729,7 +4900,8 @@ with aba_dash:
                             "Lucro Líquido Real (R$)",
                             "Margem Bruta (%)",
                             "Margem Líquida (%)",
-                            "Evolução Mês a Mês (%)",
+                            "Markup Médio (%)",
+                            "Evolução (%)",
                         ]
                     ]
                     st.dataframe(
@@ -4745,12 +4917,105 @@ with aba_dash:
                                 "Lucro Líquido Real (R$)": formatar_moeda_br,
                                 "Margem Bruta (%)": lambda x: formatar_pct_br(x, 1),
                                 "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
-                                "Evolução Mês a Mês (%)": lambda x: "-" if (pd.isna(x) or float(x) == 0.0) else formatar_pct_br(x, 1, com_sinal=True),
+                                "Markup Médio (%)": lambda x: formatar_pct_br(x, 1, com_sinal=True),
+                                "Evolução (%)": lambda x: "-" if (pd.isna(x) or float(x) == 0.0) else formatar_pct_br(x, 1, com_sinal=True),
                             },
                             colunas_esquerda=[],
                         ),
                         use_container_width=True,
                         hide_index=True,
+                    )
+
+            with tab_grp_mg:
+                if df_sai_com_fat.empty:
+                    st.info("Importe uma planilha de Saídas com a 4ª coluna (`Valor Total da Proposta`) para visualizar a margem média por grupo.")
+                else:
+                    grp_dep_mg = (
+                        df_sai_com_fat.groupby("departamento", as_index=False)
+                        .agg(
+                            skus_vend=("codigo", "nunique"),
+                            qtd_vend=("qtd_saida", "sum"),
+                            faturamento=("fat_bruto", "sum"),
+                            cmv_total=("cmv_total", "sum"),
+                            impostos=("imposto_est", "sum"),
+                            lucro_bruto=("lucro_bruto", "sum"),
+                            lucro_liq=("lucro_liquido", "sum"),
+                        )
+                        .sort_values("faturamento", ascending=False)
+                        .reset_index(drop=True)
+                    )
+                    tot_fat_grp = float(grp_dep_mg["faturamento"].sum())
+                    grp_dep_mg["part_fat_pct"] = (grp_dep_mg["faturamento"] / max(tot_fat_grp, 1.0)) * 100.0
+                    grp_dep_mg["margem_bruta_pct"] = [
+                        ((lb / ft) * 100.0) if ft > 0 else 0.0
+                        for lb, ft in zip(grp_dep_mg["lucro_bruto"], grp_dep_mg["faturamento"])
+                    ]
+                    grp_dep_mg["margem_liq_pct"] = [
+                        ((ll / ft) * 100.0) if ft > 0 else 0.0
+                        for ll, ft in zip(grp_dep_mg["lucro_liq"], grp_dep_mg["faturamento"])
+                    ]
+                    grp_dep_mg["markup_pct"] = [
+                        (((ft / cmv) - 1.0) * 100.0) if (ft > 0 and cmv > 0) else 0.0
+                        for ft, cmv in zip(grp_dep_mg["faturamento"], grp_dep_mg["cmv_total"])
+                    ]
+                    df_grp_mg_exib = grp_dep_mg.rename(
+                        columns={
+                            "departamento": "Grupo / Departamento",
+                            "skus_vend": "SKUs",
+                            "qtd_vend": "Qtd. Vendida",
+                            "faturamento": "Faturamento (R$)",
+                            "part_fat_pct": "% Fat.",
+                            "cmv_total": "CMV Total (R$)",
+                            "impostos": "Impostos Est. (R$)",
+                            "lucro_bruto": "Lucro Bruto (R$)",
+                            "lucro_liq": "Lucro Líquido Real (R$)",
+                            "margem_bruta_pct": "Margem Bruta (%)",
+                            "margem_liq_pct": "Margem Líquida (%)",
+                            "markup_pct": "Markup Médio (%)",
+                        }
+                    )[
+                        [
+                            "Grupo / Departamento",
+                            "SKUs",
+                            "Qtd. Vendida",
+                            "Faturamento (R$)",
+                            "% Fat.",
+                            "CMV Total (R$)",
+                            "Impostos Est. (R$)",
+                            "Lucro Bruto (R$)",
+                            "Lucro Líquido Real (R$)",
+                            "Margem Bruta (%)",
+                            "Margem Líquida (%)",
+                            "Markup Médio (%)",
+                        ]
+                    ]
+                    st.dataframe(
+                        estilizar_tabela_br(
+                            df_grp_mg_exib,
+                            formatadores={
+                                "SKUs": formatar_num_br,
+                                "Qtd. Vendida": formatar_qtd_br,
+                                "Faturamento (R$)": formatar_moeda_br,
+                                "% Fat.": lambda x: formatar_pct_br(x, 1),
+                                "CMV Total (R$)": formatar_moeda_br,
+                                "Impostos Est. (R$)": formatar_moeda_br,
+                                "Lucro Bruto (R$)": formatar_moeda_br,
+                                "Lucro Líquido Real (R$)": formatar_moeda_br,
+                                "Margem Bruta (%)": lambda x: formatar_pct_br(x, 1),
+                                "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
+                                "Markup Médio (%)": lambda x: formatar_pct_br(x, 1, com_sinal=True),
+                            },
+                            colunas_esquerda=["Grupo / Departamento"],
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.download_button(
+                        label="📥 Baixar Margem Média por Grupo / Departamento (.xlsx)",
+                        data=gerar_excel_relatorio(df_grp_mg_exib, "Margem_Por_Grupo"),
+                        file_name=f"Margem_Media_Grupos_Esteio_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_margem_grupos_bi",
                     )
 
             with tab_sku_lucro:
@@ -4761,6 +5026,7 @@ with aba_dash:
                         df_sai_com_fat.groupby("codigo", as_index=False)
                         .agg(
                             descricao=("descricao", "last"),
+                            departamento=("departamento", "last"),
                             qtd_vendida=("qtd_saida", "sum"),
                             custo_u=("custo_u", "last"),
                             cmv_total=("cmv_total", "sum"),
@@ -4778,6 +5044,7 @@ with aba_dash:
                         columns={
                             "codigo": "Código",
                             "descricao": "Descrição",
+                            "departamento": "Grupo",
                             "qtd_vendida": "Qtd. Vendida",
                             "custo_u": "Custo Unit. C1 (R$)",
                             "preco_medio_venda": "Preço Médio Venda (R$)",
@@ -4792,6 +5059,7 @@ with aba_dash:
                         [
                             "Código",
                             "Descrição",
+                            "Grupo",
                             "Qtd. Vendida",
                             "Custo Unit. C1 (R$)",
                             "Preço Médio Venda (R$)",
@@ -4817,7 +5085,7 @@ with aba_dash:
                                 "Margem Bruta (%)": lambda x: formatar_pct_br(x, 1),
                                 "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
                             },
-                            colunas_esquerda=["Descrição"],
+                            colunas_esquerda=["Descrição", "Grupo"],
                         ),
                         use_container_width=True,
                         hide_index=True,
@@ -4839,7 +5107,7 @@ with aba_dash:
                         "lucro_liq", ascending=True
                     ).reset_index(drop=True)
                     if df_alerta_mg.empty:
-                        st.success(f"✅ Excelente! Nenhum produto vendido com custo cadastrado teve margem líquida inferior a 10% (após descontar {formatar_num_br(aliq_imp_dash, 1)}% de impostos).")
+                        st.success(f"✅ Excelente! Nenhum produto vendido com custo cadastrado teve margem líquida inferior a 10% (impostos: {formatar_num_br(aliq_imp_efetiva, 1)}%).")
                     else:
                         df_alerta_mg["status_margem"] = [
                             "🔴 Prejuízo Líquido (Abaixo de Custo + Impostos)" if float(m) < 0.0 else "🟠 Margem Comprimida (< 10% Líq.)"
@@ -4849,6 +5117,7 @@ with aba_dash:
                             columns={
                                 "codigo": "Código",
                                 "descricao": "Descrição",
+                                "departamento": "Grupo",
                                 "status_margem": "Status de Margem",
                                 "qtd_vendida": "Qtd. Vendida",
                                 "custo_u": "Custo Unit. C1 (R$)",
@@ -4861,6 +5130,7 @@ with aba_dash:
                             [
                                 "Código",
                                 "Descrição",
+                                "Grupo",
                                 "Status de Margem",
                                 "Qtd. Vendida",
                                 "Custo Unit. C1 (R$)",
@@ -4881,7 +5151,7 @@ with aba_dash:
                                     "Resultado Líquido (R$)": formatar_moeda_br,
                                     "Margem Líquida (%)": lambda x: formatar_pct_br(x, 1),
                                 },
-                                colunas_esquerda=["Descrição", "Status de Margem"],
+                                colunas_esquerda=["Descrição", "Grupo", "Status de Margem"],
                             ),
                             use_container_width=True,
                             hide_index=True,
@@ -5907,42 +6177,181 @@ with aba1:
                                 st.error(f"❌ Erro ao remover exceção: {e_rm_sk}")
 
         st.markdown("---")
-        st.markdown("##### 3. Definir Produtos de Matéria-Prima de Fábrica (MP — Saída por Ordem de Produção)")
+        st.markdown("##### 3. Definir Produtos de Matéria-Prima / Produção de Ração (MP — Saída por Ordem de Produção)")
         st.caption(
-            "Por padrão, o sistema considera **Matéria-Prima de Fábrica** os itens cuja descrição começa com **`MP `** ou **`ME `** "
-            "(não mais todo o prefixo `26`, pois há itens de revenda da loja que começam com `26`). "
-            "Se houver algum outro insumo da fábrica com nome diferente (ex: sal, ureia, núcleo), marque-o abaixo:"
+            "Itens de transformação para produção de ração não aparecem no relatório de Saídas Faturadas — o sistema apura o consumo deles "
+            "pela equação fechada de fábrica (**Estoque Inicial + Entrada NF − Estoque Final**). "
+            "Use os filtros abaixo para localizar insumos da fábrica (inclusive os **💡 Sugeridos pela IA**, que tiveram queda de estoque sem venda faturada) "
+            "e marque a caixinha **🏭 É MP / Produção?** diretamente na tabela."
         )
         if not df_cat_grp.empty:
-            opcoes_sku_mp = [
-                f"[{r['codigo']}] {r['descricao']} ({'🏭 MP Fábrica' if identificar_produto_mp(r['codigo'], r['descricao'], grupos_sku_custom, mp_custom_map) else '🏪 Loja Varejo'})"
-                for _, r in df_cat_grp.sort_values("descricao").iterrows()
-            ]
-            cods_sku_mp_ord = df_cat_grp.sort_values("descricao")["codigo"].tolist()
-            cmp1, cmp2, cmp3 = st.columns([2.0, 1.0, 1.0])
-            with cmp1:
-                idx_mp_sel = st.multiselect(
-                    "Selecione os produtos:",
-                    options=range(len(opcoes_sku_mp)),
-                    format_func=lambda i: opcoes_sku_mp[i],
-                    key="sel_skus_flag_mp",
+            # Apura quedas no histórico vs. saídas faturadas para sugerir automaticamente itens de transformação/produção
+            mapa_qtd_sai_mp = (
+                df_saidas_bruto.groupby("codigo")["qtd_saida"].sum().to_dict()
+                if (df_saidas_bruto is not None and not df_saidas_bruto.empty)
+                else {}
+            )
+            mapa_queda_hist_mp = {}
+            if df_historico_bruto is not None and not df_historico_bruto.empty and "data" in df_historico_bruto.columns:
+                datas_h_mp = sorted(df_historico_bruto["data"].dropna().unique())
+                if len(datas_h_mp) >= 2:
+                    piv_mp = (
+                        df_historico_bruto.drop_duplicates(subset=["codigo", "data"], keep="last")
+                        .pivot(index="codigo", columns="data", values="saldo_geral")
+                        .reindex(columns=datas_h_mp)
+                        .fillna(0.0)
+                    )
+                    quedas_h_mp = (-piv_mp.diff(axis=1).iloc[:, 1:]).clip(lower=0.0).sum(axis=1)
+                    mapa_queda_hist_mp = quedas_h_mp.to_dict()
+
+            linhas_mp_tabela = []
+            for _, r_mp in df_cat_grp.sort_values("descricao").iterrows():
+                c_mp = str(r_mp["codigo"]).strip()
+                d_mp = str(r_mp["descricao"]).strip()
+                dep_mp = identificar_departamento_sku(c_mp, grupos_pref_custom, grupos_sku_custom)
+                eh_mp_at = identificar_produto_mp(c_mp, d_mp, grupos_sku_custom, mp_custom_map)
+                q_est_b = float(mapa_queda_hist_mp.get(c_mp, 0.0))
+                q_sai_f = float(mapa_qtd_sai_mp.get(c_mp, 0.0))
+                sug_ia_mp = (not eh_mp_at) and (q_est_b > 0.0) and (q_sai_f <= 0.0) and (c_mp not in mp_custom_map)
+                if eh_mp_at:
+                    if c_mp in mp_custom_map:
+                        diag_mp = "🏭 MP Ativo (Marcado Manualmente)"
+                    else:
+                        diag_mp = "🏭 MP Ativo (Automático por Nome MP/ME)"
+                elif sug_ia_mp:
+                    diag_mp = "💡 Sugerido IA (Queda no estoque s/ saída faturada)"
+                else:
+                    diag_mp = "🏪 Loja Varejo"
+
+                linhas_mp_tabela.append(
+                    {
+                        "codigo": c_mp,
+                        "descricao": d_mp,
+                        "departamento": dep_mp,
+                        "eh_mp": bool(eh_mp_at),
+                        "sugerido_ia": bool(sug_ia_mp),
+                        "diagnostico_mp": diag_mp,
+                        "baixa_estoque": q_est_b,
+                        "saida_faturada": q_sai_f,
+                    }
                 )
-            with cmp2:
-                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            df_mp_catalogo = pd.DataFrame(linhas_mp_tabela)
+            qtd_mp_ativos_tot = int(df_mp_catalogo["eh_mp"].sum())
+            qtd_sug_ia_mp = int(df_mp_catalogo["sugerido_ia"].sum())
+
+            f_mp1, f_mp2, f_mp3 = st.columns([1.4, 1.3, 1.3])
+            with f_mp1:
+                busca_mp_txt = st.text_input(
+                    "🔍 Buscar insumo / produto (código ou nome):",
+                    placeholder="Ex: milho, sorgo, bicarbonato, 2601...",
+                    key="busca_txt_mp_aba7",
+                )
+            with f_mp2:
+                deptos_mp_opcoes = ["Todos os Grupos"] + sorted(df_mp_catalogo["departamento"].unique())
+                depto_mp_sel = st.selectbox(
+                    "📂 Filtrar por Grupo / Prefixo:",
+                    options=deptos_mp_opcoes,
+                    index=0,
+                    key="sel_depto_mp_aba7",
+                )
+            with f_mp3:
+                status_mp_filtro = st.selectbox(
+                    "🏷️ Filtrar Classificação:",
+                    options=[
+                        f"🏭 Marcados como MP ({formatar_num_br(qtd_mp_ativos_tot)}) + 💡 Sugeridos IA ({formatar_num_br(qtd_sug_ia_mp)})",
+                        f"🏭 Apenas Marcados como MP ({formatar_num_br(qtd_mp_ativos_tot)})",
+                        f"💡 Apenas Sugeridos pela IA ({formatar_num_br(qtd_sug_ia_mp)})",
+                        "📋 Todos os Produtos do Catálogo",
+                        "🏪 Apenas Loja Varejo",
+                    ],
+                    index=0,
+                    key="sel_status_mp_aba7",
+                )
+
+            df_mp_view = df_mp_catalogo.copy()
+            if depto_mp_sel != "Todos os Grupos":
+                df_mp_view = df_mp_view[df_mp_view["departamento"] == depto_mp_sel].copy()
+            if status_mp_filtro.startswith("🏭 Marcados como MP"):
+                df_mp_view = df_mp_view[df_mp_view["eh_mp"] | df_mp_view["sugerido_ia"]].copy()
+            elif status_mp_filtro.startswith("🏭 Apenas Marcados"):
+                df_mp_view = df_mp_view[df_mp_view["eh_mp"]].copy()
+            elif status_mp_filtro.startswith("💡 Apenas Sugeridos"):
+                df_mp_view = df_mp_view[df_mp_view["sugerido_ia"]].copy()
+            elif status_mp_filtro.startswith("🏪 Apenas Loja"):
+                df_mp_view = df_mp_view[~df_mp_view["eh_mp"]].copy()
+
+            if busca_mp_txt and busca_mp_txt.strip():
+                t_mp = busca_mp_txt.lower().strip()
+                df_mp_view = df_mp_view[
+                    df_mp_view["codigo"].str.lower().str.contains(t_mp, na=False, regex=False)
+                    | df_mp_view["descricao"].str.lower().str.contains(t_mp, na=False, regex=False)
+                ].copy()
+
+            df_mp_view = df_mp_view.sort_values(
+                ["eh_mp", "sugerido_ia", "baixa_estoque", "descricao"],
+                ascending=[False, False, False, True],
+            ).reset_index(drop=True)
+
+            st.caption(
+                f"Exibindo **{formatar_num_br(len(df_mp_view))} produto(s)** | "
+                f"Total marcado como MP na empresa: **{formatar_num_br(qtd_mp_ativos_tot)}** | "
+                f"Sugeridos pela IA: **{formatar_num_br(qtd_sug_ia_mp)}**"
+            )
+
+            df_mp_ed_in = pd.DataFrame(
+                {
+                    "eh_mp": df_mp_view["eh_mp"].values,
+                    "Cód.": df_mp_view["codigo"].values,
+                    "Descrição": df_mp_view["descricao"].values,
+                    "Grupo": df_mp_view["departamento"].values,
+                    "Diagnóstico & Origem": df_mp_view["diagnostico_mp"].values,
+                    "Baixa Estoque": [formatar_qtd_br(v) for v in df_mp_view["baixa_estoque"].values],
+                    "Saída Faturada": [formatar_qtd_br(v) for v in df_mp_view["saida_faturada"].values],
+                }
+            )
+            ed_mp_out = st.data_editor(
+                df_mp_ed_in,
+                use_container_width=True,
+                hide_index=True,
+                height=340,
+                key="editor_tabela_mp_aba7",
+                disabled=["Cód.", "Descrição", "Grupo", "Diagnóstico & Origem", "Baixa Estoque", "Saída Faturada"],
+                column_config={
+                    "eh_mp": st.column_config.CheckboxColumn(
+                        "🏭 MP?",
+                        help="Marque se este produto é Matéria-Prima / Insumo de transformação da fábrica de ração.",
+                        default=False,
+                        width="small",
+                    ),
+                    "Cód.": st.column_config.TextColumn("Cód.", width="small"),
+                    "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+                    "Grupo": st.column_config.TextColumn("Grupo", width="medium"),
+                    "Diagnóstico & Origem": st.column_config.TextColumn("Diagnóstico & Origem", width="medium"),
+                    "Baixa Estoque": st.column_config.TextColumn("Baixa Estoque", help="Total de redução de saldo observada no histórico de estoque.", width="small"),
+                    "Saída Faturada": st.column_config.TextColumn("Saída Faturada", help="Total vendido registrado nas planilhas de Saídas Faturadas.", width="small"),
+                },
+            )
+
+            cmp_b1, cmp_b2 = st.columns([1.6, 1.2])
+            with cmp_b1:
                 if st.button(
-                    "🏭 Marcar como MP",
+                    "💾 Salvar Marcações de MP da Tabela no Supabase",
                     type="primary",
                     use_container_width=True,
-                    disabled=(not idx_mp_sel),
-                    key="btn_marcar_como_mp",
+                    disabled=ed_mp_out.empty,
+                    key="btn_salvar_tabela_mp_aba7",
                 ):
-                    with st.spinner("Salvando classificação MP no Supabase..."):
+                    with st.spinner("Salvando classificação de Matérias-Primas no Supabase..."):
                         try:
                             novo_mp_map = dict(mp_custom_map)
-                            for i_m in idx_mp_sel:
-                                c_m = normalizar_codigo_sku(cods_sku_mp_ord[int(i_m)])
-                                if c_m:
-                                    novo_mp_map[c_m] = "1"
+                            qtd_alterados_mp = 0
+                            for idx_row_m, r_ed_m in ed_mp_out.iterrows():
+                                cod_m = normalizar_codigo_sku(r_ed_m["Cód."])
+                                flag_nova = bool(r_ed_m["eh_mp"])
+                                flag_antiga = bool(df_mp_view.loc[idx_row_m, "eh_mp"])
+                                if cod_m and flag_nova != flag_antiga:
+                                    novo_mp_map[cod_m] = "1" if flag_nova else "0"
+                                    qtd_alterados_mp += 1
                             df_meta_mp = montar_dataframe_meta_completo(
                                 dias_base_val=int(dias_base_atual),
                                 ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
@@ -5953,25 +6362,26 @@ with aba1:
                             gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
                             carregar_estado_completo.clear()
                             calcular_motor_giro_sazonal.clear()
-                            st.session_state["msg_sucesso_sync"] = f"✅ {formatar_num_br(len(idx_mp_sel))} produto(s) marcado(s) como Matéria-Prima de Fábrica!"
+                            st.session_state["msg_sucesso_sync"] = (
+                                f"✅ Classificação de Matéria-Prima atualizada com sucesso ({formatar_num_br(qtd_alterados_mp)} alteração(ões) salva(s))!"
+                            )
                             st.rerun()
-                        except Exception as e_mp1:
-                            st.error(f"❌ Erro ao salvar MP: {e_mp1}")
-            with cmp3:
-                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                        except Exception as e_mp_tab:
+                            st.error(f"❌ Erro ao salvar classificação MP: {e_mp_tab}")
+            with cmp_b2:
                 if st.button(
-                    "🏪 Marcar como Loja",
+                    f"🏭 Marcar Todos os {formatar_num_br(len(ed_mp_out))} Filtrados como MP",
                     use_container_width=True,
-                    disabled=(not idx_mp_sel),
-                    key="btn_marcar_como_loja",
+                    disabled=ed_mp_out.empty,
+                    key="btn_marcar_todos_filtrados_mp",
                 ):
-                    with st.spinner("Salvando classificação Loja no Supabase..."):
+                    with st.spinner("Marcando todos os itens filtrados como MP..."):
                         try:
                             novo_mp_map = dict(mp_custom_map)
-                            for i_m in idx_mp_sel:
-                                c_m = normalizar_codigo_sku(cods_sku_mp_ord[int(i_m)])
-                                if c_m:
-                                    novo_mp_map[c_m] = "0"
+                            for _, r_ed_m in ed_mp_out.iterrows():
+                                cod_m = normalizar_codigo_sku(r_ed_m["Cód."])
+                                if cod_m:
+                                    novo_mp_map[cod_m] = "1"
                             df_meta_mp = montar_dataframe_meta_completo(
                                 dias_base_val=int(dias_base_atual),
                                 ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
@@ -5982,10 +6392,12 @@ with aba1:
                             gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
                             carregar_estado_completo.clear()
                             calcular_motor_giro_sazonal.clear()
-                            st.session_state["msg_sucesso_sync"] = f"✅ {formatar_num_br(len(idx_mp_sel))} produto(s) marcado(s) como Loja Varejo!"
+                            st.session_state["msg_sucesso_sync"] = (
+                                f"✅ Todos os {formatar_num_br(len(ed_mp_out))} item(ns) filtrados foram marcados como Matéria-Prima de Fábrica!"
+                            )
                             st.rerun()
-                        except Exception as e_mp0:
-                            st.error(f"❌ Erro ao salvar classificação: {e_mp0}")
+                        except Exception as e_mp_all:
+                            st.error(f"❌ Erro ao marcar filtrados como MP: {e_mp_all}")
 
     r1, r2, r3, r4 = st.columns(4)
     qtd_skus_visiveis = df_estoque["codigo"].nunique() if (not df_estoque.empty and "codigo" in df_estoque.columns) else 0
