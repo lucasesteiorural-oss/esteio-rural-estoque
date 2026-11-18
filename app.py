@@ -4390,16 +4390,22 @@ with aba_dash:
                 try:
                     import altair as alt
                     sel_bar_saude = alt.selection_point(fields=["faixa_saude"], name="sel_saude")
+                    altura_saude = max(310, len(res_saude_bi) * 52)
                     chart_saude = (
                         alt.Chart(res_saude_bi)
-                        .mark_bar(cornerRadiusEnd=6, height=26)
+                        .mark_bar(cornerRadiusEnd=6, height=22)
                         .encode(
-                            x=alt.X("Capital:Q", title="Capital Imobilizado (R$)"),
-                            y=alt.Y("faixa_saude:N", sort=list(res_saude_bi["faixa_saude"]), title=None, axis=alt.Axis(labelLimit=260)),
+                            x=alt.X("Capital:Q", title="Capital Imobilizado (R$)", axis=alt.Axis(format="~s")),
+                            y=alt.Y(
+                                "faixa_saude:N",
+                                sort=list(res_saude_bi["faixa_saude"]),
+                                title=None,
+                                axis=alt.Axis(labelLimit=280, labelOverlap=False, labelPadding=8),
+                            ),
                             color=alt.Color(
                                 "faixa_saude:N",
                                 legend=None,
-                                scale=alt.Scale(scheme="tealblues"),
+                                scale=alt.Scale(range=["#ef4444", "#10b981", "#38bdf8", "#f59e0b", "#8b5cf6", "#64748b"]),
                             ),
                             opacity=alt.condition(sel_bar_saude, alt.value(1.0), alt.value(0.55)),
                             tooltip=[
@@ -4407,10 +4413,11 @@ with aba_dash:
                                 alt.Tooltip("SKUs:Q", title="SKUs", format=",d"),
                                 alt.Tooltip("Capital:Q", title="Capital (R$)", format=",.2f"),
                                 alt.Tooltip("CMV_Mensal:Q", title="CMV Mensal (R$)", format=",.2f"),
+                                alt.Tooltip("% Capital:Q", title="% do Capital", format=".1f"),
                             ],
                         )
                         .add_params(sel_bar_saude)
-                        .properties(height=235)
+                        .properties(height=altura_saude)
                     )
                     ev_chart_s = st.altair_chart(chart_saude, use_container_width=True, on_select="rerun", key="alt_chart_saude_bi")
                     faixa_saude_clicada = _extrair_selecao_altair(ev_chart_s, "faixa_saude")
@@ -4418,7 +4425,7 @@ with aba_dash:
                     st.bar_chart(
                         res_saude_bi.set_index("faixa_saude")[["Capital"]],
                         use_container_width=True,
-                        height=235,
+                        height=310,
                     )
 
                 df_saude_exib = res_saude_bi.rename(
@@ -4451,7 +4458,7 @@ with aba_dash:
 
         with g_col2:
             st.markdown("#### 2. Capital Imobilizado vs. Giro Mensal (CMV) por Departamento")
-            st.caption("👆 **Clique na linha do grupo (ex: `50 - Veterinária`) ou na barra** para abrir os produtos daquele grupo!")
+            st.caption("👆 **Top 8 Departamentos** (clique na barra ou na tabela abaixo para abrir os produtos do grupo)")
             res_depto_bi = (
                 df_bi.groupby("departamento", as_index=False)
                 .agg(
@@ -4469,32 +4476,74 @@ with aba_dash:
                 ]
                 try:
                     import altair as alt
+                    df_dep_top8 = res_depto_bi.head(8).copy()
+                    ordem_deptos = list(df_dep_top8["departamento"])
+                    linhas_dep_melt = []
+                    for _, r_dp in df_dep_top8.iterrows():
+                        linhas_dep_melt.append(
+                            {
+                                "departamento": r_dp["departamento"],
+                                "Indicador": "Capital Atual (R$)",
+                                "Valor": float(r_dp["Capital"]),
+                                "SKUs": int(r_dp["SKUs"]),
+                                "Capital_Ref": float(r_dp["Capital"]),
+                                "CMV_Ref": float(r_dp["CMV_Mensal"]),
+                            }
+                        )
+                        linhas_dep_melt.append(
+                            {
+                                "departamento": r_dp["departamento"],
+                                "Indicador": "Giro CMV/Mês (R$)",
+                                "Valor": float(r_dp["CMV_Mensal"]),
+                                "SKUs": int(r_dp["SKUs"]),
+                                "Capital_Ref": float(r_dp["Capital"]),
+                                "CMV_Ref": float(r_dp["CMV_Mensal"]),
+                            }
+                        )
+                    df_dep_chart = pd.DataFrame(linhas_dep_melt)
+                    altura_dep = max(350, len(ordem_deptos) * 44)
                     sel_bar_dep = alt.selection_point(fields=["departamento"], name="sel_depto")
                     chart_dep = (
-                        alt.Chart(res_depto_bi.head(12))
-                        .mark_bar(cornerRadiusEnd=6, height=18)
+                        alt.Chart(df_dep_chart)
+                        .mark_bar(cornerRadiusEnd=5, height=13)
                         .encode(
-                            x=alt.X("Capital:Q", title="Capital Atual (R$)"),
-                            y=alt.Y("departamento:N", sort="-x", title=None, axis=alt.Axis(labelLimit=240)),
-                            color=alt.value("#38bdf8"),
+                            x=alt.X("Valor:Q", title="Valor (R$)", axis=alt.Axis(format="~s")),
+                            y=alt.Y(
+                                "departamento:N",
+                                sort=ordem_deptos,
+                                title=None,
+                                axis=alt.Axis(labelLimit=260, labelOverlap=False, labelPadding=8),
+                            ),
+                            yOffset=alt.YOffset(
+                                "Indicador:N",
+                                sort=["Capital Atual (R$)", "Giro CMV/Mês (R$)"],
+                            ),
+                            color=alt.Color(
+                                "Indicador:N",
+                                scale=alt.Scale(
+                                    domain=["Capital Atual (R$)", "Giro CMV/Mês (R$)"],
+                                    range=["#38bdf8", "#10b981"],
+                                ),
+                                legend=alt.Legend(orient="top", title=None, labelFontSize=12),
+                            ),
                             opacity=alt.condition(sel_bar_dep, alt.value(1.0), alt.value(0.55)),
                             tooltip=[
                                 alt.Tooltip("departamento:N", title="Grupo / Departamento"),
                                 alt.Tooltip("SKUs:Q", title="SKUs c/ Saldo", format=",d"),
-                                alt.Tooltip("Capital:Q", title="Capital Atual (R$)", format=",.2f"),
-                                alt.Tooltip("CMV_Mensal:Q", title="Giro CMV/Mês (R$)", format=",.2f"),
+                                alt.Tooltip("Capital_Ref:Q", title="Capital Atual (R$)", format=",.2f"),
+                                alt.Tooltip("CMV_Ref:Q", title="Giro CMV/Mês (R$)", format=",.2f"),
                             ],
                         )
                         .add_params(sel_bar_dep)
-                        .properties(height=235)
+                        .properties(height=altura_dep)
                     )
                     ev_chart_d = st.altair_chart(chart_dep, use_container_width=True, on_select="rerun", key="alt_chart_depto_bi")
                     depto_clicado = _extrair_selecao_altair(ev_chart_d, "departamento")
                 except Exception:
                     st.bar_chart(
-                        res_depto_bi.set_index("departamento")[["Capital", "CMV_Mensal"]],
+                        res_depto_bi.head(8).set_index("departamento")[["Capital", "CMV_Mensal"]],
                         use_container_width=True,
-                        height=235,
+                        height=350,
                     )
 
                 df_dep_exib = res_depto_bi.rename(
