@@ -295,7 +295,7 @@ st.markdown(
 
 
 # ==============================================================================
-# 1.1 ACESSO SEGURO AO ST.SECRETS E AUTENTICAÇÃO POR SENHA (FAIL-CLOSED)
+# 1.1 ACESSO SEGURO AO ST.SECRETS E AUTENTICAÇÃO POR USUÁRIO & SENHA (FAIL-CLOSED)
 # ==============================================================================
 def obter_secret(chave: str, padrao=None):
     try:
@@ -304,8 +304,112 @@ def obter_secret(chave: str, padrao=None):
         return padrao
 
 
+def _normalizar_username(usuario: str) -> str:
+    return re.sub(r"[^a-z0-9._-]+", "", str(usuario or "").strip().lower())
+
+
+def gerar_hash_senha_segura(senha_plana: str, salt_hex: str = "") -> str:
+    import secrets as _py_secrets
+    if not salt_hex:
+        salt_hex = _py_secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(senha_plana).encode("utf-8"),
+        bytes.fromhex(salt_hex),
+        120_000,
+    )
+    return f"pbkdf2_sha256${salt_hex}${dk.hex()}"
+
+
+def verificar_senha_hash(senha_digitada: str, senha_hash_armazenada: str) -> bool:
+    if not senha_digitada or not senha_hash_armazenada:
+        return False
+    partes = str(senha_hash_armazenada).split("$")
+    if len(partes) != 3 or partes[0] != "pbkdf2_sha256":
+        return False
+    _, salt_hex, _ = partes
+    try:
+        calculado = gerar_hash_senha_segura(senha_digitada, salt_hex=salt_hex)
+        return hmac.compare_digest(calculado.encode("utf-8"), str(senha_hash_armazenada).encode("utf-8"))
+    except Exception:
+        return False
+
+
+def obter_credencial_admin_mestre() -> tuple[str, str, str]:
+    admin_user = _normalizar_username(obter_secret("admin_user", "admin")) or "admin"
+    admin_nome = str(obter_secret("admin_nome", "Administrador (Esteio Rural)")).strip() or "Administrador"
+    admin_pass = str(obter_secret("app_password", "")).strip()
+    return admin_user, admin_nome, admin_pass
+
+
+def _autenticar_usuario_no_banco(username_norm: str, senha_digitada: str) -> tuple[bool, str, bool, str]:
+    """Valida usuário cadastrado na tabela `usuarios` do Supabase. Retorna (ok, nome_exibicao, eh_admin, msg_erro)."""
+    db_url = obter_url_supabase_secrets()
+    if not db_url:
+        return False, "", False, "Conexão `database_url` não configurada em `st.secrets`."
+    try:
+        cliente_pg = _conectar_supabase_cached(db_url)
+        linhas = cliente_pg.executar_leitura(
+            "SELECT nome_exibicao, senha_hash, eh_admin, ativo FROM usuarios WHERE username = %s",
+            (username_norm,),
+        )
+        if not linhas:
+            return False, "", False, "❌ Usuário ou senha incorretos."
+        nome_exib, senha_hash, eh_adm, ativo = linhas[0]
+        if not bool(ativo):
+            return False, "", False, "🚫 Este usuário está desativado. Contate o Administrador."
+        if verificar_senha_hash(senha_digitada, str(senha_hash or "")):
+            return True, (str(nome_exib or "").strip() or username_norm), bool(eh_adm), ""
+        return False, "", False, "❌ Usuário ou senha incorretos."
+    except Exception as exc_login:
+        return False, "", False, f"Erro ao consultar usuários no banco: {exc_login}"
+
+
+def _sincronizar_admin_mestre_supabase(planilha) -> None:
+    """Garante que o usuário mestre configurado em `st.secrets` exista como Admin ativo na tabela `usuarios`."""
+    if planilha is None:
+        return
+    admin_user, admin_nome, admin_pass = obter_credencial_admin_mestre()
+    if not admin_pass:
+        return
+    try:
+        linhas = planilha.executar_leitura(
+            "SELECT senha_hash, eh_admin, ativo FROM usuarios WHERE username = %s",
+            (admin_user,),
+        )
+        precisa_gravar = True
+        if linhas:
+            hash_atual, eh_adm_at, ativo_at = linhas[0]
+            if bool(eh_adm_at) and bool(ativo_at) and verificar_senha_hash(admin_pass, str(hash_atual or "")):
+                precisa_gravar = False
+        if precisa_gravar:
+            novo_hash = gerar_hash_senha_segura(admin_pass)
+            agora_s = agora_br().strftime("%d/%m/%Y %H:%M:%S")
+            conn = planilha.conectar()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO usuarios (username, nome_exibicao, senha_hash, eh_admin, ativo, criado_em)
+                        VALUES (%s, %s, %s, TRUE, TRUE, %s)
+                        ON CONFLICT (username) DO UPDATE SET
+                            nome_exibicao = EXCLUDED.nome_exibicao,
+                            senha_hash = EXCLUDED.senha_hash,
+                            eh_admin = TRUE,
+                            ativo = TRUE
+                        """,
+                        (admin_user, admin_nome, novo_hash, agora_s),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    except Exception:
+        pass
+
+
 def verificar_autenticacao() -> bool:
-    senha_correta = str(obter_secret("app_password", "")).strip()
+    admin_user, admin_nome, senha_correta = obter_credencial_admin_mestre()
     if not senha_correta:
         st.error(
             "🔒 **Acesso Bloqueado por Segurança:** A credencial `app_password` não foi configurada "
@@ -314,6 +418,10 @@ def verificar_autenticacao() -> bool:
         )
         return False
     if st.session_state.get("autenticado_esteio", False):
+        if "usuario_logado" not in st.session_state:
+            st.session_state["usuario_logado"] = admin_user
+            st.session_state["nome_usuario_logado"] = admin_nome
+            st.session_state["eh_admin_esteio"] = True
         return True
     col_v1, col_login, col_v2 = st.columns([1, 1.4, 1])
     with col_login:
@@ -322,21 +430,38 @@ def verificar_autenticacao() -> bool:
             <div class="glass-card" style="margin-top: 40px; text-align: center;">
                 <h3>🔒 Esteio Rural — Acesso Restrito</h3>
                 <p style="color: #94a3b8; font-size: 0.9rem;">
-                    Insira a credencial de operação para acessar o painel de estoque e custos.
+                    Insira seu <strong>Usuário</strong> e <strong>Senha</strong> para acessar o painel de estoque e custos.
                 </p>
             </div>
             """,
             unsafe_allow_html=True,
         )
         with st.form("form_login_esteio"):
+            usuario_digitado = st.text_input("Usuário:", placeholder=f"Ex: {admin_user}")
             senha_digitada = st.text_input("Senha de acesso:", type="password")
             btn_entrar = st.form_submit_button("Entrar no Sistema", type="primary", use_container_width=True)
             if btn_entrar:
-                if hmac.compare_digest(senha_digitada.encode("utf-8"), senha_correta.encode("utf-8")):
+                user_norm = _normalizar_username(usuario_digitado)
+                if not user_norm or not senha_digitada:
+                    st.error("⚠️ Preencha o usuário e a senha para entrar.")
+                elif user_norm == admin_user and hmac.compare_digest(
+                    senha_digitada.encode("utf-8"), senha_correta.encode("utf-8")
+                ):
                     st.session_state["autenticado_esteio"] = True
+                    st.session_state["usuario_logado"] = admin_user
+                    st.session_state["nome_usuario_logado"] = admin_nome
+                    st.session_state["eh_admin_esteio"] = True
                     st.rerun()
                 else:
-                    st.error("❌ Senha incorreta. Tente novamente.")
+                    ok_db, nome_db, eh_adm_db, msg_err = _autenticar_usuario_no_banco(user_norm, senha_digitada)
+                    if ok_db:
+                        st.session_state["autenticado_esteio"] = True
+                        st.session_state["usuario_logado"] = user_norm
+                        st.session_state["nome_usuario_logado"] = nome_db
+                        st.session_state["eh_admin_esteio"] = eh_adm_db
+                        st.rerun()
+                    else:
+                        st.error(msg_err or "❌ Usuário ou senha incorretos. Tente novamente.")
     return False
 
 
@@ -1097,6 +1222,7 @@ TABELAS_SQL_VALIDAS = {
     "ocultos",
     "pedidos_transito",
     "meta",
+    "usuarios",
     "_bkp_estoque_atual",
     "_bkp_entradas_diarias",
     "_bkp_saidas_diarias",
@@ -1179,6 +1305,14 @@ CREATE TABLE IF NOT EXISTS pedidos_transito (
 CREATE TABLE IF NOT EXISTS meta (
     chave TEXT PRIMARY KEY,
     valor TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS usuarios (
+    username TEXT PRIMARY KEY,
+    nome_exibicao TEXT DEFAULT '',
+    senha_hash TEXT NOT NULL DEFAULT '',
+    eh_admin BOOLEAN DEFAULT FALSE,
+    ativo BOOLEAN DEFAULT TRUE,
+    criado_em TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS _bkp_estoque_atual (LIKE estoque_atual INCLUDING ALL);
 CREATE TABLE IF NOT EXISTS _bkp_entradas_diarias (LIKE entradas_diarias INCLUDING ALL);
@@ -1817,6 +1951,89 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
         conn.rollback()
         raise
     return resumo_migrado
+
+
+def listar_usuarios_sql(planilha: ConexaoSupabasePG) -> pd.DataFrame:
+    colunas_u = ["username", "nome_exibicao", "senha_hash", "eh_admin", "ativo", "criado_em"]
+    linhas = planilha.executar_leitura(
+        "SELECT username, nome_exibicao, senha_hash, eh_admin, ativo, criado_em FROM usuarios ORDER BY eh_admin DESC, username ASC"
+    )
+    if not linhas:
+        return pd.DataFrame(columns=colunas_u)
+    df_u = pd.DataFrame(linhas, columns=colunas_u)
+    df_u["username"] = df_u["username"].astype(str).map(_normalizar_username)
+    df_u["nome_exibicao"] = df_u["nome_exibicao"].fillna("").astype(str)
+    df_u["senha_hash"] = df_u["senha_hash"].fillna("").astype(str)
+    df_u["eh_admin"] = df_u["eh_admin"].fillna(False).astype(bool)
+    df_u["ativo"] = df_u["ativo"].fillna(True).astype(bool)
+    df_u["criado_em"] = df_u["criado_em"].fillna("").astype(str)
+    return df_u
+
+
+def salvar_usuario_sql(
+    planilha: ConexaoSupabasePG,
+    username: str,
+    nome_exibicao: str,
+    senha_plana: str,
+    eh_admin: bool = False,
+    ativo: bool = True,
+):
+    user_norm = _normalizar_username(username)
+    if not user_norm or len(user_norm) < 3:
+        raise ValueError("O nome de usuário deve ter pelo menos 3 caracteres (letras, números, ponto ou underline).")
+    if not senha_plana or len(str(senha_plana)) < 4:
+        raise ValueError("A senha deve ter pelo menos 4 caracteres.")
+    nome_limpo = str(nome_exibicao or "").strip() or user_norm
+    senha_h = gerar_hash_senha_segura(str(senha_plana))
+    criado_s = agora_br().strftime("%d/%m/%Y %H:%M:%S")
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO usuarios (username, nome_exibicao, senha_hash, eh_admin, ativo, criado_em)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (username) DO UPDATE SET
+                    nome_exibicao = EXCLUDED.nome_exibicao,
+                    senha_hash = EXCLUDED.senha_hash,
+                    eh_admin = EXCLUDED.eh_admin,
+                    ativo = EXCLUDED.ativo
+                """,
+                (user_norm, nome_limpo, senha_h, bool(eh_admin), bool(ativo), criado_s),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def atualizar_status_ou_remover_usuarios_sql(
+    planilha: ConexaoSupabasePG,
+    atualizacoes_status: list,
+    usernames_remover: list,
+    admin_mestre_user: str,
+):
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            for u_name, novo_nome, novo_ativo in atualizacoes_status:
+                u_norm = _normalizar_username(u_name)
+                if not u_norm:
+                    continue
+                if u_norm == admin_mestre_user:
+                    novo_ativo = True
+                cur.execute(
+                    "UPDATE usuarios SET nome_exibicao = %s, ativo = %s WHERE username = %s",
+                    (str(novo_nome or "").strip() or u_norm, bool(novo_ativo), u_norm),
+                )
+            for u_rm in usernames_remover:
+                u_norm = _normalizar_username(u_rm)
+                if u_norm and u_norm != admin_mestre_user:
+                    cur.execute("DELETE FROM usuarios WHERE username = %s", (u_norm,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -3586,7 +3803,16 @@ def calcular_motor_giro_sazonal(
 # ==============================================================================
 db_supabase, erro_db = obter_conexao_supabase()
 conectado_nuvem = db_supabase is not None
-col_titulo, col_status = st.columns([3.4, 1.2])
+if conectado_nuvem and not st.session_state.get("_admin_mestre_sincronizado_v22", False):
+    _sincronizar_admin_mestre_supabase(db_supabase)
+    st.session_state["_admin_mestre_sincronizado_v22"] = True
+
+usuario_atual_logado = str(st.session_state.get("usuario_logado", "admin")).strip()
+nome_atual_logado = str(st.session_state.get("nome_usuario_logado", usuario_atual_logado)).strip()
+eh_usuario_admin = bool(st.session_state.get("eh_admin_esteio", False))
+tag_perfil_topo = "👑 Admin" if eh_usuario_admin else "👤 Consulta"
+
+col_titulo, col_status, col_user_box = st.columns([2.9, 1.15, 0.75])
 with col_titulo:
     st.markdown(
         """
@@ -3613,12 +3839,18 @@ with col_status:
     st.markdown(
         f"""
         <div class="status-box">
-            <div class="status-label">PostgreSQL 100% Nuvem</div>
+            <div class="status-label">{tag_perfil_topo}: {nome_atual_logado}</div>
             <div class="status-value" title="{texto_status}">{texto_status}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+with col_user_box:
+    st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+    if st.button("🚪 Sair", use_container_width=True, key="btn_logout_esteio_v22"):
+        for k_sair in ("autenticado_esteio", "usuario_logado", "nome_usuario_logado", "eh_admin_esteio"):
+            st.session_state.pop(k_sair, None)
+        st.rerun()
 if not conectado_nuvem:
     st.error(
         f"❌ **Não foi possível conectar ao Supabase (PostgreSQL):** {erro_db}\n\n"
@@ -5233,1390 +5465,1517 @@ with aba1:
         "Banco de dados PostgreSQL de alta velocidade: importação por data de Estoque, Entradas (NF) e Saídas diárias, "
         "histórico compacto (1 linha por SKU > 0), travas independentes de segurança e backup instantâneo."
     )
-    with st.expander(
-        "📤 Migrar / Restaurar Banco Completo (.xlsx ou .zip) para o Supabase (1 Clique)",
-        expanded=df_estoque_bruto.empty,
-    ):
-        st.caption(
-            "Suba aqui o seu arquivo **`Banco_Dados_Esteio_Rural.xlsx`** (ou o pacote `.zip` com o histórico) para importar "
-            "todas as tabelas (`estoque_atual`, `historico`, `entradas_diarias`, `saidas_diarias`, `custos`, `base_inicial`, "
-            "`ocultos`, `pedidos_transito` e `meta`) diretamente para o Supabase em poucos segundos."
+    if not eh_usuario_admin:
+        st.warning(
+            f"🔒 **Acesso Somente Leitura ({nome_atual_logado}):** Apenas o usuário **Administrador** tem permissão para "
+            "subir planilhas, restaurar backups ou alterar configurações do banco. Você pode consultar normalmente todas as abas de análise (Abas 1 a 6)."
         )
-        cmig1, cmig2 = st.columns([2.2, 1.0])
-        with cmig1:
-            arq_migracao_banco = st.file_uploader(
-                "Selecionar arquivo de backup completo (.xlsx ou .zip):",
-                type=["xlsx", "zip"],
-                key="up_migracao_completa_supabase",
-            )
-        with cmig2:
-            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            btn_executar_migracao = st.button(
-                "🚀 Importar Tudo para o Supabase",
-                type="primary",
-                use_container_width=True,
-                disabled=(arq_migracao_banco is None),
-                key="btn_exec_mig_supabase",
-            )
-        if btn_executar_migracao and arq_migracao_banco is not None:
-            with st.spinner("Migrando todas as abas para o Supabase PostgreSQL..."):
-                try:
-                    resumo_mig = migrar_arquivo_banco_para_supabase(db_supabase, arq_migracao_banco)
-                    st.session_state.pop("bkp_db_xlsx_bytes", None)
-                    st.session_state.pop("backup_zip_bytes", None)
-                    carregar_estado_completo.clear()
-                    calcular_motor_giro_sazonal.clear()
-                    detalhes_mig = ", ".join(
-                        f"`{k}` ({formatar_num_br(v)})" for k, v in resumo_mig.items()
-                    )
-                    st.session_state["msg_sucesso_sync"] = (
-                        f"✅ Banco de dados migrado com sucesso para o Supabase PostgreSQL! Tabelas importadas: {detalhes_mig}."
-                    )
-                    st.rerun()
-                except Exception as erro_mig:
-                    st.error(f"❌ Erro ao migrar banco para o Supabase: {erro_mig}")
-    if "msg_sucesso_sync" in st.session_state:
-        st.success(st.session_state.pop("msg_sucesso_sync"))
-    if "aviso_duplicatas_sync" in st.session_state:
-        aviso_dup = st.session_state.pop("aviso_duplicatas_sync")
-        if aviso_dup["tipo"] == "warning":
-            st.warning(aviso_dup["texto"])
-        else:
-            st.info(aviso_dup["texto"])
-    if st.session_state.get("auditoria_custos_ultima_nf"):
-        regs_aud_nf = st.session_state["auditoria_custos_ultima_nf"]
-        dt_aud_nf_str = st.session_state.get("data_auditoria_custos_nf", "")
-        df_aud_nf = pd.DataFrame(regs_aud_nf)
-        qtd_inalt_tab = int(df_aud_nf["Status Auditoria Fiscal"].str.contains("Inalterado", na=False).sum())
-        qtd_var_tab = int(df_aud_nf["Status Auditoria Fiscal"].str.contains("Variação Brusca", na=False).sum())
+    else:
         with st.expander(
-            f"🔎 Conferência Fiscal de Custos da Última NF ({dt_aud_nf_str}) — "
-            f"{formatar_num_br(qtd_inalt_tab)} Inalterado(s) 0,0% | {formatar_num_br(qtd_var_tab)} Variação >20%",
-            expanded=(qtd_inalt_tab > 0 or qtd_var_tab > 0),
+            "📤 Migrar / Restaurar Banco Completo (.xlsx ou .zip) para o Supabase (1 Clique)",
+            expanded=df_estoque_bruto.empty,
         ):
             st.caption(
-                "Use esta conferência para identificar produtos que entraram na NF com **custo idêntico ao anterior (0,0%)** "
-                "(indicando possível esquecimento na atualização de preço de custo pelo setor fiscal) ou com variação acima de 20%."
+                "Suba aqui o seu arquivo **`Banco_Dados_Esteio_Rural.xlsx`** (ou o pacote `.zip` com o histórico) para importar "
+                "todas as tabelas (`estoque_atual`, `historico`, `entradas_diarias`, `saidas_diarias`, `custos`, `base_inicial`, "
+                "`ocultos`, `pedidos_transito` e `meta`) diretamente para o Supabase em poucos segundos."
             )
-            fa1, fa2 = st.columns([2.0, 1.0])
-            with fa1:
-                filtro_aud_fiscal = st.selectbox(
-                    "Filtrar itens da NF:",
-                    options=[
-                        f"🔎 Todos os Alertas (Inalterados 0,0%: {qtd_inalt_tab} + Variação >20%: {qtd_var_tab})",
-                        f"🔎 Apenas Custo Inalterado 0,0% ({qtd_inalt_tab})",
-                        f"⚠️ Apenas Variação Brusca >20% ({qtd_var_tab})",
-                        f"📋 Todos os Itens da NF ({len(df_aud_nf)})",
-                    ],
-                    index=0 if (qtd_inalt_tab > 0 or qtd_var_tab > 0) else 3,
-                    key="sel_filtro_aud_fiscal_nf",
+            cmig1, cmig2 = st.columns([2.2, 1.0])
+            with cmig1:
+                arq_migracao_banco = st.file_uploader(
+                    "Selecionar arquivo de backup completo (.xlsx ou .zip):",
+                    type=["xlsx", "zip"],
+                    key="up_migracao_completa_supabase",
                 )
-            df_aud_view = df_aud_nf.copy()
-            if filtro_aud_fiscal.startswith("🔎 Todos os Alertas"):
-                df_aud_view = df_aud_view[
-                    df_aud_view["Status Auditoria Fiscal"].str.contains("Inalterado|Variação Brusca", na=False)
-                ].copy()
-            elif filtro_aud_fiscal.startswith("🔎 Apenas Custo Inalterado"):
-                df_aud_view = df_aud_view[
-                    df_aud_view["Status Auditoria Fiscal"].str.contains("Inalterado", na=False)
-                ].copy()
-            elif filtro_aud_fiscal.startswith("⚠️ Apenas Variação"):
-                df_aud_view = df_aud_view[
-                    df_aud_view["Status Auditoria Fiscal"].str.contains("Variação Brusca", na=False)
-                ].copy()
-            with fa2:
+            with cmig2:
                 st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                st.download_button(
-                    label="📥 Baixar Conferência Fiscal (.xlsx)",
-                    data=gerar_excel_relatorio(df_aud_view, "Auditoria_Fiscal_Custos"),
-                    file_name=f"Auditoria_Fiscal_Custos_NF_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="dl_auditoria_fiscal_nf_aba7",
-                )
-            st.dataframe(
-                estilizar_tabela_br(
-                    df_aud_view,
-                    formatadores={
-                        "Custo Anterior (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
-                        "Custo na NF (R$)": formatar_moeda_br,
-                        "Variação (%)": lambda x: "0,0%" if (pd.isna(x) or abs(float(x)) < 0.05) else formatar_pct_br(x, 1, com_sinal=True),
-                    },
-                    colunas_esquerda=["Descrição", "Status Auditoria Fiscal"],
-                ),
-                use_container_width=True,
-                hide_index=True,
-                height=260,
-            )
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(
-            """
-            <div class="glass-card">
-                <strong>1. Posição de Estoque (6 colunas)</strong><br><br>
-                <span class="pill-tag">Código</span>
-                <span class="pill-tag">Saldo Geral</span>
-                <span class="pill-tag">Descrição</span>
-                <span class="pill-tag">Código do Lote</span>
-                <span class="pill-tag">Saldo Lote</span>
-                <span class="pill-tag">Validade</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        data_posicao = st.date_input("Data desta posição de estoque:", value=hoje_br())
-        arq_estoque = st.file_uploader(
-            "Selecionar Estoque (.xlsx, .xls ou .csv)",
-            type=["xlsx", "xls", "csv"],
-            key="up_estoque",
-        )
-    with c2:
-        st.markdown(
-            """
-            <div class="glass-card">
-                <strong>2. Entradas Faturadas c/ Custo (Fatu416)</strong><br><br>
-                <span class="pill-tag">Código</span>
-                <span class="pill-tag">Descrição</span>
-                <span class="pill-tag">Quantidade</span>
-                <span class="pill-tag">Valor (Atualiza Custo!)</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        data_entrada = st.date_input(
-            "Data das Entradas (NF):",
-            value=hoje_br() - timedelta(days=1),
-            key="dt_entrada_aba1",
-        )
-        arq_entradas = st.file_uploader(
-            "Selecionar Entradas (.xlsx, .xls ou .csv)",
-            type=["xlsx", "xls", "csv"],
-            key="up_entradas",
-        )
-        somar_entradas_mesmo_dia = st.checkbox(
-            "➕ Somar ao dia se já houver entrada nesta data",
-            value=False,
-            key="chk_somar_ent_dia",
-            help="Desmarcado (padrão): substitui as entradas desta data. Marcado: soma o novo arquivo às entradas já salvas nesta mesma data.",
-        )
-        atualizar_custo_pela_entrada = st.checkbox(
-            "💰 Atualizar custo unitário pelos itens desta NF",
-            value=True,
-            key="chk_att_custo_ent_nf",
-            help="Marcado (padrão): atualiza o custo unitário apenas para os produtos desta NF cuja data seja igual ou posterior à última entrada registrada. Desmarque se preferir manter apenas o Custo C1 da Planilha Geral.",
-        )
-    with c3:
-        st.markdown(
-            """
-            <div class="glass-card">
-                <strong>3. Saídas / Vendas por Data (3 ou 4 col.)</strong><br><br>
-                <span class="pill-tag">Código</span>
-                <span class="pill-tag">Descrição</span>
-                <span class="pill-tag">Qtd.</span>
-                <span class="pill-tag">Valor Proposta (Opc.)</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        data_saida = st.date_input(
-            "Data das Saídas / Vendas:",
-            value=hoje_br() - timedelta(days=1),
-            key="dt_saida_aba1",
-        )
-        arq_saidas = st.file_uploader(
-            "Selecionar Saídas (.xlsx, .xls ou .csv)",
-            type=["xlsx", "xls", "csv"],
-            key="up_saidas",
-        )
-        somar_saidas_mesmo_dia = st.checkbox(
-            "➕ Somar ao dia se já houver saída nesta data",
-            value=False,
-            key="chk_somar_sai_dia",
-            help="Desmarcado (padrão): substitui as saídas desta data. Marcado: soma o novo arquivo às saídas já salvas nesta mesma data.",
-        )
-    with st.expander("📦 Carga Geral Avulsa de Custos C1 ou Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
-        st.caption(
-            "💡 Os custos unitários já são atualizados automaticamente sempre que você sobe a planilha de **Entradas Faturadas (Fatu416 com coluna `Valor`)** acima! "
-            "Quando você sobe a **Planilha Geral de Custos C1** abaixo (ex.: todo sábado), ela **sobrescreve e prevalece 100%** sobre a tabela de custos atual."
-        )
-        cb0, cb1, cb2 = st.columns([1.4, 0.8, 1.4])
-        with cb0:
-            arq_custos = st.file_uploader(
-                "Planilha Geral de Custos C1 (Código, Descrição, Custo Unitário):",
-                type=["xlsx", "xls", "csv"],
-                key="up_custos",
-            )
-        with cb1:
-            dias_base_input = st.number_input(
-                "Período da base inicial (dias):",
-                min_value=1,
-                max_value=730,
-                value=int(dias_base_atual),
-                step=1,
-            )
-        with cb2:
-            arq_base = st.file_uploader(
-                "Base Inicial de Vendas (Código, Descrição, Qtd. Vendida):",
-                type=["xlsx", "xls", "csv"],
-                key="up_base",
-            )
-    with st.expander("⚙️ Opções Avançadas de Exceção de Travas (Desmarcado por Padrão — Use Apenas se Necessário)", expanded=False):
-        ct1, ct2, ct3, ct4 = st.columns(4)
-        with ct1:
-            ignorar_trava_catalogo = st.checkbox(
-                "🔓 Ignorar trava de 80% de códigos",
-                value=False,
-                key="chk_ign_trava_cat",
-                help="Marque apenas se estiver trocando de ERP ou importando uma linha de produtos totalmente nova.",
-            )
-        with ct2:
-            ignorar_trava_data = st.checkbox(
-                "📅 Ignorar trava de data no nome",
-                value=False,
-                key="chk_ign_trava_dt",
-                help="Marque apenas se quiser forçar a gravação de um arquivo cuja data no nome seja diferente da data escolhida no seletor.",
-            )
-        with ct3:
-            forcar_estoque_retroativo = st.checkbox(
-                "⏪ Forçar Estoque retroativo como Atual",
-                value=False,
-                key="chk_forcar_est_retro",
-                help="Por padrão, estoques de datas anteriores vão apenas para o Histórico. Marque apenas se quiser que um estoque antigo substitua o estoque_atual.",
-            )
-        with ct4:
-            permitir_somar_codigos_repetidos_dia = st.checkbox(
-                "➕ Autorizar somar códigos já lançados no dia",
-                value=False,
-                key="chk_perm_somar_rep_dia",
-                help="Por padrão, se você marcar 'Somar ao dia' e enviar um arquivo em que >= 50% dos códigos já estão lançados naquela data, o sistema bloqueia para evitar somar um relatório reexportado. Marque apenas se forem duas notas diferentes dos mesmos produtos no mesmo dia.",
-            )
-    btn_sincronizar = st.button(
-        "🚀 Processar e Sincronizar com Segurança",
-        type="primary",
-        use_container_width=True,
-    )
-    st.markdown("---")
-    st.markdown("#### 💾 Salvar Cópia do Banco de Dados no Computador & Restauração Rápida")
-    st.caption(
-        "Baixe quando quiser uma planilha Excel (`.xlsx`) com todas as abas ativas do seu banco de dados "
-        "(`estoque_atual`, `entradas_diarias`, `saidas_diarias`, `custos`, `base_inicial`, `ocultos` e `meta`), "
-        "ou restaure a cópia automática imediatamente anterior caso tenha importado algum arquivo por engano."
-    )
-    col_bkp_xlsx, col_bkp_zip = st.columns(2)
-    with col_bkp_xlsx:
-        if not df_estoque_bruto.empty:
-            if st.button("📊 Preparar Planilha do Banco (.xlsx)", use_container_width=True):
-                with st.spinner("Montando planilha Excel do banco de dados..."):
-                    st.session_state["bkp_db_xlsx_bytes"] = gerar_excel_banco_dados(estado)
-                    st.session_state["bkp_db_xlsx_nome"] = (
-                        f"Banco_Dados_Esteio_Rural_{hoje_br().strftime('%Y-%m-%d')}.xlsx"
-                    )
-            if "bkp_db_xlsx_bytes" in st.session_state:
-                st.download_button(
-                    label="📥 Baixar Planilha do Banco (.xlsx)",
-                    data=st.session_state["bkp_db_xlsx_bytes"],
-                    file_name=st.session_state.get("bkp_db_xlsx_nome", "Banco_Dados_Esteio_Rural.xlsx"),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                btn_executar_migracao = st.button(
+                    "🚀 Importar Tudo para o Supabase",
                     type="primary",
                     use_container_width=True,
+                    disabled=(arq_migracao_banco is None),
+                    key="btn_exec_mig_supabase",
                 )
-    with col_bkp_zip:
-        if not df_estoque_bruto.empty:
-            if st.button("📦 Preparar Banco + Histórico 2 Anos (.zip)", use_container_width=True):
-                with st.spinner("Compactando planilha do banco (.xlsx) + histórico (.csv)..."):
-                    st.session_state["backup_zip_bytes"] = gerar_pacote_backup_leve(estado)
-                    st.session_state["backup_zip_nome"] = (
-                        f"Backup_Completo_Esteio_{hoje_br().strftime('%Y-%m-%d')}.zip"
-                    )
-            if "backup_zip_bytes" in st.session_state:
-                st.download_button(
-                    label="📥 Baixar Pacote Completo (.zip)",
-                    data=st.session_state["backup_zip_bytes"],
-                    file_name=st.session_state.get("backup_zip_nome", "Backup_Completo_Esteio.zip"),
-                    mime="application/zip",
-                    type="primary",
-                    use_container_width=True,
-                )
-    with st.expander("⏪ Desfazer Última Importação ou Excluir Data de Movimento (Backups Automáticos Leves)", expanded=False):
-        st.caption(
-            "Restaure a cópia automática imediatamente anterior (`_bkp_*`) das abas leves (Estoque Atual, Entradas, Saídas, Custos, "
-            "Base Inicial, Ocultos ou Pedidos em Trânsito) ou remova os lançamentos de uma data específica no Histórico, Entradas ou Saídas."
-        )
-        cr1, cr2 = st.columns([2, 1])
-        mapa_opcoes_restaurar = {
-            "Posição de Estoque (estoque_atual + ajuste no histórico)": ("estoque_atual", df_estoque_bruto),
-            "Entradas Diárias (entradas_diarias)": ("entradas_diarias", df_entradas_bruto),
-            "Saídas Diárias (saidas_diarias)": ("saidas_diarias", df_saidas_bruto),
-            "Planilha de Custos (custos)": ("custos", df_custos),
-            "Base Inicial de Vendas (base_inicial)": ("base_inicial", df_base_vendas),
-            "Produtos Ocultos (ocultos)": ("ocultos", df_ocultos),
-            "Pedidos em Trânsito / Já Comprei (pedidos_transito)": ("pedidos_transito", df_pedidos_transito),
-        }
-        with cr1:
-            rotulo_aba_rest = st.selectbox(
-                "Selecione qual base deseja reverter para a versão imediatamente anterior:",
-                options=list(mapa_opcoes_restaurar.keys()),
-                key="sel_aba_restaurar_bkp",
-            )
-            confirmar_restauracao_bkp = st.checkbox(
-                "Confirmo que desejo substituir os dados atuais pela cópia automática anterior",
-                value=False,
-                key="chk_confirmar_restauracao_bkp",
-            )
-        with cr2:
-            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            btn_restaurar_bkp_auto = st.button(
-                "⏪ Restaurar Versão Anterior",
-                use_container_width=True,
-                disabled=not confirmar_restauracao_bkp,
-            )
-        if btn_restaurar_bkp_auto and confirmar_restauracao_bkp:
-            aba_alvo_rest, df_mem_alvo = mapa_opcoes_restaurar[rotulo_aba_rest]
-            with st.spinner(f"Restaurando `_bkp_{aba_alvo_rest}` para `{aba_alvo_rest}`..."):
-                try:
-                    qtd_rest = restaurar_backup_automatico_sql(
-                        db_supabase,
-                        aba_alvo_rest,
-                        df_atual_memoria=df_mem_alvo,
-                    )
-                    st.session_state.pop("bkp_db_xlsx_bytes", None)
-                    st.session_state.pop("backup_zip_bytes", None)
-                    carregar_estado_completo.clear()
-                    calcular_motor_giro_sazonal.clear()
-                    st.session_state["msg_sucesso_sync"] = (
-                        f"✅ Versão anterior de `{aba_alvo_rest}` restaurada com sucesso ({formatar_num_br(qtd_rest)} registros)!"
-                    )
-                    st.rerun()
-                except Exception as erro_rest:
-                    st.error(f"❌ Não foi possível restaurar `{aba_alvo_rest}`: {erro_rest}")
-        st.markdown("---")
-        st.markdown("##### 🗑️ Excluir Lançamentos de uma Data Específica (Entradas, Saídas ou Histórico)")
-        cd1, cd2, cd3 = st.columns([1.4, 1.2, 1.0])
-        mapa_abas_data = {
-            "Entradas Diárias (entradas_diarias)": ("entradas_diarias", df_entradas_bruto),
-            "Saídas Diárias (saidas_diarias)": ("saidas_diarias", df_saidas_bruto),
-            "Histórico de Estoque (historico)": ("historico", df_historico_bruto),
-        }
-        with cd1:
-            rotulo_aba_del_dt = st.selectbox(
-                "Aba incremental:",
-                options=list(mapa_abas_data.keys()),
-                key="sel_aba_del_data",
-            )
-        aba_del_escolhida, df_del_ref = mapa_abas_data[rotulo_aba_del_dt]
-        datas_disp_del = (
-            sorted([str(d).strip() for d in df_del_ref["data"].unique() if str(d).strip()], reverse=True)
-            if (df_del_ref is not None and not df_del_ref.empty and "data" in df_del_ref.columns)
-            else []
-        )
-        with cd2:
-            data_del_escolhida = st.selectbox(
-                "Data a excluir:",
-                options=datas_disp_del if datas_disp_del else ["Nenhuma data gravada"],
-                key="sel_dt_del_especifica",
-                disabled=not bool(datas_disp_del),
-            )
-        with cd3:
-            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-            btn_excluir_dt = st.button(
-                "🗑️ Excluir Data",
-                use_container_width=True,
-                disabled=not bool(datas_disp_del),
-            )
-        if btn_excluir_dt and datas_disp_del:
-            with st.spinner(f"Removendo registros de {data_del_escolhida} em `{aba_del_escolhida}`..."):
-                try:
-                    qtd_apagadas = remover_datas_tabela_sql(
-                        db_supabase,
-                        aba_del_escolhida,
-                        {data_del_escolhida},
-                        df_atual_memoria=df_del_ref,
-                    )
-                    st.session_state.pop("bkp_db_xlsx_bytes", None)
-                    st.session_state.pop("backup_zip_bytes", None)
-                    carregar_estado_completo.clear()
-                    calcular_motor_giro_sazonal.clear()
-                    st.session_state["msg_sucesso_sync"] = (
-                        f"✅ {formatar_num_br(qtd_apagadas)} linha(s) da data {data_del_escolhida} removida(s) de `{aba_del_escolhida}`!"
-                    )
-                    st.rerun()
-                except Exception as erro_del_dt:
-                    st.error(f"❌ Erro ao excluir data: {erro_del_dt}")
-    if btn_sincronizar:
-        if (
-            not any([arq_estoque, arq_entradas, arq_saidas, arq_custos, arq_base])
-            and int(dias_base_input) == int(dias_base_atual)
-        ):
-            st.warning("⚠️ Selecione pelo menos uma planilha para importar ou altere o período da base.")
-        else:
-            abas_ja_gravadas = []
-            with st.spinner("Validando colunas, códigos e saldos antes de sincronizar com o Supabase..."):
-                try:
-                    if arq_estoque is not None and not ignorar_trava_data:
-                        if arq_entradas is not None and data_entrada >= data_posicao:
-                            raise ValueError(
-                                f"Trava de Coerência Temporal: A data das **Entradas ({data_entrada.strftime('%d/%m/%Y')})** "
-                                f"não pode ser igual ou posterior à **Posição de Estoque Inicial ({data_posicao.strftime('%d/%m/%Y')})** "
-                                f"enviada no mesmo lote. Se as entradas são do dia anterior, selecione **{(data_posicao - timedelta(days=1)).strftime('%d/%m/%Y')}**."
-                            )
-                        if arq_saidas is not None and data_saida >= data_posicao:
-                            raise ValueError(
-                                f"Trava de Coerência Temporal: A data das **Saídas ({data_saida.strftime('%d/%m/%Y')})** "
-                                f"não pode ser igual ou posterior à **Posição de Estoque Inicial ({data_posicao.strftime('%d/%m/%Y')})** "
-                                f"enviada no mesmo lote. Se as saídas são do dia anterior, selecione **{(data_posicao - timedelta(days=1)).strftime('%d/%m/%Y')}**."
-                            )
-                    data_str = data_posicao.strftime("%Y-%m-%d")
-                    mensagens_auditoria_upload = []
-                    teve_alerta = False
-                    codigos_ref_estoque = (
-                        set(df_estoque_bruto["codigo"].unique()) if not df_estoque_bruto.empty else set()
-                    )
-                    codigos_ref_geral = (
-                        codigos_ref_estoque
-                        | (set(df_custos["codigo"].unique()) if not df_custos.empty else set())
-                        | (set(df_base_vendas["codigo"].unique()) if not df_base_vendas.empty else set())
-                    )
-                    novo_estoque = None
-                    novas_entradas = None
-                    novas_saidas = None
-                    novos_custos = None
-                    nova_base = None
-                    atualizar_aba_estoque_atual = True
-                    if arq_estoque is not None:
-                        novo_estoque, info_dup_est = processar_planilha_estoque(
-                            arq_estoque,
-                            data_posicao,
-                            codigos_ref=codigos_ref_estoque,
-                            ignorar_trava_catalogo=ignorar_trava_catalogo,
-                            ignorar_trava_data=ignorar_trava_data,
-                        )
-                        codigos_ref_geral = codigos_ref_geral | set(novo_estoque["codigo"].unique())
-                        datas_est_existentes = (
-                            sorted([str(d).strip() for d in df_estoque_bruto["data"].unique() if str(d).strip()])
-                            if (not df_estoque_bruto.empty and "data" in df_estoque_bruto.columns)
-                            else []
-                        )
-                        maior_data_est_atual = datas_est_existentes[-1] if datas_est_existentes else ""
-                        if maior_data_est_atual and data_str < maior_data_est_atual and not forcar_estoque_retroativo:
-                            atualizar_aba_estoque_atual = False
-                            teve_alerta = True
-                            dt_at_fmt = pd.to_datetime(maior_data_est_atual, format="%Y-%m-%d", errors="coerce")
-                            str_dt_at = dt_at_fmt.strftime("%d/%m/%Y") if pd.notna(dt_at_fmt) else maior_data_est_atual
-                            mensagens_auditoria_upload.append(
-                                f"🛡️ **Proteção contra Estoque Retroativo:** O estoque enviado (**{data_posicao.strftime('%d/%m/%Y')}**) "
-                                f"é anterior à Posição Atual do sistema (**{str_dt_at}**). Ele foi gravado apenas no **Histórico** "
-                                f"para compor o giro, mantendo o `estoque_atual` intacto em **{str_dt_at}**!"
-                            )
-                        if info_dup_est["qtd_duplicadas"] > 0:
-                            teve_alerta = True
-                            amostra_txt = ", ".join(info_dup_est["exemplos"])
-                            mensagens_auditoria_upload.append(
-                                f"⚠️ **Estoque:** {formatar_num_br(info_dup_est['qtd_duplicadas'])} linha(s) duplicada(s) de mesmo "
-                                f"(Código + Lote) foram mescladas mantendo a última ocorrência "
-                                f"({formatar_num_br(info_dup_est['linhas_lidas'])} lidas → {formatar_num_br(info_dup_est['linhas_finais'])} únicas | "
-                                f"Coincidência: {formatar_pct_br(info_dup_est['taxa_coincidencia'])}). "
-                                f"Exemplos: {amostra_txt}"
-                            )
-                        else:
-                            mensagens_auditoria_upload.append(
-                                f"✔️ **Estoque ({data_posicao.strftime('%d/%m')}):** {formatar_num_br(info_dup_est['linhas_finais'])} linhas verificadas "
-                                f"(0 duplicatas | {formatar_pct_br(info_dup_est['taxa_coincidencia'])} de códigos coincidentes)."
-                            )
-                        if info_dup_est.get("aviso_sem_data"):
-                            teve_alerta = True
-                            mensagens_auditoria_upload.append(info_dup_est["aviso_sem_data"])
-                    df_custos_via_entrada = pd.DataFrame()
-                    info_upsert_custo_ent = {}
-                    hash_arq_ent = ""
-                    ent_ja_somada_antes = False
-                    if arq_entradas is not None:
-                        hash_arq_ent = hashlib.sha256(arq_entradas.getvalue()).hexdigest()[:16]
-                        novas_entradas, info_ent = processar_planilha_movimento_diario(
-                            arquivo=arq_entradas,
-                            data_mov=data_entrada,
-                            nome_aba="entradas_diarias",
-                            col_qtd="qtd_entrada",
-                            rotulo_amigavel="Entradas Diárias",
-                            codigos_ref=codigos_ref_geral,
-                            ignorar_trava_catalogo=ignorar_trava_catalogo,
-                            ignorar_trava_data=ignorar_trava_data,
-                        )
-                        dt_ent_iso = data_entrada.strftime("%Y-%m-%d")
-                        chave_op_ent = f"entradas_diarias::{dt_ent_iso}"
-                        hashes_ent_ja_no_dia = list(
-                            st.session_state.get("hashes_soma_por_data", {}).get(
-                                chave_op_ent, hashes_soma_meta.get(chave_op_ent, [])
-                            )
-                        )
-                        if (
-                            somar_entradas_mesmo_dia
-                            and not df_entradas_bruto.empty
-                            and "data" in df_entradas_bruto.columns
-                        ):
-                            df_ent_dia_atual = df_entradas_bruto[df_entradas_bruto["data"] == dt_ent_iso]
-                            if not df_ent_dia_atual.empty:
-                                if not hashes_ent_ja_no_dia:
-                                    h_ant_e = _calcular_hash_dataframe_dia(df_ent_dia_atual, "entradas_diarias")
-                                    if h_ant_e:
-                                        hashes_ent_ja_no_dia.append(h_ant_e)
-                                    for _, r_ea in df_ent_dia_atual.iterrows():
-                                        hashes_ent_ja_no_dia.append(f"sku:{r_ea['codigo']}:{float(r_ea['qtd_entrada']):.4f}")
-                                ent_ja_somada_antes, _ = _verificar_sobreposicao_soma_mesmo_dia(
-                                    df_existente_dia=df_ent_dia_atual,
-                                    df_novo_dia=novas_entradas,
-                                    col_qtd="qtd_entrada",
-                                    hashes_ja_no_dia=hashes_ent_ja_no_dia,
-                                    hash_efetivo=hash_arq_ent,
-                                    permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
-                                    rotulo_aba="Entradas",
-                                    data_ref_str=dt_ent_iso,
-                                )
-
-                        modo_ent_str = "somadas ao dia" if somar_entradas_mesmo_dia else "gravadas"
-                        col_val_ent_nome = info_ent.get("coluna_valor_entrada", "")
-                        df_ext_c = info_ent.get("df_custos_extraidos", pd.DataFrame()).copy()
-                        if (
-                            somar_entradas_mesmo_dia
-                            and (not ent_ja_somada_antes)
-                            and not df_ext_c.empty
-                            and not df_entradas_bruto.empty
-                            and "data" in df_entradas_bruto.columns
-                            and "valor_entrada" in df_entradas_bruto.columns
-                        ):
-                            df_dia_ant = df_entradas_bruto[
-                                (df_entradas_bruto["data"] == dt_ent_iso)
-                                & (df_entradas_bruto["qtd_entrada"] > 0)
-                                & (df_entradas_bruto["valor_entrada"] > 0)
-                            ].copy()
-                            if not df_dia_ant.empty:
-                                df_soma_c = pd.concat(
-                                    [
-                                        df_dia_ant[["codigo", "descricao", "qtd_entrada", "valor_entrada"]],
-                                        novas_entradas[
-                                            (novas_entradas["qtd_entrada"] > 0) & (novas_entradas["valor_entrada"] > 0)
-                                        ][["codigo", "descricao", "qtd_entrada", "valor_entrada"]],
-                                    ],
-                                    ignore_index=True,
-                                ).groupby("codigo", as_index=False).agg(
-                                    descricao=("descricao", "last"),
-                                    qtd_entrada=("qtd_entrada", "sum"),
-                                    valor_entrada=("valor_entrada", "sum"),
-                                )
-                                df_soma_c["custo_unitario"] = (df_soma_c["valor_entrada"] / df_soma_c["qtd_entrada"]).round(4)
-                                df_ext_c = df_soma_c[["codigo", "descricao", "custo_unitario"]].copy()
-
-                        if ent_ja_somada_antes:
-                            teve_alerta = True
-                            mensagens_auditoria_upload.append(
-                                f"🛡️ **Proteção contra Soma Duplicada (Entradas {data_entrada.strftime('%d/%m')}):** "
-                                f"Este arquivo exato (`{arq_entradas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as quantidades!"
-                            )
-                        else:
-                            if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
-                                rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
-                                if atualizar_custo_pela_entrada:
-                                    df_custos_via_entrada, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
-                                        df_custos_atual=df_custos,
-                                        df_custos_novos_entrada=df_ext_c,
-                                        data_entrada_iso=dt_ent_iso,
-                                        df_entradas_historico=df_entradas_bruto,
-                                        limite_alerta_variacao_pct=20.0,
-                                    )
-                                    tot_c_aplicados = info_upsert_custo_ent["qtd_atualizados"] + info_upsert_custo_ent["qtd_inseridos"]
-                                    str_val_ent = (
-                                        f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
-                                        f"➔ 💰 **{formatar_num_br(tot_c_aplicados)} custo(s) unitário(s) atualizado(s)**"
-                                    )
-                                else:
-                                    str_val_ent = (
-                                        f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
-                                        f"(Custos C1 mantidos s/ alteração conforme opção)"
-                                    )
-                            else:
-                                str_val_ent = ""
-                            mensagens_auditoria_upload.append(
-                                f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs {modo_ent_str} "
-                                f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.{str_val_ent})."
-                            )
-                        if info_upsert_custo_ent.get("qtd_ignorados_data_antiga", 0) > 0:
-                            teve_alerta = True
-                            ex_ign_dt = ", ".join(info_upsert_custo_ent["exemplos_ignorados_data"])
-                            mensagens_auditoria_upload.append(
-                                f"🛡️ **Proteção contra Custo Retroativo:** {formatar_num_br(info_upsert_custo_ent['qtd_ignorados_data_antiga'])} produto(s) "
-                                f"não tiveram o custo sobrescrito porque esta NF ({data_entrada.strftime('%d/%m/%Y')}) é mais antiga que a última entrada: {ex_ign_dt}."
-                            )
-                        if info_upsert_custo_ent.get("registros_auditoria"):
-                            st.session_state["auditoria_custos_ultima_nf"] = info_upsert_custo_ent["registros_auditoria"]
-                            st.session_state["data_auditoria_custos_nf"] = data_entrada.strftime("%d/%m/%Y")
-                        if info_upsert_custo_ent.get("qtd_inalterados", 0) > 0:
-                            teve_alerta = True
-                            ex_inalt_c = ", ".join(info_upsert_custo_ent["exemplos_inalterados"])
-                            mensagens_auditoria_upload.append(
-                                f"🔎 **Auditoria Fiscal — Custo Inalterado na NF (0,0%):** {formatar_num_br(info_upsert_custo_ent['qtd_inalterados'])} produto(s) "
-                                f"entraram com exatamente o mesmo custo anterior (conferir se o fiscal atualizou o custo): {ex_inalt_c}."
-                            )
-                        if info_upsert_custo_ent.get("qtd_alertas_variacao", 0) > 0:
-                            teve_alerta = True
-                            ex_var_c = ", ".join(info_upsert_custo_ent["exemplos_variacao"])
-                            mensagens_auditoria_upload.append(
-                                f"⚠️ **Alerta de Variação de Custo (> 20%) na Entrada:** {formatar_num_br(info_upsert_custo_ent['qtd_alertas_variacao'])} produto(s) "
-                                f"tiveram alteração brusca em relação ao custo anterior: {ex_var_c}. Confira se a unidade da NF está correta!"
-                            )
-                        if info_ent.get("qtd_codigos_repetidos", 0) > 0 and not ent_ja_somada_antes:
-                            teve_alerta = True
-                            ex_rep_ent = ", ".join(info_ent["exemplos_repetidos"])
-                            mensagens_auditoria_upload.append(
-                                f"⚠️ **Entradas (Linhas Repetidas Somadas):** {formatar_num_br(info_ent['qtd_codigos_repetidos'])} produto(s) "
-                                f"apareceram mais de uma vez na planilha ({formatar_num_br(info_ent['qtd_linhas_extras'])} linha(s) extra) e tiveram "
-                                f"suas quantidades somadas: {ex_rep_ent}."
-                            )
-                        if info_ent.get("aviso_sem_data"):
-                            teve_alerta = True
-                            mensagens_auditoria_upload.append(info_ent["aviso_sem_data"])
-                    if arq_saidas is not None:
-                        novas_saidas, info_sai = processar_planilha_movimento_diario(
-                            arquivo=arq_saidas,
-                            data_mov=data_saida,
-                            nome_aba="saidas_diarias",
-                            col_qtd="qtd_saida",
-                            rotulo_amigavel="Saídas Diárias",
-                            codigos_ref=codigos_ref_geral,
-                            ignorar_trava_catalogo=ignorar_trava_catalogo,
-                            ignorar_trava_data=ignorar_trava_data,
-                        )
-                        modo_sai_str = "somadas ao dia" if somar_saidas_mesmo_dia else "gravadas"
-                        col_val_nome = info_sai.get("coluna_valor_venda", "")
-                        if info_sai.get("soma_valor_venda", 0.0) > 0:
-                            rot_col_fat = f" (coluna '{col_val_nome}')" if col_val_nome else ""
-                            str_fat_sai = f" | Faturamento Bruto{rot_col_fat}: {formatar_moeda_br(info_sai['soma_valor_venda'])}"
-                        else:
-                            str_fat_sai = " | Sem coluna de faturamento"
-                        mensagens_auditoria_upload.append(
-                            f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['total_itens'])} SKUs {modo_sai_str} "
-                            f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.{str_fat_sai})."
-                        )
-                        if info_sai.get("qtd_codigos_repetidos", 0) > 0:
-                            teve_alerta = True
-                            ex_rep_sai = ", ".join(info_sai["exemplos_repetidos"])
-                            mensagens_auditoria_upload.append(
-                                f"⚠️ **Saídas (Linhas Repetidas Somadas):** {formatar_num_br(info_sai['qtd_codigos_repetidos'])} produto(s) "
-                                f"apareceram mais de uma vez na planilha ({formatar_num_br(info_sai['qtd_linhas_extras'])} linha(s) extra) e tiveram "
-                                f"suas quantidades somadas: {ex_rep_sai}."
-                            )
-                        if info_sai.get("aviso_sem_data"):
-                            teve_alerta = True
-                            mensagens_auditoria_upload.append(info_sai["aviso_sem_data"])
-                    if arq_custos is not None:
-                        novos_custos, info_cus = processar_planilha_custos(
-                            arq_custos,
-                            codigos_ref=codigos_ref_geral,
-                            ignorar_trava_catalogo=ignorar_trava_catalogo,
-                        )
-                        if info_cus["qtd_duplicadas"] > 0:
-                            teve_alerta = True
-                            mensagens_auditoria_upload.append(
-                                f"⚠️ **Custos:** {formatar_num_br(info_cus['qtd_duplicadas'])} código(s) repetido(s) (mantido o último valor)."
-                            )
-                        if info_cus["qtd_zerados"] > 0:
-                            pct_zero = (info_cus["qtd_zerados"] / max(info_cus["total_itens"], 1)) * 100.0
-                            if pct_zero >= 30.0:
-                                teve_alerta = True
-                            mensagens_auditoria_upload.append(
-                                f"ℹ️ **Custos:** {formatar_num_br(info_cus['qtd_positivos'])} com valor positivo e "
-                                f"{formatar_num_br(info_cus['qtd_zerados'])} com custo R$ 0,00 ({formatar_pct_br(pct_zero, 0)} | "
-                                f"Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
-                            )
-                        else:
-                            mensagens_auditoria_upload.append(
-                                f"✔️ **Custos:** {formatar_num_br(info_cus['total_itens'])} itens verificados "
-                                f"(100% com custo > R$ 0 | Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
-                            )
-                    if arq_base is not None:
-                        nova_base, info_base = processar_planilha_base_vendas(
-                            arq_base,
-                            codigos_ref=codigos_ref_geral,
-                            ignorar_trava_catalogo=ignorar_trava_catalogo,
-                        )
-                        msg_base = (
-                            f"✔️ **Base Inicial:** {formatar_num_br(info_base['total_itens'])} SKUs consolidados "
-                            f"(Soma das vendas: {formatar_num_br(info_base['soma_vendas'])} un. | "
-                            f"Coincidência: {formatar_pct_br(info_base['taxa_coincidencia'])})"
-                        )
-                        if info_base.get("qtd_desc_divergentes", 0) > 0:
-                            msg_base += f" — {formatar_num_br(info_base['qtd_desc_divergentes'])} SKU(s) tinham mais de uma descrição e foram unificados pelo código."
-                        mensagens_auditoria_upload.append(msg_base)
-                    agora_str = agora_br().strftime("%d/%m/%Y %H:%M:%S")
-                    if novo_estoque is not None:
-                        if atualizar_aba_estoque_atual:
-                            salvar_backup_automatico_sql(db_supabase, "estoque_atual", df_estoque_bruto)
-                            gravar_tabela_sql(db_supabase, "estoque_atual", novo_estoque)
-                            abas_ja_gravadas.append("estoque_atual")
-                        gravar_historico_incremental_sql(
-                            db_supabase,
-                            novo_estoque,
-                            data_str,
-                        )
-                        abas_ja_gravadas.append("historico")
-                    if novas_entradas is not None:
-                        gravar_tabela_incremental_por_data_sql(
-                            db_supabase,
-                            "entradas_diarias",
-                            novas_entradas,
-                            data_entrada.strftime("%Y-%m-%d"),
-                            somar_mesma_data=somar_entradas_mesmo_dia,
-                            df_atual_memoria=df_entradas_bruto,
-                            hash_arquivo=hash_arq_ent,
-                            criar_backup=True,
-                            hashes_soma_atuais=hashes_soma_meta,
-                            permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
-                        )
-                        abas_ja_gravadas.append("entradas_diarias")
-                        if not df_pedidos_transito.empty:
-                            df_ent_comb_temp = pd.concat([df_entradas_bruto, novas_entradas], ignore_index=True)
-                            df_trans_pos_nf, cods_desp_sync, _ = depurar_pedidos_transito_auto_despertar(
-                                df_pedidos_transito, df_ent_comb_temp
-                            )
-                            if cods_desp_sync:
-                                salvar_backup_automatico_sql(
-                                    db_supabase, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
-                                )
-                                gravar_tabela_sql(
-                                    db_supabase, "pedidos_transito", df_trans_pos_nf, permitir_vazio=True
-                                )
-                                abas_ja_gravadas.append("pedidos_transito")
-                                mensagens_auditoria_upload.append(
-                                    f"🔔 **Auto-Despertar ('Já Comprei'):** {formatar_num_br(len(cods_desp_sync))} produto(s) "
-                                    f"que estavam ocultos em trânsito chegaram nesta NF de Entrada e voltaram automaticamente ao painel!"
-                                )
-                    if novas_saidas is not None:
-                        hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
-                        sai_ja_somada = gravar_tabela_incremental_por_data_sql(
-                            db_supabase,
-                            "saidas_diarias",
-                            novas_saidas,
-                            data_saida.strftime("%Y-%m-%d"),
-                            somar_mesma_data=somar_saidas_mesmo_dia,
-                            df_atual_memoria=df_saidas_bruto,
-                            hash_arquivo=hash_arq_sai,
-                            criar_backup=True,
-                            hashes_soma_atuais=hashes_soma_meta,
-                            permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
-                        )
-                        if sai_ja_somada:
-                            teve_alerta = True
-                            mensagens_auditoria_upload.append(
-                                f"🛡️ **Proteção contra Soma Duplicada (Saídas {data_saida.strftime('%d/%m')}):** "
-                                f"Este arquivo exato (`{arq_saidas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as vendas!"
-                            )
-                        abas_ja_gravadas.append("saidas_diarias")
-                    if novos_custos is not None:
-                        if not df_custos_via_entrada.empty:
-                            # C1 tem prioridade máxima quando a Planilha Geral de Custos C1 é enviada no mesmo lote:
-                            # preserva 100% dos custos positivos de novos_custos (C1) e só aproveita da NF itens ausentes/zerados no C1
-                            cods_c1_pos = set(novos_custos.loc[novos_custos["custo_unitario"] > 0, "codigo"].unique())
-                            df_ent_complementar = df_custos_via_entrada[~df_custos_via_entrada["codigo"].isin(cods_c1_pos)].copy()
-                            if not df_ent_complementar.empty:
-                                novos_custos = padronizar_dataframe(
-                                    pd.concat([novos_custos, df_ent_complementar], ignore_index=True), "custos"
-                                )
-                            mensagens_auditoria_upload.append(
-                                "🛡️ **Prioridade C1 Mantida:** Como a Planilha Geral de Custos C1 foi enviada junto com a Entrada, o Custo C1 prevaleceu sobre o custo da NF."
-                            )
-                        salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
-                        gravar_tabela_sql(db_supabase, "custos", novos_custos)
-                        abas_ja_gravadas.append("custos")
-                    elif not df_custos_via_entrada.empty:
-                        salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
-                        gravar_tabela_sql(db_supabase, "custos", df_custos_via_entrada)
-                        abas_ja_gravadas.append("custos")
-                    if nova_base is not None:
-                        salvar_backup_automatico_sql(db_supabase, "base_inicial", df_base_vendas)
-                        gravar_tabela_sql(db_supabase, "base_inicial", nova_base)
-                        abas_ja_gravadas.append("base_inicial")
-                    df_meta_novo = montar_dataframe_meta_completo(
-                        dias_base_val=int(dias_base_input),
-                        ult_att_val=agora_str,
-                        grupos_pref_custom=grupos_pref_custom,
-                        grupos_sku_custom=grupos_sku_custom,
-                    )
-                    gravar_tabela_sql(db_supabase, "meta", df_meta_novo)
-                    abas_ja_gravadas.append("meta")
-                    st.session_state.pop("bkp_db_xlsx_bytes", None)
-                    st.session_state.pop("backup_zip_bytes", None)
-                    carregar_estado_completo.clear()
-                    calcular_motor_giro_sazonal.clear()
-                    st.session_state["msg_sucesso_sync"] = (
-                        f"✅ Dados validados, copiados em segurança (`_bkp_*`) e sincronizados na nuvem em {agora_str}!"
-                    )
-                    if mensagens_auditoria_upload:
-                        st.session_state["aviso_duplicatas_sync"] = {
-                            "tipo": "warning" if teve_alerta else "info",
-                            "texto": " | ".join(mensagens_auditoria_upload),
-                        }
-                    st.rerun()
-                except Exception as erro_gravacao:
-                    if not abas_ja_gravadas:
-                        st.error(
-                            f"❌ **Importação bloqueada antes de gravar na nuvem (nenhum dado anterior foi alterado):**\n\n"
-                            f"{erro_gravacao}"
-                        )
-                    else:
-                        carregar_estado_completo.clear()
-                        calcular_motor_giro_sazonal.clear()
-                        abas_str = ", ".join(abas_ja_gravadas)
-                        st.error(
-                            f"⚠️ **Falha parcial durante a gravação na nuvem:** {erro_gravacao}\n\n"
-                            f"As seguintes abas já haviam sido atualizadas antes da falha: **`{abas_str}`**. "
-                            f"Clique em sincronizar novamente para concluir as demais."
-                        )
-
-    with st.expander("🗂️ Gerenciar e Editar Grupos / Departamentos de Produtos (Por Prefixo ou Produto Específico)", expanded=False):
-        st.caption(
-            "Os grupos do Dashboard Executivo são definidos pelos **2 primeiros dígitos do código do produto no Siagri** (ex: `50` = Veterinária, `70` = Ferragens). "
-            "Aqui você pode **renomear ou criar grupos por prefixo** e também **mover produtos específicos** (ex: `903001 - MP MILHO MOIDO 40KG`) para outro grupo!"
-        )
-        frames_cat_grp = []
-        for df_g_src in [df_estoque_bruto, df_entradas_bruto, df_saidas_bruto, df_custos, df_base_vendas]:
-            if df_g_src is not None and not df_g_src.empty and "codigo" in df_g_src.columns and "descricao" in df_g_src.columns:
-                frames_cat_grp.append(df_g_src[["codigo", "descricao"]])
-        if frames_cat_grp:
-            df_cat_grp = (
-                pd.concat(frames_cat_grp, ignore_index=True)
-                .loc[lambda d: d["descricao"] != ""]
-                .drop_duplicates(subset=["codigo"], keep="first")
-                .reset_index(drop=True)
-            )
-        else:
-            df_cat_grp = pd.DataFrame(columns=["codigo", "descricao"])
-
-        df_cat_grp["prefixo"] = df_cat_grp["codigo"].astype(str).str.strip().str.slice(0, 2)
-        contagem_pref = df_cat_grp.groupby("prefixo")["codigo"].count().to_dict() if not df_cat_grp.empty else {}
-        exemplo_pref = (
-            df_cat_grp.groupby("prefixo")
-            .apply(lambda g: f"[{g['codigo'].iloc[0]}] {g['descricao'].iloc[0][:38]}")
-            .to_dict()
-            if not df_cat_grp.empty
-            else {}
-        )
-
-        mapa_depto_ativo = construir_mapa_departamentos(grupos_pref_custom)
-        todos_prefixos = sorted(set(mapa_depto_ativo.keys()) | set(contagem_pref.keys()))
-        linhas_editor_pref = []
-        for pref_p in todos_prefixos:
-            if not str(pref_p).strip():
-                continue
-            linhas_editor_pref.append(
-                {
-                    "Prefixo (2 dígitos)": str(pref_p).strip(),
-                    "Nome do Grupo / Departamento": mapa_depto_ativo.get(str(pref_p).strip(), f"Outros ({pref_p})"),
-                    "SKUs no Catálogo": int(contagem_pref.get(str(pref_p).strip(), 0)),
-                    "Exemplo de Produto no ERP": exemplo_pref.get(str(pref_p).strip(), "-"),
-                }
-            )
-        df_ed_pref_in = pd.DataFrame(linhas_editor_pref)
-
-        st.markdown("##### 1. Editar Nomes dos Grupos por Prefixo (2 Primeiros Dígitos do Código)")
-        ed_pref_out = st.data_editor(
-            df_ed_pref_in,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="dynamic",
-            key="editor_grupos_prefixo_aba7",
-            disabled=["SKUs no Catálogo", "Exemplo de Produto no ERP"],
-            column_config={
-                "Prefixo (2 dígitos)": st.column_config.TextColumn(
-                    "Prefixo (2 dígitos)",
-                    help="2 primeiros dígitos do código do produto no Siagri (ex: 50, 70, 26, 90).",
-                    width="small",
-                ),
-                "Nome do Grupo / Departamento": st.column_config.TextColumn(
-                    "Nome do Grupo / Departamento",
-                    help="Clique duas vezes para editar o nome deste grupo como preferir.",
-                    width="medium",
-                ),
-                "SKUs no Catálogo": st.column_config.NumberColumn(
-                    "SKUs no Catálogo",
-                    help="Quantidade de produtos cadastrados que começam com este prefixo.",
-                    width="small",
-                ),
-                "Exemplo de Produto no ERP": st.column_config.TextColumn(
-                    "Exemplo de Produto no ERP",
-                    help="Exemplo de produto deste prefixo para ajudar a identificar grupos 'Outros'.",
-                    width="medium",
-                ),
-            },
-        )
-        cg_b1, cg_b2 = st.columns([1.6, 1.0])
-        with cg_b1:
-            if st.button("💾 Salvar Nomes dos Grupos por Prefixo na Nuvem", type="primary", use_container_width=True, key="btn_salvar_grp_pref"):
-                with st.spinner("Salvando configuração de grupos no Supabase..."):
+            if btn_executar_migracao and arq_migracao_banco is not None:
+                with st.spinner("Migrando todas as abas para o Supabase PostgreSQL..."):
                     try:
-                        novo_pref_dict = {}
-                        for _, r_gp in ed_pref_out.iterrows():
-                            p_k = str(r_gp.get("Prefixo (2 dígitos)", "")).strip()
-                            n_v = str(r_gp.get("Nome do Grupo / Departamento", "")).strip()
-                            if p_k and n_v:
-                                novo_pref_dict[p_k] = n_v
-                        df_meta_grp = montar_dataframe_meta_completo(
-                            dias_base_val=int(dias_base_atual),
-                            ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
-                            grupos_pref_custom=novo_pref_dict,
-                            grupos_sku_custom=grupos_sku_custom,
-                        )
-                        gravar_tabela_sql(db_supabase, "meta", df_meta_grp)
+                        resumo_mig = migrar_arquivo_banco_para_supabase(db_supabase, arq_migracao_banco)
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
                         carregar_estado_completo.clear()
-                        st.session_state["msg_sucesso_sync"] = "✅ Nomes dos grupos atualizados e salvos na nuvem com sucesso!"
+                        calcular_motor_giro_sazonal.clear()
+                        detalhes_mig = ", ".join(
+                            f"`{k}` ({formatar_num_br(v)})" for k, v in resumo_mig.items()
+                        )
+                        st.session_state["msg_sucesso_sync"] = (
+                            f"✅ Banco de dados migrado com sucesso para o Supabase PostgreSQL! Tabelas importadas: {detalhes_mig}."
+                        )
                         st.rerun()
-                    except Exception as e_gp:
-                        st.error(f"❌ Erro ao salvar grupos: {e_gp}")
-        with cg_b2:
-            if st.button("🔄 Restaurar Nomes Padrão dos Prefixos", use_container_width=True, key="btn_reset_grp_pref"):
-                with st.spinner("Restaurando nomes padrão..."):
+                    except Exception as erro_mig:
+                        st.error(f"❌ Erro ao migrar banco para o Supabase: {erro_mig}")
+        if "msg_sucesso_sync" in st.session_state:
+            st.success(st.session_state.pop("msg_sucesso_sync"))
+        if "aviso_duplicatas_sync" in st.session_state:
+            aviso_dup = st.session_state.pop("aviso_duplicatas_sync")
+            if aviso_dup["tipo"] == "warning":
+                st.warning(aviso_dup["texto"])
+            else:
+                st.info(aviso_dup["texto"])
+        if st.session_state.get("auditoria_custos_ultima_nf"):
+            regs_aud_nf = st.session_state["auditoria_custos_ultima_nf"]
+            dt_aud_nf_str = st.session_state.get("data_auditoria_custos_nf", "")
+            df_aud_nf = pd.DataFrame(regs_aud_nf)
+            qtd_inalt_tab = int(df_aud_nf["Status Auditoria Fiscal"].str.contains("Inalterado", na=False).sum())
+            qtd_var_tab = int(df_aud_nf["Status Auditoria Fiscal"].str.contains("Variação Brusca", na=False).sum())
+            with st.expander(
+                f"🔎 Conferência Fiscal de Custos da Última NF ({dt_aud_nf_str}) — "
+                f"{formatar_num_br(qtd_inalt_tab)} Inalterado(s) 0,0% | {formatar_num_br(qtd_var_tab)} Variação >20%",
+                expanded=(qtd_inalt_tab > 0 or qtd_var_tab > 0),
+            ):
+                st.caption(
+                    "Use esta conferência para identificar produtos que entraram na NF com **custo idêntico ao anterior (0,0%)** "
+                    "(indicando possível esquecimento na atualização de preço de custo pelo setor fiscal) ou com variação acima de 20%."
+                )
+                fa1, fa2 = st.columns([2.0, 1.0])
+                with fa1:
+                    filtro_aud_fiscal = st.selectbox(
+                        "Filtrar itens da NF:",
+                        options=[
+                            f"🔎 Todos os Alertas (Inalterados 0,0%: {qtd_inalt_tab} + Variação >20%: {qtd_var_tab})",
+                            f"🔎 Apenas Custo Inalterado 0,0% ({qtd_inalt_tab})",
+                            f"⚠️ Apenas Variação Brusca >20% ({qtd_var_tab})",
+                            f"📋 Todos os Itens da NF ({len(df_aud_nf)})",
+                        ],
+                        index=0 if (qtd_inalt_tab > 0 or qtd_var_tab > 0) else 3,
+                        key="sel_filtro_aud_fiscal_nf",
+                    )
+                df_aud_view = df_aud_nf.copy()
+                if filtro_aud_fiscal.startswith("🔎 Todos os Alertas"):
+                    df_aud_view = df_aud_view[
+                        df_aud_view["Status Auditoria Fiscal"].str.contains("Inalterado|Variação Brusca", na=False)
+                    ].copy()
+                elif filtro_aud_fiscal.startswith("🔎 Apenas Custo Inalterado"):
+                    df_aud_view = df_aud_view[
+                        df_aud_view["Status Auditoria Fiscal"].str.contains("Inalterado", na=False)
+                    ].copy()
+                elif filtro_aud_fiscal.startswith("⚠️ Apenas Variação"):
+                    df_aud_view = df_aud_view[
+                        df_aud_view["Status Auditoria Fiscal"].str.contains("Variação Brusca", na=False)
+                    ].copy()
+                with fa2:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    st.download_button(
+                        label="📥 Baixar Conferência Fiscal (.xlsx)",
+                        data=gerar_excel_relatorio(df_aud_view, "Auditoria_Fiscal_Custos"),
+                        file_name=f"Auditoria_Fiscal_Custos_NF_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_auditoria_fiscal_nf_aba7",
+                    )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_aud_view,
+                        formatadores={
+                            "Custo Anterior (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "Custo na NF (R$)": formatar_moeda_br,
+                            "Variação (%)": lambda x: "0,0%" if (pd.isna(x) or abs(float(x)) < 0.05) else formatar_pct_br(x, 1, com_sinal=True),
+                        },
+                        colunas_esquerda=["Descrição", "Status Auditoria Fiscal"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=260,
+                )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(
+                """
+                <div class="glass-card">
+                    <strong>1. Posição de Estoque (6 colunas)</strong><br><br>
+                    <span class="pill-tag">Código</span>
+                    <span class="pill-tag">Saldo Geral</span>
+                    <span class="pill-tag">Descrição</span>
+                    <span class="pill-tag">Código do Lote</span>
+                    <span class="pill-tag">Saldo Lote</span>
+                    <span class="pill-tag">Validade</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            data_posicao = st.date_input("Data desta posição de estoque:", value=hoje_br())
+            arq_estoque = st.file_uploader(
+                "Selecionar Estoque (.xlsx, .xls ou .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="up_estoque",
+            )
+        with c2:
+            st.markdown(
+                """
+                <div class="glass-card">
+                    <strong>2. Entradas Faturadas c/ Custo (Fatu416)</strong><br><br>
+                    <span class="pill-tag">Código</span>
+                    <span class="pill-tag">Descrição</span>
+                    <span class="pill-tag">Quantidade</span>
+                    <span class="pill-tag">Valor (Atualiza Custo!)</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            data_entrada = st.date_input(
+                "Data das Entradas (NF):",
+                value=hoje_br() - timedelta(days=1),
+                key="dt_entrada_aba1",
+            )
+            arq_entradas = st.file_uploader(
+                "Selecionar Entradas (.xlsx, .xls ou .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="up_entradas",
+            )
+            somar_entradas_mesmo_dia = st.checkbox(
+                "➕ Somar ao dia se já houver entrada nesta data",
+                value=False,
+                key="chk_somar_ent_dia",
+                help="Desmarcado (padrão): substitui as entradas desta data. Marcado: soma o novo arquivo às entradas já salvas nesta mesma data.",
+            )
+            atualizar_custo_pela_entrada = st.checkbox(
+                "💰 Atualizar custo unitário pelos itens desta NF",
+                value=True,
+                key="chk_att_custo_ent_nf",
+                help="Marcado (padrão): atualiza o custo unitário apenas para os produtos desta NF cuja data seja igual ou posterior à última entrada registrada. Desmarque se preferir manter apenas o Custo C1 da Planilha Geral.",
+            )
+        with c3:
+            st.markdown(
+                """
+                <div class="glass-card">
+                    <strong>3. Saídas / Vendas por Data (3 ou 4 col.)</strong><br><br>
+                    <span class="pill-tag">Código</span>
+                    <span class="pill-tag">Descrição</span>
+                    <span class="pill-tag">Qtd.</span>
+                    <span class="pill-tag">Valor Proposta (Opc.)</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            data_saida = st.date_input(
+                "Data das Saídas / Vendas:",
+                value=hoje_br() - timedelta(days=1),
+                key="dt_saida_aba1",
+            )
+            arq_saidas = st.file_uploader(
+                "Selecionar Saídas (.xlsx, .xls ou .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="up_saidas",
+            )
+            somar_saidas_mesmo_dia = st.checkbox(
+                "➕ Somar ao dia se já houver saída nesta data",
+                value=False,
+                key="chk_somar_sai_dia",
+                help="Desmarcado (padrão): substitui as saídas desta data. Marcado: soma o novo arquivo às saídas já salvas nesta mesma data.",
+            )
+        with st.expander("📦 Carga Geral Avulsa de Custos C1 ou Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
+            st.caption(
+                "💡 Os custos unitários já são atualizados automaticamente sempre que você sobe a planilha de **Entradas Faturadas (Fatu416 com coluna `Valor`)** acima! "
+                "Quando você sobe a **Planilha Geral de Custos C1** abaixo (ex.: todo sábado), ela **sobrescreve e prevalece 100%** sobre a tabela de custos atual."
+            )
+            cb0, cb1, cb2 = st.columns([1.4, 0.8, 1.4])
+            with cb0:
+                arq_custos = st.file_uploader(
+                    "Planilha Geral de Custos C1 (Código, Descrição, Custo Unitário):",
+                    type=["xlsx", "xls", "csv"],
+                    key="up_custos",
+                )
+            with cb1:
+                dias_base_input = st.number_input(
+                    "Período da base inicial (dias):",
+                    min_value=1,
+                    max_value=730,
+                    value=int(dias_base_atual),
+                    step=1,
+                )
+            with cb2:
+                arq_base = st.file_uploader(
+                    "Base Inicial de Vendas (Código, Descrição, Qtd. Vendida):",
+                    type=["xlsx", "xls", "csv"],
+                    key="up_base",
+                )
+        with st.expander("⚙️ Opções Avançadas de Exceção de Travas (Desmarcado por Padrão — Use Apenas se Necessário)", expanded=False):
+            ct1, ct2, ct3, ct4 = st.columns(4)
+            with ct1:
+                ignorar_trava_catalogo = st.checkbox(
+                    "🔓 Ignorar trava de 80% de códigos",
+                    value=False,
+                    key="chk_ign_trava_cat",
+                    help="Marque apenas se estiver trocando de ERP ou importando uma linha de produtos totalmente nova.",
+                )
+            with ct2:
+                ignorar_trava_data = st.checkbox(
+                    "📅 Ignorar trava de data no nome",
+                    value=False,
+                    key="chk_ign_trava_dt",
+                    help="Marque apenas se quiser forçar a gravação de um arquivo cuja data no nome seja diferente da data escolhida no seletor.",
+                )
+            with ct3:
+                forcar_estoque_retroativo = st.checkbox(
+                    "⏪ Forçar Estoque retroativo como Atual",
+                    value=False,
+                    key="chk_forcar_est_retro",
+                    help="Por padrão, estoques de datas anteriores vão apenas para o Histórico. Marque apenas se quiser que um estoque antigo substitua o estoque_atual.",
+                )
+            with ct4:
+                permitir_somar_codigos_repetidos_dia = st.checkbox(
+                    "➕ Autorizar somar códigos já lançados no dia",
+                    value=False,
+                    key="chk_perm_somar_rep_dia",
+                    help="Por padrão, se você marcar 'Somar ao dia' e enviar um arquivo em que >= 50% dos códigos já estão lançados naquela data, o sistema bloqueia para evitar somar um relatório reexportado. Marque apenas se forem duas notas diferentes dos mesmos produtos no mesmo dia.",
+                )
+        btn_sincronizar = st.button(
+            "🚀 Processar e Sincronizar com Segurança",
+            type="primary",
+            use_container_width=True,
+        )
+        st.markdown("---")
+        st.markdown("#### 💾 Salvar Cópia do Banco de Dados no Computador & Restauração Rápida")
+        st.caption(
+            "Baixe quando quiser uma planilha Excel (`.xlsx`) com todas as abas ativas do seu banco de dados "
+            "(`estoque_atual`, `entradas_diarias`, `saidas_diarias`, `custos`, `base_inicial`, `ocultos` e `meta`), "
+            "ou restaure a cópia automática imediatamente anterior caso tenha importado algum arquivo por engano."
+        )
+        col_bkp_xlsx, col_bkp_zip = st.columns(2)
+        with col_bkp_xlsx:
+            if not df_estoque_bruto.empty:
+                if st.button("📊 Preparar Planilha do Banco (.xlsx)", use_container_width=True):
+                    with st.spinner("Montando planilha Excel do banco de dados..."):
+                        st.session_state["bkp_db_xlsx_bytes"] = gerar_excel_banco_dados(estado)
+                        st.session_state["bkp_db_xlsx_nome"] = (
+                            f"Banco_Dados_Esteio_Rural_{hoje_br().strftime('%Y-%m-%d')}.xlsx"
+                        )
+                if "bkp_db_xlsx_bytes" in st.session_state:
+                    st.download_button(
+                        label="📥 Baixar Planilha do Banco (.xlsx)",
+                        data=st.session_state["bkp_db_xlsx_bytes"],
+                        file_name=st.session_state.get("bkp_db_xlsx_nome", "Banco_Dados_Esteio_Rural.xlsx"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True,
+                    )
+        with col_bkp_zip:
+            if not df_estoque_bruto.empty:
+                if st.button("📦 Preparar Banco + Histórico 2 Anos (.zip)", use_container_width=True):
+                    with st.spinner("Compactando planilha do banco (.xlsx) + histórico (.csv)..."):
+                        st.session_state["backup_zip_bytes"] = gerar_pacote_backup_leve(estado)
+                        st.session_state["backup_zip_nome"] = (
+                            f"Backup_Completo_Esteio_{hoje_br().strftime('%Y-%m-%d')}.zip"
+                        )
+                if "backup_zip_bytes" in st.session_state:
+                    st.download_button(
+                        label="📥 Baixar Pacote Completo (.zip)",
+                        data=st.session_state["backup_zip_bytes"],
+                        file_name=st.session_state.get("backup_zip_nome", "Backup_Completo_Esteio.zip"),
+                        mime="application/zip",
+                        type="primary",
+                        use_container_width=True,
+                    )
+        with st.expander("⏪ Desfazer Última Importação ou Excluir Data de Movimento (Backups Automáticos Leves)", expanded=False):
+            st.caption(
+                "Restaure a cópia automática imediatamente anterior (`_bkp_*`) das abas leves (Estoque Atual, Entradas, Saídas, Custos, "
+                "Base Inicial, Ocultos ou Pedidos em Trânsito) ou remova os lançamentos de uma data específica no Histórico, Entradas ou Saídas."
+            )
+            cr1, cr2 = st.columns([2, 1])
+            mapa_opcoes_restaurar = {
+                "Posição de Estoque (estoque_atual + ajuste no histórico)": ("estoque_atual", df_estoque_bruto),
+                "Entradas Diárias (entradas_diarias)": ("entradas_diarias", df_entradas_bruto),
+                "Saídas Diárias (saidas_diarias)": ("saidas_diarias", df_saidas_bruto),
+                "Planilha de Custos (custos)": ("custos", df_custos),
+                "Base Inicial de Vendas (base_inicial)": ("base_inicial", df_base_vendas),
+                "Produtos Ocultos (ocultos)": ("ocultos", df_ocultos),
+                "Pedidos em Trânsito / Já Comprei (pedidos_transito)": ("pedidos_transito", df_pedidos_transito),
+            }
+            with cr1:
+                rotulo_aba_rest = st.selectbox(
+                    "Selecione qual base deseja reverter para a versão imediatamente anterior:",
+                    options=list(mapa_opcoes_restaurar.keys()),
+                    key="sel_aba_restaurar_bkp",
+                )
+                confirmar_restauracao_bkp = st.checkbox(
+                    "Confirmo que desejo substituir os dados atuais pela cópia automática anterior",
+                    value=False,
+                    key="chk_confirmar_restauracao_bkp",
+                )
+            with cr2:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                btn_restaurar_bkp_auto = st.button(
+                    "⏪ Restaurar Versão Anterior",
+                    use_container_width=True,
+                    disabled=not confirmar_restauracao_bkp,
+                )
+            if btn_restaurar_bkp_auto and confirmar_restauracao_bkp:
+                aba_alvo_rest, df_mem_alvo = mapa_opcoes_restaurar[rotulo_aba_rest]
+                with st.spinner(f"Restaurando `_bkp_{aba_alvo_rest}` para `{aba_alvo_rest}`..."):
                     try:
-                        df_meta_grp = montar_dataframe_meta_completo(
-                            dias_base_val=int(dias_base_atual),
-                            ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
-                            grupos_pref_custom={},
+                        qtd_rest = restaurar_backup_automatico_sql(
+                            db_supabase,
+                            aba_alvo_rest,
+                            df_atual_memoria=df_mem_alvo,
+                        )
+                        st.session_state.pop("bkp_db_xlsx_bytes", None)
+                        st.session_state.pop("backup_zip_bytes", None)
+                        carregar_estado_completo.clear()
+                        calcular_motor_giro_sazonal.clear()
+                        st.session_state["msg_sucesso_sync"] = (
+                            f"✅ Versão anterior de `{aba_alvo_rest}` restaurada com sucesso ({formatar_num_br(qtd_rest)} registros)!"
+                        )
+                        st.rerun()
+                    except Exception as erro_rest:
+                        st.error(f"❌ Não foi possível restaurar `{aba_alvo_rest}`: {erro_rest}")
+            st.markdown("---")
+            st.markdown("##### 🗑️ Excluir Lançamentos de uma Data Específica (Entradas, Saídas ou Histórico)")
+            cd1, cd2, cd3 = st.columns([1.4, 1.2, 1.0])
+            mapa_abas_data = {
+                "Entradas Diárias (entradas_diarias)": ("entradas_diarias", df_entradas_bruto),
+                "Saídas Diárias (saidas_diarias)": ("saidas_diarias", df_saidas_bruto),
+                "Histórico de Estoque (historico)": ("historico", df_historico_bruto),
+            }
+            with cd1:
+                rotulo_aba_del_dt = st.selectbox(
+                    "Aba incremental:",
+                    options=list(mapa_abas_data.keys()),
+                    key="sel_aba_del_data",
+                )
+            aba_del_escolhida, df_del_ref = mapa_abas_data[rotulo_aba_del_dt]
+            datas_disp_del = (
+                sorted([str(d).strip() for d in df_del_ref["data"].unique() if str(d).strip()], reverse=True)
+                if (df_del_ref is not None and not df_del_ref.empty and "data" in df_del_ref.columns)
+                else []
+            )
+            with cd2:
+                data_del_escolhida = st.selectbox(
+                    "Data a excluir:",
+                    options=datas_disp_del if datas_disp_del else ["Nenhuma data gravada"],
+                    key="sel_dt_del_especifica",
+                    disabled=not bool(datas_disp_del),
+                )
+            with cd3:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                btn_excluir_dt = st.button(
+                    "🗑️ Excluir Data",
+                    use_container_width=True,
+                    disabled=not bool(datas_disp_del),
+                )
+            if btn_excluir_dt and datas_disp_del:
+                with st.spinner(f"Removendo registros de {data_del_escolhida} em `{aba_del_escolhida}`..."):
+                    try:
+                        qtd_apagadas = remover_datas_tabela_sql(
+                            db_supabase,
+                            aba_del_escolhida,
+                            {data_del_escolhida},
+                            df_atual_memoria=df_del_ref,
+                        )
+                        st.session_state.pop("bkp_db_xlsx_bytes", None)
+                        st.session_state.pop("backup_zip_bytes", None)
+                        carregar_estado_completo.clear()
+                        calcular_motor_giro_sazonal.clear()
+                        st.session_state["msg_sucesso_sync"] = (
+                            f"✅ {formatar_num_br(qtd_apagadas)} linha(s) da data {data_del_escolhida} removida(s) de `{aba_del_escolhida}`!"
+                        )
+                        st.rerun()
+                    except Exception as erro_del_dt:
+                        st.error(f"❌ Erro ao excluir data: {erro_del_dt}")
+        if btn_sincronizar:
+            if (
+                not any([arq_estoque, arq_entradas, arq_saidas, arq_custos, arq_base])
+                and int(dias_base_input) == int(dias_base_atual)
+            ):
+                st.warning("⚠️ Selecione pelo menos uma planilha para importar ou altere o período da base.")
+            else:
+                abas_ja_gravadas = []
+                with st.spinner("Validando colunas, códigos e saldos antes de sincronizar com o Supabase..."):
+                    try:
+                        if arq_estoque is not None and not ignorar_trava_data:
+                            if arq_entradas is not None and data_entrada >= data_posicao:
+                                raise ValueError(
+                                    f"Trava de Coerência Temporal: A data das **Entradas ({data_entrada.strftime('%d/%m/%Y')})** "
+                                    f"não pode ser igual ou posterior à **Posição de Estoque Inicial ({data_posicao.strftime('%d/%m/%Y')})** "
+                                    f"enviada no mesmo lote. Se as entradas são do dia anterior, selecione **{(data_posicao - timedelta(days=1)).strftime('%d/%m/%Y')}**."
+                                )
+                            if arq_saidas is not None and data_saida >= data_posicao:
+                                raise ValueError(
+                                    f"Trava de Coerência Temporal: A data das **Saídas ({data_saida.strftime('%d/%m/%Y')})** "
+                                    f"não pode ser igual ou posterior à **Posição de Estoque Inicial ({data_posicao.strftime('%d/%m/%Y')})** "
+                                    f"enviada no mesmo lote. Se as saídas são do dia anterior, selecione **{(data_posicao - timedelta(days=1)).strftime('%d/%m/%Y')}**."
+                                )
+                        data_str = data_posicao.strftime("%Y-%m-%d")
+                        mensagens_auditoria_upload = []
+                        teve_alerta = False
+                        codigos_ref_estoque = (
+                            set(df_estoque_bruto["codigo"].unique()) if not df_estoque_bruto.empty else set()
+                        )
+                        codigos_ref_geral = (
+                            codigos_ref_estoque
+                            | (set(df_custos["codigo"].unique()) if not df_custos.empty else set())
+                            | (set(df_base_vendas["codigo"].unique()) if not df_base_vendas.empty else set())
+                        )
+                        novo_estoque = None
+                        novas_entradas = None
+                        novas_saidas = None
+                        novos_custos = None
+                        nova_base = None
+                        atualizar_aba_estoque_atual = True
+                        if arq_estoque is not None:
+                            novo_estoque, info_dup_est = processar_planilha_estoque(
+                                arq_estoque,
+                                data_posicao,
+                                codigos_ref=codigos_ref_estoque,
+                                ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                ignorar_trava_data=ignorar_trava_data,
+                            )
+                            codigos_ref_geral = codigos_ref_geral | set(novo_estoque["codigo"].unique())
+                            datas_est_existentes = (
+                                sorted([str(d).strip() for d in df_estoque_bruto["data"].unique() if str(d).strip()])
+                                if (not df_estoque_bruto.empty and "data" in df_estoque_bruto.columns)
+                                else []
+                            )
+                            maior_data_est_atual = datas_est_existentes[-1] if datas_est_existentes else ""
+                            if maior_data_est_atual and data_str < maior_data_est_atual and not forcar_estoque_retroativo:
+                                atualizar_aba_estoque_atual = False
+                                teve_alerta = True
+                                dt_at_fmt = pd.to_datetime(maior_data_est_atual, format="%Y-%m-%d", errors="coerce")
+                                str_dt_at = dt_at_fmt.strftime("%d/%m/%Y") if pd.notna(dt_at_fmt) else maior_data_est_atual
+                                mensagens_auditoria_upload.append(
+                                    f"🛡️ **Proteção contra Estoque Retroativo:** O estoque enviado (**{data_posicao.strftime('%d/%m/%Y')}**) "
+                                    f"é anterior à Posição Atual do sistema (**{str_dt_at}**). Ele foi gravado apenas no **Histórico** "
+                                    f"para compor o giro, mantendo o `estoque_atual` intacto em **{str_dt_at}**!"
+                                )
+                            if info_dup_est["qtd_duplicadas"] > 0:
+                                teve_alerta = True
+                                amostra_txt = ", ".join(info_dup_est["exemplos"])
+                                mensagens_auditoria_upload.append(
+                                    f"⚠️ **Estoque:** {formatar_num_br(info_dup_est['qtd_duplicadas'])} linha(s) duplicada(s) de mesmo "
+                                    f"(Código + Lote) foram mescladas mantendo a última ocorrência "
+                                    f"({formatar_num_br(info_dup_est['linhas_lidas'])} lidas → {formatar_num_br(info_dup_est['linhas_finais'])} únicas | "
+                                    f"Coincidência: {formatar_pct_br(info_dup_est['taxa_coincidencia'])}). "
+                                    f"Exemplos: {amostra_txt}"
+                                )
+                            else:
+                                mensagens_auditoria_upload.append(
+                                    f"✔️ **Estoque ({data_posicao.strftime('%d/%m')}):** {formatar_num_br(info_dup_est['linhas_finais'])} linhas verificadas "
+                                    f"(0 duplicatas | {formatar_pct_br(info_dup_est['taxa_coincidencia'])} de códigos coincidentes)."
+                                )
+                            if info_dup_est.get("aviso_sem_data"):
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(info_dup_est["aviso_sem_data"])
+                        df_custos_via_entrada = pd.DataFrame()
+                        info_upsert_custo_ent = {}
+                        hash_arq_ent = ""
+                        ent_ja_somada_antes = False
+                        if arq_entradas is not None:
+                            hash_arq_ent = hashlib.sha256(arq_entradas.getvalue()).hexdigest()[:16]
+                            novas_entradas, info_ent = processar_planilha_movimento_diario(
+                                arquivo=arq_entradas,
+                                data_mov=data_entrada,
+                                nome_aba="entradas_diarias",
+                                col_qtd="qtd_entrada",
+                                rotulo_amigavel="Entradas Diárias",
+                                codigos_ref=codigos_ref_geral,
+                                ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                ignorar_trava_data=ignorar_trava_data,
+                            )
+                            dt_ent_iso = data_entrada.strftime("%Y-%m-%d")
+                            chave_op_ent = f"entradas_diarias::{dt_ent_iso}"
+                            hashes_ent_ja_no_dia = list(
+                                st.session_state.get("hashes_soma_por_data", {}).get(
+                                    chave_op_ent, hashes_soma_meta.get(chave_op_ent, [])
+                                )
+                            )
+                            if (
+                                somar_entradas_mesmo_dia
+                                and not df_entradas_bruto.empty
+                                and "data" in df_entradas_bruto.columns
+                            ):
+                                df_ent_dia_atual = df_entradas_bruto[df_entradas_bruto["data"] == dt_ent_iso]
+                                if not df_ent_dia_atual.empty:
+                                    if not hashes_ent_ja_no_dia:
+                                        h_ant_e = _calcular_hash_dataframe_dia(df_ent_dia_atual, "entradas_diarias")
+                                        if h_ant_e:
+                                            hashes_ent_ja_no_dia.append(h_ant_e)
+                                        for _, r_ea in df_ent_dia_atual.iterrows():
+                                            hashes_ent_ja_no_dia.append(f"sku:{r_ea['codigo']}:{float(r_ea['qtd_entrada']):.4f}")
+                                    ent_ja_somada_antes, _ = _verificar_sobreposicao_soma_mesmo_dia(
+                                        df_existente_dia=df_ent_dia_atual,
+                                        df_novo_dia=novas_entradas,
+                                        col_qtd="qtd_entrada",
+                                        hashes_ja_no_dia=hashes_ent_ja_no_dia,
+                                        hash_efetivo=hash_arq_ent,
+                                        permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                                        rotulo_aba="Entradas",
+                                        data_ref_str=dt_ent_iso,
+                                    )
+
+                            modo_ent_str = "somadas ao dia" if somar_entradas_mesmo_dia else "gravadas"
+                            col_val_ent_nome = info_ent.get("coluna_valor_entrada", "")
+                            df_ext_c = info_ent.get("df_custos_extraidos", pd.DataFrame()).copy()
+                            if (
+                                somar_entradas_mesmo_dia
+                                and (not ent_ja_somada_antes)
+                                and not df_ext_c.empty
+                                and not df_entradas_bruto.empty
+                                and "data" in df_entradas_bruto.columns
+                                and "valor_entrada" in df_entradas_bruto.columns
+                            ):
+                                df_dia_ant = df_entradas_bruto[
+                                    (df_entradas_bruto["data"] == dt_ent_iso)
+                                    & (df_entradas_bruto["qtd_entrada"] > 0)
+                                    & (df_entradas_bruto["valor_entrada"] > 0)
+                                ].copy()
+                                if not df_dia_ant.empty:
+                                    df_soma_c = pd.concat(
+                                        [
+                                            df_dia_ant[["codigo", "descricao", "qtd_entrada", "valor_entrada"]],
+                                            novas_entradas[
+                                                (novas_entradas["qtd_entrada"] > 0) & (novas_entradas["valor_entrada"] > 0)
+                                            ][["codigo", "descricao", "qtd_entrada", "valor_entrada"]],
+                                        ],
+                                        ignore_index=True,
+                                    ).groupby("codigo", as_index=False).agg(
+                                        descricao=("descricao", "last"),
+                                        qtd_entrada=("qtd_entrada", "sum"),
+                                        valor_entrada=("valor_entrada", "sum"),
+                                    )
+                                    df_soma_c["custo_unitario"] = (df_soma_c["valor_entrada"] / df_soma_c["qtd_entrada"]).round(4)
+                                    df_ext_c = df_soma_c[["codigo", "descricao", "custo_unitario"]].copy()
+
+                            if ent_ja_somada_antes:
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(
+                                    f"🛡️ **Proteção contra Soma Duplicada (Entradas {data_entrada.strftime('%d/%m')}):** "
+                                    f"Este arquivo exato (`{arq_entradas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as quantidades!"
+                                )
+                            else:
+                                if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
+                                    rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
+                                    if atualizar_custo_pela_entrada:
+                                        df_custos_via_entrada, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
+                                            df_custos_atual=df_custos,
+                                            df_custos_novos_entrada=df_ext_c,
+                                            data_entrada_iso=dt_ent_iso,
+                                            df_entradas_historico=df_entradas_bruto,
+                                            limite_alerta_variacao_pct=20.0,
+                                        )
+                                        tot_c_aplicados = info_upsert_custo_ent["qtd_atualizados"] + info_upsert_custo_ent["qtd_inseridos"]
+                                        str_val_ent = (
+                                            f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                            f"➔ 💰 **{formatar_num_br(tot_c_aplicados)} custo(s) unitário(s) atualizado(s)**"
+                                        )
+                                    else:
+                                        str_val_ent = (
+                                            f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                            f"(Custos C1 mantidos s/ alteração conforme opção)"
+                                        )
+                                else:
+                                    str_val_ent = ""
+                                mensagens_auditoria_upload.append(
+                                    f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs {modo_ent_str} "
+                                    f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.{str_val_ent})."
+                                )
+                            if info_upsert_custo_ent.get("qtd_ignorados_data_antiga", 0) > 0:
+                                teve_alerta = True
+                                ex_ign_dt = ", ".join(info_upsert_custo_ent["exemplos_ignorados_data"])
+                                mensagens_auditoria_upload.append(
+                                    f"🛡️ **Proteção contra Custo Retroativo:** {formatar_num_br(info_upsert_custo_ent['qtd_ignorados_data_antiga'])} produto(s) "
+                                    f"não tiveram o custo sobrescrito porque esta NF ({data_entrada.strftime('%d/%m/%Y')}) é mais antiga que a última entrada: {ex_ign_dt}."
+                                )
+                            if info_upsert_custo_ent.get("registros_auditoria"):
+                                st.session_state["auditoria_custos_ultima_nf"] = info_upsert_custo_ent["registros_auditoria"]
+                                st.session_state["data_auditoria_custos_nf"] = data_entrada.strftime("%d/%m/%Y")
+                            if info_upsert_custo_ent.get("qtd_inalterados", 0) > 0:
+                                teve_alerta = True
+                                ex_inalt_c = ", ".join(info_upsert_custo_ent["exemplos_inalterados"])
+                                mensagens_auditoria_upload.append(
+                                    f"🔎 **Auditoria Fiscal — Custo Inalterado na NF (0,0%):** {formatar_num_br(info_upsert_custo_ent['qtd_inalterados'])} produto(s) "
+                                    f"entraram com exatamente o mesmo custo anterior (conferir se o fiscal atualizou o custo): {ex_inalt_c}."
+                                )
+                            if info_upsert_custo_ent.get("qtd_alertas_variacao", 0) > 0:
+                                teve_alerta = True
+                                ex_var_c = ", ".join(info_upsert_custo_ent["exemplos_variacao"])
+                                mensagens_auditoria_upload.append(
+                                    f"⚠️ **Alerta de Variação de Custo (> 20%) na Entrada:** {formatar_num_br(info_upsert_custo_ent['qtd_alertas_variacao'])} produto(s) "
+                                    f"tiveram alteração brusca em relação ao custo anterior: {ex_var_c}. Confira se a unidade da NF está correta!"
+                                )
+                            if info_ent.get("qtd_codigos_repetidos", 0) > 0 and not ent_ja_somada_antes:
+                                teve_alerta = True
+                                ex_rep_ent = ", ".join(info_ent["exemplos_repetidos"])
+                                mensagens_auditoria_upload.append(
+                                    f"⚠️ **Entradas (Linhas Repetidas Somadas):** {formatar_num_br(info_ent['qtd_codigos_repetidos'])} produto(s) "
+                                    f"apareceram mais de uma vez na planilha ({formatar_num_br(info_ent['qtd_linhas_extras'])} linha(s) extra) e tiveram "
+                                    f"suas quantidades somadas: {ex_rep_ent}."
+                                )
+                            if info_ent.get("aviso_sem_data"):
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(info_ent["aviso_sem_data"])
+                        if arq_saidas is not None:
+                            novas_saidas, info_sai = processar_planilha_movimento_diario(
+                                arquivo=arq_saidas,
+                                data_mov=data_saida,
+                                nome_aba="saidas_diarias",
+                                col_qtd="qtd_saida",
+                                rotulo_amigavel="Saídas Diárias",
+                                codigos_ref=codigos_ref_geral,
+                                ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                ignorar_trava_data=ignorar_trava_data,
+                            )
+                            modo_sai_str = "somadas ao dia" if somar_saidas_mesmo_dia else "gravadas"
+                            col_val_nome = info_sai.get("coluna_valor_venda", "")
+                            if info_sai.get("soma_valor_venda", 0.0) > 0:
+                                rot_col_fat = f" (coluna '{col_val_nome}')" if col_val_nome else ""
+                                str_fat_sai = f" | Faturamento Bruto{rot_col_fat}: {formatar_moeda_br(info_sai['soma_valor_venda'])}"
+                            else:
+                                str_fat_sai = " | Sem coluna de faturamento"
+                            mensagens_auditoria_upload.append(
+                                f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['total_itens'])} SKUs {modo_sai_str} "
+                                f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.{str_fat_sai})."
+                            )
+                            if info_sai.get("qtd_codigos_repetidos", 0) > 0:
+                                teve_alerta = True
+                                ex_rep_sai = ", ".join(info_sai["exemplos_repetidos"])
+                                mensagens_auditoria_upload.append(
+                                    f"⚠️ **Saídas (Linhas Repetidas Somadas):** {formatar_num_br(info_sai['qtd_codigos_repetidos'])} produto(s) "
+                                    f"apareceram mais de uma vez na planilha ({formatar_num_br(info_sai['qtd_linhas_extras'])} linha(s) extra) e tiveram "
+                                    f"suas quantidades somadas: {ex_rep_sai}."
+                                )
+                            if info_sai.get("aviso_sem_data"):
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(info_sai["aviso_sem_data"])
+                        if arq_custos is not None:
+                            novos_custos, info_cus = processar_planilha_custos(
+                                arq_custos,
+                                codigos_ref=codigos_ref_geral,
+                                ignorar_trava_catalogo=ignorar_trava_catalogo,
+                            )
+                            if info_cus["qtd_duplicadas"] > 0:
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(
+                                    f"⚠️ **Custos:** {formatar_num_br(info_cus['qtd_duplicadas'])} código(s) repetido(s) (mantido o último valor)."
+                                )
+                            if info_cus["qtd_zerados"] > 0:
+                                pct_zero = (info_cus["qtd_zerados"] / max(info_cus["total_itens"], 1)) * 100.0
+                                if pct_zero >= 30.0:
+                                    teve_alerta = True
+                                mensagens_auditoria_upload.append(
+                                    f"ℹ️ **Custos:** {formatar_num_br(info_cus['qtd_positivos'])} com valor positivo e "
+                                    f"{formatar_num_br(info_cus['qtd_zerados'])} com custo R$ 0,00 ({formatar_pct_br(pct_zero, 0)} | "
+                                    f"Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
+                                )
+                            else:
+                                mensagens_auditoria_upload.append(
+                                    f"✔️ **Custos:** {formatar_num_br(info_cus['total_itens'])} itens verificados "
+                                    f"(100% com custo > R$ 0 | Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
+                                )
+                        if arq_base is not None:
+                            nova_base, info_base = processar_planilha_base_vendas(
+                                arq_base,
+                                codigos_ref=codigos_ref_geral,
+                                ignorar_trava_catalogo=ignorar_trava_catalogo,
+                            )
+                            msg_base = (
+                                f"✔️ **Base Inicial:** {formatar_num_br(info_base['total_itens'])} SKUs consolidados "
+                                f"(Soma das vendas: {formatar_num_br(info_base['soma_vendas'])} un. | "
+                                f"Coincidência: {formatar_pct_br(info_base['taxa_coincidencia'])})"
+                            )
+                            if info_base.get("qtd_desc_divergentes", 0) > 0:
+                                msg_base += f" — {formatar_num_br(info_base['qtd_desc_divergentes'])} SKU(s) tinham mais de uma descrição e foram unificados pelo código."
+                            mensagens_auditoria_upload.append(msg_base)
+                        agora_str = agora_br().strftime("%d/%m/%Y %H:%M:%S")
+                        if novo_estoque is not None:
+                            if atualizar_aba_estoque_atual:
+                                salvar_backup_automatico_sql(db_supabase, "estoque_atual", df_estoque_bruto)
+                                gravar_tabela_sql(db_supabase, "estoque_atual", novo_estoque)
+                                abas_ja_gravadas.append("estoque_atual")
+                            gravar_historico_incremental_sql(
+                                db_supabase,
+                                novo_estoque,
+                                data_str,
+                            )
+                            abas_ja_gravadas.append("historico")
+                        if novas_entradas is not None:
+                            gravar_tabela_incremental_por_data_sql(
+                                db_supabase,
+                                "entradas_diarias",
+                                novas_entradas,
+                                data_entrada.strftime("%Y-%m-%d"),
+                                somar_mesma_data=somar_entradas_mesmo_dia,
+                                df_atual_memoria=df_entradas_bruto,
+                                hash_arquivo=hash_arq_ent,
+                                criar_backup=True,
+                                hashes_soma_atuais=hashes_soma_meta,
+                                permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                            )
+                            abas_ja_gravadas.append("entradas_diarias")
+                            if not df_pedidos_transito.empty:
+                                df_ent_comb_temp = pd.concat([df_entradas_bruto, novas_entradas], ignore_index=True)
+                                df_trans_pos_nf, cods_desp_sync, _ = depurar_pedidos_transito_auto_despertar(
+                                    df_pedidos_transito, df_ent_comb_temp
+                                )
+                                if cods_desp_sync:
+                                    salvar_backup_automatico_sql(
+                                        db_supabase, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                                    )
+                                    gravar_tabela_sql(
+                                        db_supabase, "pedidos_transito", df_trans_pos_nf, permitir_vazio=True
+                                    )
+                                    abas_ja_gravadas.append("pedidos_transito")
+                                    mensagens_auditoria_upload.append(
+                                        f"🔔 **Auto-Despertar ('Já Comprei'):** {formatar_num_br(len(cods_desp_sync))} produto(s) "
+                                        f"que estavam ocultos em trânsito chegaram nesta NF de Entrada e voltaram automaticamente ao painel!"
+                                    )
+                        if novas_saidas is not None:
+                            hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
+                            sai_ja_somada = gravar_tabela_incremental_por_data_sql(
+                                db_supabase,
+                                "saidas_diarias",
+                                novas_saidas,
+                                data_saida.strftime("%Y-%m-%d"),
+                                somar_mesma_data=somar_saidas_mesmo_dia,
+                                df_atual_memoria=df_saidas_bruto,
+                                hash_arquivo=hash_arq_sai,
+                                criar_backup=True,
+                                hashes_soma_atuais=hashes_soma_meta,
+                                permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                            )
+                            if sai_ja_somada:
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(
+                                    f"🛡️ **Proteção contra Soma Duplicada (Saídas {data_saida.strftime('%d/%m')}):** "
+                                    f"Este arquivo exato (`{arq_saidas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as vendas!"
+                                )
+                            abas_ja_gravadas.append("saidas_diarias")
+                        if novos_custos is not None:
+                            if not df_custos_via_entrada.empty:
+                                # C1 tem prioridade máxima quando a Planilha Geral de Custos C1 é enviada no mesmo lote:
+                                # preserva 100% dos custos positivos de novos_custos (C1) e só aproveita da NF itens ausentes/zerados no C1
+                                cods_c1_pos = set(novos_custos.loc[novos_custos["custo_unitario"] > 0, "codigo"].unique())
+                                df_ent_complementar = df_custos_via_entrada[~df_custos_via_entrada["codigo"].isin(cods_c1_pos)].copy()
+                                if not df_ent_complementar.empty:
+                                    novos_custos = padronizar_dataframe(
+                                        pd.concat([novos_custos, df_ent_complementar], ignore_index=True), "custos"
+                                    )
+                                mensagens_auditoria_upload.append(
+                                    "🛡️ **Prioridade C1 Mantida:** Como a Planilha Geral de Custos C1 foi enviada junto com a Entrada, o Custo C1 prevaleceu sobre o custo da NF."
+                                )
+                            salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
+                            gravar_tabela_sql(db_supabase, "custos", novos_custos)
+                            abas_ja_gravadas.append("custos")
+                        elif not df_custos_via_entrada.empty:
+                            salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
+                            gravar_tabela_sql(db_supabase, "custos", df_custos_via_entrada)
+                            abas_ja_gravadas.append("custos")
+                        if nova_base is not None:
+                            salvar_backup_automatico_sql(db_supabase, "base_inicial", df_base_vendas)
+                            gravar_tabela_sql(db_supabase, "base_inicial", nova_base)
+                            abas_ja_gravadas.append("base_inicial")
+                        df_meta_novo = montar_dataframe_meta_completo(
+                            dias_base_val=int(dias_base_input),
+                            ult_att_val=agora_str,
+                            grupos_pref_custom=grupos_pref_custom,
                             grupos_sku_custom=grupos_sku_custom,
                         )
-                        gravar_tabela_sql(db_supabase, "meta", df_meta_grp)
+                        gravar_tabela_sql(db_supabase, "meta", df_meta_novo)
+                        abas_ja_gravadas.append("meta")
+                        st.session_state.pop("bkp_db_xlsx_bytes", None)
+                        st.session_state.pop("backup_zip_bytes", None)
                         carregar_estado_completo.clear()
-                        st.session_state["msg_sucesso_sync"] = "✅ Nomes padrão dos prefixos restaurados!"
-                        st.rerun()
-                    except Exception as e_rst_gp:
-                        st.error(f"❌ Erro ao restaurar: {e_rst_gp}")
-
-        st.markdown("---")
-        st.markdown("##### 2. Visualizar Produtos por Grupo & Mover em Lote para Outro Grupo")
-        st.caption(
-            "Filtre qualquer grupo atual (ex.: `Outros (90)` ou `50 - Veterinária & Reprodução`) para ver todos os produtos que estão dentro dele, "
-            "marque os itens desejados na tabela e mova-os para outro grupo (ou devolva-os ao grupo original do prefixo)."
-        )
-        if not df_cat_grp.empty:
-            linhas_grp_cat = []
-            for _, r_gc in df_cat_grp.sort_values("descricao").iterrows():
-                c_gc = str(r_gc["codigo"]).strip()
-                d_gc = str(r_gc["descricao"]).strip()
-                pref_gc = c_gc[:2] if len(c_gc) >= 2 else c_gc
-                grp_padrao_gc = mapa_depto_ativo.get(pref_gc, f"Outros ({pref_gc or 'S/C'})")
-                grp_atual_gc = identificar_departamento_sku(c_gc, grupos_pref_custom, grupos_sku_custom)
-                eh_mov_manual = c_gc in grupos_sku_custom
-                linhas_grp_cat.append(
-                    {
-                        "codigo": c_gc,
-                        "descricao": d_gc,
-                        "grupo_atual": grp_atual_gc,
-                        "grupo_padrao": grp_padrao_gc,
-                        "movido_manual": eh_mov_manual,
-                        "origem_label": "📌 Movido Manualmente" if eh_mov_manual else "🏷️ Padrão do Prefixo",
-                    }
-                )
-            df_grp_cat_full = pd.DataFrame(linhas_grp_cat)
-            contagem_grp_atual = df_grp_cat_full.groupby("grupo_atual")["codigo"].count().to_dict()
-            opcoes_grp_filtro = ["Todos os Grupos"] + sorted(df_grp_cat_full["grupo_atual"].unique())
-
-            fg1, fg2, fg3 = st.columns([1.5, 1.3, 1.2])
-            with fg1:
-                grp_atual_filtro = st.selectbox(
-                    "📂 Filtrar Grupo Atual (ver itens dentro do grupo):",
-                    options=opcoes_grp_filtro,
-                    format_func=lambda g: (
-                        f"Todos os Grupos ({formatar_num_br(len(df_grp_cat_full))} SKUs)"
-                        if g == "Todos os Grupos"
-                        else f"{g} ({formatar_num_br(contagem_grp_atual.get(g, 0))} SKUs)"
-                    ),
-                    key="sel_filtro_grp_atual_aba7",
-                )
-            with fg2:
-                busca_grp_sku_txt = st.text_input(
-                    "🔍 Buscar produto dentro do filtro:",
-                    placeholder="Digite código ou nome...",
-                    key="busca_txt_grp_sku_aba7",
-                )
-            with fg3:
-                filtro_origem_grp = st.selectbox(
-                    "🏷️ Filtrar Origem:",
-                    options=[
-                        "📋 Todos os Produtos do Filtro",
-                        f"📌 Apenas Movidos Manualmente ({formatar_num_br(len(grupos_sku_custom))})",
-                        "🏷️ Apenas no Grupo Padrão do Prefixo",
-                    ],
-                    index=0,
-                    key="sel_origem_grp_aba7",
-                )
-
-            df_grp_view = df_grp_cat_full.copy()
-            if grp_atual_filtro != "Todos os Grupos":
-                df_grp_view = df_grp_view[df_grp_view["grupo_atual"] == grp_atual_filtro].copy()
-            if filtro_origem_grp.startswith("📌"):
-                df_grp_view = df_grp_view[df_grp_view["movido_manual"] == True].copy()
-            elif filtro_origem_grp.startswith("🏷️"):
-                df_grp_view = df_grp_view[df_grp_view["movido_manual"] == False].copy()
-            if busca_grp_sku_txt and busca_grp_sku_txt.strip():
-                t_g = busca_grp_sku_txt.lower().strip()
-                df_grp_view = df_grp_view[
-                    df_grp_view["codigo"].str.lower().str.contains(t_g, na=False, regex=False)
-                    | df_grp_view["descricao"].str.lower().str.contains(t_g, na=False, regex=False)
-                ].copy()
-
-            df_grp_view = df_grp_view.reset_index(drop=True)
-            cg_sel1, cg_sel2 = st.columns([1.5, 2.5])
-            with cg_sel1:
-                marcar_todos_grp_view = st.checkbox(
-                    f"Selecionar todos os {formatar_num_br(len(df_grp_view))} produto(s) filtrados",
-                    value=False,
-                    key="chk_sel_todos_grp_aba7",
-                )
-            with cg_sel2:
-                st.caption(
-                    f"Exibindo **{formatar_num_br(len(df_grp_view))} produto(s)** | "
-                    f"Total de exceções personalizadas ativas: **{formatar_num_br(len(grupos_sku_custom))}**"
-                )
-
-            df_grp_ed_in = pd.DataFrame(
-                {
-                    "selecionar": [bool(marcar_todos_grp_view)] * len(df_grp_view),
-                    "Cód.": df_grp_view["codigo"].values,
-                    "Descrição": df_grp_view["descricao"].values,
-                    "Grupo Atual": df_grp_view["grupo_atual"].values,
-                    "Grupo Original (Prefixo)": df_grp_view["grupo_padrao"].values,
-                    "Origem": df_grp_view["origem_label"].values,
-                }
-            )
-            ed_grp_out = st.data_editor(
-                df_grp_ed_in,
-                use_container_width=True,
-                hide_index=True,
-                height=340,
-                key="editor_mover_grupos_aba7",
-                disabled=["Cód.", "Descrição", "Grupo Atual", "Grupo Original (Prefixo)", "Origem"],
-                column_config={
-                    "selecionar": st.column_config.CheckboxColumn(
-                        "Mover?",
-                        help="Marque os produtos que deseja transferir de grupo ou devolver ao grupo original.",
-                        default=False,
-                        width="small",
-                    ),
-                    "Cód.": st.column_config.TextColumn("Cód.", width="small"),
-                    "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
-                    "Grupo Atual": st.column_config.TextColumn("Grupo Atual", width="medium"),
-                    "Grupo Original (Prefixo)": st.column_config.TextColumn("Grupo Original (Prefixo)", width="medium"),
-                    "Origem": st.column_config.TextColumn("Origem", width="small"),
-                },
-            )
-
-            sel_grp_rows = ed_grp_out[ed_grp_out["selecionar"] == True]
-            cods_sel_grp = [normalizar_codigo_sku(c) for c in sel_grp_rows["Cód."].tolist() if normalizar_codigo_sku(c)]
-            qtd_sel_grp = len(cods_sel_grp)
-            qtd_sel_com_excecao = sum(1 for c in cods_sel_grp if c in grupos_sku_custom)
-
-            grupos_disponiveis_destino = sorted(
-                list(
-                    set(mapa_depto_ativo.values())
-                    | set(grupos_sku_custom.values())
-                    | {f"Outros ({p})" for p in todos_prefixos if p not in mapa_depto_ativo}
-                )
-            )
-            cm_sku1, cm_sku2, cm_sku3 = st.columns([1.5, 1.3, 1.2])
-            with cm_sku1:
-                grupo_destino_sel = st.selectbox(
-                    "Grupo de Destino para os Selecionados:",
-                    options=grupos_disponiveis_destino + ["➕ Digitar Novo Nome de Grupo..."],
-                    key="sel_grupo_destino_sku",
-                )
-                if grupo_destino_sel == "➕ Digitar Novo Nome de Grupo...":
-                    grupo_destino_final = st.text_input(
-                        "Digite o nome do novo grupo:",
-                        placeholder="Ex: 99 - Uso Interno / Fábrica",
-                        key="txt_novo_grupo_sku_custom",
-                    ).strip()
-                else:
-                    grupo_destino_final = grupo_destino_sel
-            with cm_sku2:
-                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                if st.button(
-                    f"📌 Mover ({formatar_num_br(qtd_sel_grp)}) para o Destino",
-                    type="primary",
-                    use_container_width=True,
-                    disabled=(qtd_sel_grp == 0 or not grupo_destino_final),
-                    key="btn_fixar_sku_grupo",
-                ):
-                    with st.spinner("Movendo produtos selecionados no Supabase..."):
-                        try:
-                            novo_sku_custom = dict(grupos_sku_custom)
-                            for cod_alvo_m in cods_sel_grp:
-                                novo_sku_custom[cod_alvo_m] = grupo_destino_final
-                            df_meta_sku = montar_dataframe_meta_completo(
-                                dias_base_val=int(dias_base_atual),
-                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
-                                grupos_pref_custom=grupos_pref_custom,
-                                grupos_sku_custom=novo_sku_custom,
-                            )
-                            gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
-                            carregar_estado_completo.clear()
-                            calcular_motor_giro_sazonal.clear()
-                            st.session_state["msg_sucesso_sync"] = (
-                                f"✅ {formatar_num_br(qtd_sel_grp)} produto(s) movido(s) para o grupo '{grupo_destino_final}'!"
-                            )
-                            st.rerun()
-                        except Exception as e_sk_g:
-                            st.error(f"❌ Erro ao mover produto de grupo: {e_sk_g}")
-            with cm_sku3:
-                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                if st.button(
-                    f"↩️ Devolver ({formatar_num_br(qtd_sel_com_excecao)}) ao Original",
-                    use_container_width=True,
-                    disabled=(qtd_sel_com_excecao == 0),
-                    key="btn_rem_excecao_sku_grp",
-                ):
-                    with st.spinner("Devolvendo produtos ao grupo original no Supabase..."):
-                        try:
-                            set_dev_g = set(cods_sel_grp)
-                            novo_sku_custom = {
-                                k: v
-                                for k, v in grupos_sku_custom.items()
-                                if k not in set_dev_g
+                        calcular_motor_giro_sazonal.clear()
+                        st.session_state["msg_sucesso_sync"] = (
+                            f"✅ Dados validados, copiados em segurança (`_bkp_*`) e sincronizados na nuvem em {agora_str}!"
+                        )
+                        if mensagens_auditoria_upload:
+                            st.session_state["aviso_duplicatas_sync"] = {
+                                "tipo": "warning" if teve_alerta else "info",
+                                "texto": " | ".join(mensagens_auditoria_upload),
                             }
-                            df_meta_sku = montar_dataframe_meta_completo(
-                                dias_base_val=int(dias_base_atual),
-                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
-                                grupos_pref_custom=grupos_pref_custom,
-                                grupos_sku_custom=novo_sku_custom,
+                        st.rerun()
+                    except Exception as erro_gravacao:
+                        if not abas_ja_gravadas:
+                            st.error(
+                                f"❌ **Importação bloqueada antes de gravar na nuvem (nenhum dado anterior foi alterado):**\n\n"
+                                f"{erro_gravacao}"
                             )
-                            gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
+                        else:
                             carregar_estado_completo.clear()
                             calcular_motor_giro_sazonal.clear()
-                            st.session_state["msg_sucesso_sync"] = (
-                                f"✅ {formatar_num_br(qtd_sel_com_excecao)} produto(s) devolvido(s) ao grupo original do prefixo!"
+                            abas_str = ", ".join(abas_ja_gravadas)
+                            st.error(
+                                f"⚠️ **Falha parcial durante a gravação na nuvem:** {erro_gravacao}\n\n"
+                                f"As seguintes abas já haviam sido atualizadas antes da falha: **`{abas_str}`**. "
+                                f"Clique em sincronizar novamente para concluir as demais."
                             )
-                            st.rerun()
-                        except Exception as e_rm_sk:
-                            st.error(f"❌ Erro ao devolver produtos ao grupo original: {e_rm_sk}")
 
-        st.markdown("---")
-        st.markdown("##### 3. Definir Produtos de Matéria-Prima / Produção de Ração (MP — Saída por Ordem de Produção)")
-        st.caption(
-            "Itens de transformação para produção de ração não aparecem no relatório de Saídas Faturadas — o sistema apura o consumo deles "
-            "pela equação fechada de fábrica (**Estoque Inicial + Entrada NF − Estoque Final**). "
-            "Use os filtros abaixo para localizar insumos da fábrica (inclusive os **💡 Sugeridos pela IA**, que tiveram queda de estoque sem venda faturada) "
-            "e marque a caixinha **🏭 É MP / Produção?** diretamente na tabela."
-        )
-        if not df_cat_grp.empty:
-            # Apura quedas no histórico vs. saídas faturadas para sugerir automaticamente itens de transformação/produção
-            mapa_qtd_sai_mp = (
-                df_saidas_bruto.groupby("codigo")["qtd_saida"].sum().to_dict()
-                if (df_saidas_bruto is not None and not df_saidas_bruto.empty)
+        with st.expander("🗂️ Gerenciar e Editar Grupos / Departamentos de Produtos (Por Prefixo ou Produto Específico)", expanded=False):
+            st.caption(
+                "Os grupos do Dashboard Executivo são definidos pelos **2 primeiros dígitos do código do produto no Siagri** (ex: `50` = Veterinária, `70` = Ferragens). "
+                "Aqui você pode **renomear ou criar grupos por prefixo** e também **mover produtos específicos** (ex: `903001 - MP MILHO MOIDO 40KG`) para outro grupo!"
+            )
+            frames_cat_grp = []
+            for df_g_src in [df_estoque_bruto, df_entradas_bruto, df_saidas_bruto, df_custos, df_base_vendas]:
+                if df_g_src is not None and not df_g_src.empty and "codigo" in df_g_src.columns and "descricao" in df_g_src.columns:
+                    frames_cat_grp.append(df_g_src[["codigo", "descricao"]])
+            if frames_cat_grp:
+                df_cat_grp = (
+                    pd.concat(frames_cat_grp, ignore_index=True)
+                    .loc[lambda d: d["descricao"] != ""]
+                    .drop_duplicates(subset=["codigo"], keep="first")
+                    .reset_index(drop=True)
+                )
+            else:
+                df_cat_grp = pd.DataFrame(columns=["codigo", "descricao"])
+
+            df_cat_grp["prefixo"] = df_cat_grp["codigo"].astype(str).str.strip().str.slice(0, 2)
+            contagem_pref = df_cat_grp.groupby("prefixo")["codigo"].count().to_dict() if not df_cat_grp.empty else {}
+            exemplo_pref = (
+                df_cat_grp.groupby("prefixo")
+                .apply(lambda g: f"[{g['codigo'].iloc[0]}] {g['descricao'].iloc[0][:38]}")
+                .to_dict()
+                if not df_cat_grp.empty
                 else {}
             )
-            mapa_queda_hist_mp = {}
-            if df_historico_bruto is not None and not df_historico_bruto.empty and "data" in df_historico_bruto.columns:
-                datas_h_mp = sorted(df_historico_bruto["data"].dropna().unique())
-                if len(datas_h_mp) >= 2:
-                    piv_mp = (
-                        df_historico_bruto.drop_duplicates(subset=["codigo", "data"], keep="last")
-                        .pivot(index="codigo", columns="data", values="saldo_geral")
-                        .reindex(columns=datas_h_mp)
-                        .fillna(0.0)
-                    )
-                    quedas_h_mp = (-piv_mp.diff(axis=1).iloc[:, 1:]).clip(lower=0.0).sum(axis=1)
-                    mapa_queda_hist_mp = quedas_h_mp.to_dict()
 
-            linhas_mp_tabela = []
-            for _, r_mp in df_cat_grp.sort_values("descricao").iterrows():
-                c_mp = str(r_mp["codigo"]).strip()
-                d_mp = str(r_mp["descricao"]).strip()
-                dep_mp = identificar_departamento_sku(c_mp, grupos_pref_custom, grupos_sku_custom)
-                eh_mp_at = identificar_produto_mp(c_mp, d_mp, grupos_sku_custom, mp_custom_map)
-                q_est_b = float(mapa_queda_hist_mp.get(c_mp, 0.0))
-                q_sai_f = float(mapa_qtd_sai_mp.get(c_mp, 0.0))
-                sug_ia_mp = (not eh_mp_at) and (q_est_b > 0.0) and (q_sai_f <= 0.0) and (c_mp not in mp_custom_map)
-                if eh_mp_at:
-                    if c_mp in mp_custom_map:
-                        diag_mp = "🏭 MP Ativo (Marcado Manualmente)"
-                    else:
-                        diag_mp = "🏭 MP Ativo (Automático por Nome MP/ME)"
-                elif sug_ia_mp:
-                    diag_mp = "💡 Sugerido IA (Queda no estoque s/ saída faturada)"
-                else:
-                    diag_mp = "🏪 Loja Varejo"
-
-                linhas_mp_tabela.append(
+            mapa_depto_ativo = construir_mapa_departamentos(grupos_pref_custom)
+            todos_prefixos = sorted(set(mapa_depto_ativo.keys()) | set(contagem_pref.keys()))
+            linhas_editor_pref = []
+            for pref_p in todos_prefixos:
+                if not str(pref_p).strip():
+                    continue
+                linhas_editor_pref.append(
                     {
-                        "codigo": c_mp,
-                        "descricao": d_mp,
-                        "departamento": dep_mp,
-                        "eh_mp": bool(eh_mp_at),
-                        "sugerido_ia": bool(sug_ia_mp),
-                        "diagnostico_mp": diag_mp,
-                        "baixa_estoque": q_est_b,
-                        "saida_faturada": q_sai_f,
+                        "Prefixo (2 dígitos)": str(pref_p).strip(),
+                        "Nome do Grupo / Departamento": mapa_depto_ativo.get(str(pref_p).strip(), f"Outros ({pref_p})"),
+                        "SKUs no Catálogo": int(contagem_pref.get(str(pref_p).strip(), 0)),
+                        "Exemplo de Produto no ERP": exemplo_pref.get(str(pref_p).strip(), "-"),
                     }
                 )
-            df_mp_catalogo = pd.DataFrame(linhas_mp_tabela)
-            qtd_mp_ativos_tot = int(df_mp_catalogo["eh_mp"].sum())
-            qtd_sug_ia_mp = int(df_mp_catalogo["sugerido_ia"].sum())
+            df_ed_pref_in = pd.DataFrame(linhas_editor_pref)
 
-            f_mp1, f_mp2, f_mp3 = st.columns([1.4, 1.3, 1.3])
-            with f_mp1:
-                busca_mp_txt = st.text_input(
-                    "🔍 Buscar insumo / produto (código ou nome):",
-                    placeholder="Ex: milho, sorgo, bicarbonato, 2601...",
-                    key="busca_txt_mp_aba7",
-                )
-            with f_mp2:
-                deptos_mp_opcoes = ["Todos os Grupos"] + sorted(df_mp_catalogo["departamento"].unique())
-                depto_mp_sel = st.selectbox(
-                    "📂 Filtrar por Grupo / Prefixo:",
-                    options=deptos_mp_opcoes,
-                    index=0,
-                    key="sel_depto_mp_aba7",
-                )
-            with f_mp3:
-                status_mp_filtro = st.selectbox(
-                    "🏷️ Filtrar Classificação:",
-                    options=[
-                        f"🏭 Marcados como MP ({formatar_num_br(qtd_mp_ativos_tot)}) + 💡 Sugeridos IA ({formatar_num_br(qtd_sug_ia_mp)})",
-                        f"🏭 Apenas Marcados como MP ({formatar_num_br(qtd_mp_ativos_tot)})",
-                        f"💡 Apenas Sugeridos pela IA ({formatar_num_br(qtd_sug_ia_mp)})",
-                        "📋 Todos os Produtos do Catálogo",
-                        "🏪 Apenas Loja Varejo",
-                    ],
-                    index=0,
-                    key="sel_status_mp_aba7",
-                )
-
-            df_mp_view = df_mp_catalogo.copy()
-            if depto_mp_sel != "Todos os Grupos":
-                df_mp_view = df_mp_view[df_mp_view["departamento"] == depto_mp_sel].copy()
-            if status_mp_filtro.startswith("🏭 Marcados como MP"):
-                df_mp_view = df_mp_view[df_mp_view["eh_mp"] | df_mp_view["sugerido_ia"]].copy()
-            elif status_mp_filtro.startswith("🏭 Apenas Marcados"):
-                df_mp_view = df_mp_view[df_mp_view["eh_mp"]].copy()
-            elif status_mp_filtro.startswith("💡 Apenas Sugeridos"):
-                df_mp_view = df_mp_view[df_mp_view["sugerido_ia"]].copy()
-            elif status_mp_filtro.startswith("🏪 Apenas Loja"):
-                df_mp_view = df_mp_view[~df_mp_view["eh_mp"]].copy()
-
-            if busca_mp_txt and busca_mp_txt.strip():
-                t_mp = busca_mp_txt.lower().strip()
-                df_mp_view = df_mp_view[
-                    df_mp_view["codigo"].str.lower().str.contains(t_mp, na=False, regex=False)
-                    | df_mp_view["descricao"].str.lower().str.contains(t_mp, na=False, regex=False)
-                ].copy()
-
-            df_mp_view = df_mp_view.sort_values(
-                ["eh_mp", "sugerido_ia", "baixa_estoque", "descricao"],
-                ascending=[False, False, False, True],
-            ).reset_index(drop=True)
-
-            st.caption(
-                f"Exibindo **{formatar_num_br(len(df_mp_view))} produto(s)** | "
-                f"Total marcado como MP na empresa: **{formatar_num_br(qtd_mp_ativos_tot)}** | "
-                f"Sugeridos pela IA: **{formatar_num_br(qtd_sug_ia_mp)}**"
-            )
-
-            df_mp_ed_in = pd.DataFrame(
-                {
-                    "eh_mp": df_mp_view["eh_mp"].values,
-                    "Cód.": df_mp_view["codigo"].values,
-                    "Descrição": df_mp_view["descricao"].values,
-                    "Grupo": df_mp_view["departamento"].values,
-                    "Diagnóstico & Origem": df_mp_view["diagnostico_mp"].values,
-                    "Baixa Estoque": [formatar_qtd_br(v) for v in df_mp_view["baixa_estoque"].values],
-                    "Saída Faturada": [formatar_qtd_br(v) for v in df_mp_view["saida_faturada"].values],
-                }
-            )
-            ed_mp_out = st.data_editor(
-                df_mp_ed_in,
+            st.markdown("##### 1. Editar Nomes dos Grupos por Prefixo (2 Primeiros Dígitos do Código)")
+            ed_pref_out = st.data_editor(
+                df_ed_pref_in,
                 use_container_width=True,
                 hide_index=True,
-                height=340,
-                key="editor_tabela_mp_aba7",
-                disabled=["Cód.", "Descrição", "Grupo", "Diagnóstico & Origem", "Baixa Estoque", "Saída Faturada"],
+                num_rows="dynamic",
+                key="editor_grupos_prefixo_aba7",
+                disabled=["SKUs no Catálogo", "Exemplo de Produto no ERP"],
                 column_config={
-                    "eh_mp": st.column_config.CheckboxColumn(
-                        "🏭 MP?",
-                        help="Marque se este produto é Matéria-Prima / Insumo de transformação da fábrica de ração.",
-                        default=False,
+                    "Prefixo (2 dígitos)": st.column_config.TextColumn(
+                        "Prefixo (2 dígitos)",
+                        help="2 primeiros dígitos do código do produto no Siagri (ex: 50, 70, 26, 90).",
                         width="small",
                     ),
-                    "Cód.": st.column_config.TextColumn("Cód.", width="small"),
-                    "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
-                    "Grupo": st.column_config.TextColumn("Grupo", width="medium"),
-                    "Diagnóstico & Origem": st.column_config.TextColumn("Diagnóstico & Origem", width="medium"),
-                    "Baixa Estoque": st.column_config.TextColumn("Baixa Estoque", help="Total de redução de saldo observada no histórico de estoque.", width="small"),
-                    "Saída Faturada": st.column_config.TextColumn("Saída Faturada", help="Total vendido registrado nas planilhas de Saídas Faturadas.", width="small"),
+                    "Nome do Grupo / Departamento": st.column_config.TextColumn(
+                        "Nome do Grupo / Departamento",
+                        help="Clique duas vezes para editar o nome deste grupo como preferir.",
+                        width="medium",
+                    ),
+                    "SKUs no Catálogo": st.column_config.NumberColumn(
+                        "SKUs no Catálogo",
+                        help="Quantidade de produtos cadastrados que começam com este prefixo.",
+                        width="small",
+                    ),
+                    "Exemplo de Produto no ERP": st.column_config.TextColumn(
+                        "Exemplo de Produto no ERP",
+                        help="Exemplo de produto deste prefixo para ajudar a identificar grupos 'Outros'.",
+                        width="medium",
+                    ),
                 },
             )
+            cg_b1, cg_b2 = st.columns([1.6, 1.0])
+            with cg_b1:
+                if st.button("💾 Salvar Nomes dos Grupos por Prefixo na Nuvem", type="primary", use_container_width=True, key="btn_salvar_grp_pref"):
+                    with st.spinner("Salvando configuração de grupos no Supabase..."):
+                        try:
+                            novo_pref_dict = {}
+                            for _, r_gp in ed_pref_out.iterrows():
+                                p_k = str(r_gp.get("Prefixo (2 dígitos)", "")).strip()
+                                n_v = str(r_gp.get("Nome do Grupo / Departamento", "")).strip()
+                                if p_k and n_v:
+                                    novo_pref_dict[p_k] = n_v
+                            df_meta_grp = montar_dataframe_meta_completo(
+                                dias_base_val=int(dias_base_atual),
+                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                grupos_pref_custom=novo_pref_dict,
+                                grupos_sku_custom=grupos_sku_custom,
+                            )
+                            gravar_tabela_sql(db_supabase, "meta", df_meta_grp)
+                            st.session_state.pop("bkp_db_xlsx_bytes", None)
+                            st.session_state.pop("backup_zip_bytes", None)
+                            carregar_estado_completo.clear()
+                            st.session_state["msg_sucesso_sync"] = "✅ Nomes dos grupos atualizados e salvos na nuvem com sucesso!"
+                            st.rerun()
+                        except Exception as e_gp:
+                            st.error(f"❌ Erro ao salvar grupos: {e_gp}")
+            with cg_b2:
+                if st.button("🔄 Restaurar Nomes Padrão dos Prefixos", use_container_width=True, key="btn_reset_grp_pref"):
+                    with st.spinner("Restaurando nomes padrão..."):
+                        try:
+                            df_meta_grp = montar_dataframe_meta_completo(
+                                dias_base_val=int(dias_base_atual),
+                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                grupos_pref_custom={},
+                                grupos_sku_custom=grupos_sku_custom,
+                            )
+                            gravar_tabela_sql(db_supabase, "meta", df_meta_grp)
+                            carregar_estado_completo.clear()
+                            st.session_state["msg_sucesso_sync"] = "✅ Nomes padrão dos prefixos restaurados!"
+                            st.rerun()
+                        except Exception as e_rst_gp:
+                            st.error(f"❌ Erro ao restaurar: {e_rst_gp}")
 
-            cmp_b1, cmp_b2 = st.columns([1.6, 1.2])
-            with cmp_b1:
-                if st.button(
-                    "💾 Salvar Marcações de MP da Tabela no Supabase",
-                    type="primary",
+            st.markdown("---")
+            st.markdown("##### 2. Visualizar Produtos por Grupo & Mover em Lote para Outro Grupo")
+            st.caption(
+                "Filtre qualquer grupo atual (ex.: `Outros (90)` ou `50 - Veterinária & Reprodução`) para ver todos os produtos que estão dentro dele, "
+                "marque os itens desejados na tabela e mova-os para outro grupo (ou devolva-os ao grupo original do prefixo)."
+            )
+            if not df_cat_grp.empty:
+                linhas_grp_cat = []
+                for _, r_gc in df_cat_grp.sort_values("descricao").iterrows():
+                    c_gc = str(r_gc["codigo"]).strip()
+                    d_gc = str(r_gc["descricao"]).strip()
+                    pref_gc = c_gc[:2] if len(c_gc) >= 2 else c_gc
+                    grp_padrao_gc = mapa_depto_ativo.get(pref_gc, f"Outros ({pref_gc or 'S/C'})")
+                    grp_atual_gc = identificar_departamento_sku(c_gc, grupos_pref_custom, grupos_sku_custom)
+                    eh_mov_manual = c_gc in grupos_sku_custom
+                    linhas_grp_cat.append(
+                        {
+                            "codigo": c_gc,
+                            "descricao": d_gc,
+                            "grupo_atual": grp_atual_gc,
+                            "grupo_padrao": grp_padrao_gc,
+                            "movido_manual": eh_mov_manual,
+                            "origem_label": "📌 Movido Manualmente" if eh_mov_manual else "🏷️ Padrão do Prefixo",
+                        }
+                    )
+                df_grp_cat_full = pd.DataFrame(linhas_grp_cat)
+                contagem_grp_atual = df_grp_cat_full.groupby("grupo_atual")["codigo"].count().to_dict()
+                opcoes_grp_filtro = ["Todos os Grupos"] + sorted(df_grp_cat_full["grupo_atual"].unique())
+
+                fg1, fg2, fg3 = st.columns([1.5, 1.3, 1.2])
+                with fg1:
+                    grp_atual_filtro = st.selectbox(
+                        "📂 Filtrar Grupo Atual (ver itens dentro do grupo):",
+                        options=opcoes_grp_filtro,
+                        format_func=lambda g: (
+                            f"Todos os Grupos ({formatar_num_br(len(df_grp_cat_full))} SKUs)"
+                            if g == "Todos os Grupos"
+                            else f"{g} ({formatar_num_br(contagem_grp_atual.get(g, 0))} SKUs)"
+                        ),
+                        key="sel_filtro_grp_atual_aba7",
+                    )
+                with fg2:
+                    busca_grp_sku_txt = st.text_input(
+                        "🔍 Buscar produto dentro do filtro:",
+                        placeholder="Digite código ou nome...",
+                        key="busca_txt_grp_sku_aba7",
+                    )
+                with fg3:
+                    filtro_origem_grp = st.selectbox(
+                        "🏷️ Filtrar Origem:",
+                        options=[
+                            "📋 Todos os Produtos do Filtro",
+                            f"📌 Apenas Movidos Manualmente ({formatar_num_br(len(grupos_sku_custom))})",
+                            "🏷️ Apenas no Grupo Padrão do Prefixo",
+                        ],
+                        index=0,
+                        key="sel_origem_grp_aba7",
+                    )
+
+                df_grp_view = df_grp_cat_full.copy()
+                if grp_atual_filtro != "Todos os Grupos":
+                    df_grp_view = df_grp_view[df_grp_view["grupo_atual"] == grp_atual_filtro].copy()
+                if filtro_origem_grp.startswith("📌"):
+                    df_grp_view = df_grp_view[df_grp_view["movido_manual"] == True].copy()
+                elif filtro_origem_grp.startswith("🏷️"):
+                    df_grp_view = df_grp_view[df_grp_view["movido_manual"] == False].copy()
+                if busca_grp_sku_txt and busca_grp_sku_txt.strip():
+                    t_g = busca_grp_sku_txt.lower().strip()
+                    df_grp_view = df_grp_view[
+                        df_grp_view["codigo"].str.lower().str.contains(t_g, na=False, regex=False)
+                        | df_grp_view["descricao"].str.lower().str.contains(t_g, na=False, regex=False)
+                    ].copy()
+
+                df_grp_view = df_grp_view.reset_index(drop=True)
+                cg_sel1, cg_sel2 = st.columns([1.5, 2.5])
+                with cg_sel1:
+                    marcar_todos_grp_view = st.checkbox(
+                        f"Selecionar todos os {formatar_num_br(len(df_grp_view))} produto(s) filtrados",
+                        value=False,
+                        key="chk_sel_todos_grp_aba7",
+                    )
+                with cg_sel2:
+                    st.caption(
+                        f"Exibindo **{formatar_num_br(len(df_grp_view))} produto(s)** | "
+                        f"Total de exceções personalizadas ativas: **{formatar_num_br(len(grupos_sku_custom))}**"
+                    )
+
+                df_grp_ed_in = pd.DataFrame(
+                    {
+                        "selecionar": [bool(marcar_todos_grp_view)] * len(df_grp_view),
+                        "Cód.": df_grp_view["codigo"].values,
+                        "Descrição": df_grp_view["descricao"].values,
+                        "Grupo Atual": df_grp_view["grupo_atual"].values,
+                        "Grupo Original (Prefixo)": df_grp_view["grupo_padrao"].values,
+                        "Origem": df_grp_view["origem_label"].values,
+                    }
+                )
+                ed_grp_out = st.data_editor(
+                    df_grp_ed_in,
                     use_container_width=True,
-                    disabled=ed_mp_out.empty,
-                    key="btn_salvar_tabela_mp_aba7",
-                ):
-                    with st.spinner("Salvando classificação de Matérias-Primas no Supabase..."):
-                        try:
-                            novo_mp_map = dict(mp_custom_map)
-                            qtd_alterados_mp = 0
-                            for idx_row_m, r_ed_m in ed_mp_out.iterrows():
-                                cod_m = normalizar_codigo_sku(r_ed_m["Cód."])
-                                flag_nova = bool(r_ed_m["eh_mp"])
-                                flag_antiga = bool(df_mp_view.loc[idx_row_m, "eh_mp"])
-                                if cod_m and flag_nova != flag_antiga:
-                                    novo_mp_map[cod_m] = "1" if flag_nova else "0"
-                                    qtd_alterados_mp += 1
-                            df_meta_mp = montar_dataframe_meta_completo(
-                                dias_base_val=int(dias_base_atual),
-                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
-                                grupos_pref_custom=grupos_pref_custom,
-                                grupos_sku_custom=grupos_sku_custom,
-                                mp_custom_map=novo_mp_map,
-                            )
-                            gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
-                            carregar_estado_completo.clear()
-                            calcular_motor_giro_sazonal.clear()
-                            st.session_state["msg_sucesso_sync"] = (
-                                f"✅ Classificação de Matéria-Prima atualizada com sucesso ({formatar_num_br(qtd_alterados_mp)} alteração(ões) salva(s))!"
-                            )
-                            st.rerun()
-                        except Exception as e_mp_tab:
-                            st.error(f"❌ Erro ao salvar classificação MP: {e_mp_tab}")
-            with cmp_b2:
-                if st.button(
-                    f"🏭 Marcar Todos os {formatar_num_br(len(ed_mp_out))} Filtrados como MP",
+                    hide_index=True,
+                    height=340,
+                    key="editor_mover_grupos_aba7",
+                    disabled=["Cód.", "Descrição", "Grupo Atual", "Grupo Original (Prefixo)", "Origem"],
+                    column_config={
+                        "selecionar": st.column_config.CheckboxColumn(
+                            "Mover?",
+                            help="Marque os produtos que deseja transferir de grupo ou devolver ao grupo original.",
+                            default=False,
+                            width="small",
+                        ),
+                        "Cód.": st.column_config.TextColumn("Cód.", width="small"),
+                        "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+                        "Grupo Atual": st.column_config.TextColumn("Grupo Atual", width="medium"),
+                        "Grupo Original (Prefixo)": st.column_config.TextColumn("Grupo Original (Prefixo)", width="medium"),
+                        "Origem": st.column_config.TextColumn("Origem", width="small"),
+                    },
+                )
+
+                sel_grp_rows = ed_grp_out[ed_grp_out["selecionar"] == True]
+                cods_sel_grp = [normalizar_codigo_sku(c) for c in sel_grp_rows["Cód."].tolist() if normalizar_codigo_sku(c)]
+                qtd_sel_grp = len(cods_sel_grp)
+                qtd_sel_com_excecao = sum(1 for c in cods_sel_grp if c in grupos_sku_custom)
+
+                grupos_disponiveis_destino = sorted(
+                    list(
+                        set(mapa_depto_ativo.values())
+                        | set(grupos_sku_custom.values())
+                        | {f"Outros ({p})" for p in todos_prefixos if p not in mapa_depto_ativo}
+                    )
+                )
+                cm_sku1, cm_sku2, cm_sku3 = st.columns([1.5, 1.3, 1.2])
+                with cm_sku1:
+                    grupo_destino_sel = st.selectbox(
+                        "Grupo de Destino para os Selecionados:",
+                        options=grupos_disponiveis_destino + ["➕ Digitar Novo Nome de Grupo..."],
+                        key="sel_grupo_destino_sku",
+                    )
+                    if grupo_destino_sel == "➕ Digitar Novo Nome de Grupo...":
+                        grupo_destino_final = st.text_input(
+                            "Digite o nome do novo grupo:",
+                            placeholder="Ex: 99 - Uso Interno / Fábrica",
+                            key="txt_novo_grupo_sku_custom",
+                        ).strip()
+                    else:
+                        grupo_destino_final = grupo_destino_sel
+                with cm_sku2:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    if st.button(
+                        f"📌 Mover ({formatar_num_br(qtd_sel_grp)}) para o Destino",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=(qtd_sel_grp == 0 or not grupo_destino_final),
+                        key="btn_fixar_sku_grupo",
+                    ):
+                        with st.spinner("Movendo produtos selecionados no Supabase..."):
+                            try:
+                                novo_sku_custom = dict(grupos_sku_custom)
+                                for cod_alvo_m in cods_sel_grp:
+                                    novo_sku_custom[cod_alvo_m] = grupo_destino_final
+                                df_meta_sku = montar_dataframe_meta_completo(
+                                    dias_base_val=int(dias_base_atual),
+                                    ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                    grupos_pref_custom=grupos_pref_custom,
+                                    grupos_sku_custom=novo_sku_custom,
+                                )
+                                gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
+                                carregar_estado_completo.clear()
+                                calcular_motor_giro_sazonal.clear()
+                                st.session_state["msg_sucesso_sync"] = (
+                                    f"✅ {formatar_num_br(qtd_sel_grp)} produto(s) movido(s) para o grupo '{grupo_destino_final}'!"
+                                )
+                                st.rerun()
+                            except Exception as e_sk_g:
+                                st.error(f"❌ Erro ao mover produto de grupo: {e_sk_g}")
+                with cm_sku3:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    if st.button(
+                        f"↩️ Devolver ({formatar_num_br(qtd_sel_com_excecao)}) ao Original",
+                        use_container_width=True,
+                        disabled=(qtd_sel_com_excecao == 0),
+                        key="btn_rem_excecao_sku_grp",
+                    ):
+                        with st.spinner("Devolvendo produtos ao grupo original no Supabase..."):
+                            try:
+                                set_dev_g = set(cods_sel_grp)
+                                novo_sku_custom = {
+                                    k: v
+                                    for k, v in grupos_sku_custom.items()
+                                    if k not in set_dev_g
+                                }
+                                df_meta_sku = montar_dataframe_meta_completo(
+                                    dias_base_val=int(dias_base_atual),
+                                    ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                    grupos_pref_custom=grupos_pref_custom,
+                                    grupos_sku_custom=novo_sku_custom,
+                                )
+                                gravar_tabela_sql(db_supabase, "meta", df_meta_sku)
+                                carregar_estado_completo.clear()
+                                calcular_motor_giro_sazonal.clear()
+                                st.session_state["msg_sucesso_sync"] = (
+                                    f"✅ {formatar_num_br(qtd_sel_com_excecao)} produto(s) devolvido(s) ao grupo original do prefixo!"
+                                )
+                                st.rerun()
+                            except Exception as e_rm_sk:
+                                st.error(f"❌ Erro ao devolver produtos ao grupo original: {e_rm_sk}")
+
+            st.markdown("---")
+            st.markdown("##### 3. Definir Produtos de Matéria-Prima / Produção de Ração (MP — Saída por Ordem de Produção)")
+            st.caption(
+                "Itens de transformação para produção de ração não aparecem no relatório de Saídas Faturadas — o sistema apura o consumo deles "
+                "pela equação fechada de fábrica (**Estoque Inicial + Entrada NF − Estoque Final**). "
+                "Use os filtros abaixo para localizar insumos da fábrica (inclusive os **💡 Sugeridos pela IA**, que tiveram queda de estoque sem venda faturada) "
+                "e marque a caixinha **🏭 É MP / Produção?** diretamente na tabela."
+            )
+            if not df_cat_grp.empty:
+                # Apura quedas no histórico vs. saídas faturadas para sugerir automaticamente itens de transformação/produção
+                mapa_qtd_sai_mp = (
+                    df_saidas_bruto.groupby("codigo")["qtd_saida"].sum().to_dict()
+                    if (df_saidas_bruto is not None and not df_saidas_bruto.empty)
+                    else {}
+                )
+                mapa_queda_hist_mp = {}
+                if df_historico_bruto is not None and not df_historico_bruto.empty and "data" in df_historico_bruto.columns:
+                    datas_h_mp = sorted(df_historico_bruto["data"].dropna().unique())
+                    if len(datas_h_mp) >= 2:
+                        piv_mp = (
+                            df_historico_bruto.drop_duplicates(subset=["codigo", "data"], keep="last")
+                            .pivot(index="codigo", columns="data", values="saldo_geral")
+                            .reindex(columns=datas_h_mp)
+                            .fillna(0.0)
+                        )
+                        quedas_h_mp = (-piv_mp.diff(axis=1).iloc[:, 1:]).clip(lower=0.0).sum(axis=1)
+                        mapa_queda_hist_mp = quedas_h_mp.to_dict()
+
+                linhas_mp_tabela = []
+                for _, r_mp in df_cat_grp.sort_values("descricao").iterrows():
+                    c_mp = str(r_mp["codigo"]).strip()
+                    d_mp = str(r_mp["descricao"]).strip()
+                    dep_mp = identificar_departamento_sku(c_mp, grupos_pref_custom, grupos_sku_custom)
+                    eh_mp_at = identificar_produto_mp(c_mp, d_mp, grupos_sku_custom, mp_custom_map)
+                    q_est_b = float(mapa_queda_hist_mp.get(c_mp, 0.0))
+                    q_sai_f = float(mapa_qtd_sai_mp.get(c_mp, 0.0))
+                    sug_ia_mp = (not eh_mp_at) and (q_est_b > 0.0) and (q_sai_f <= 0.0) and (c_mp not in mp_custom_map)
+                    if eh_mp_at:
+                        if c_mp in mp_custom_map:
+                            diag_mp = "🏭 MP Ativo (Marcado Manualmente)"
+                        else:
+                            diag_mp = "🏭 MP Ativo (Automático por Nome MP/ME)"
+                    elif sug_ia_mp:
+                        diag_mp = "💡 Sugerido IA (Queda no estoque s/ saída faturada)"
+                    else:
+                        diag_mp = "🏪 Loja Varejo"
+
+                    linhas_mp_tabela.append(
+                        {
+                            "codigo": c_mp,
+                            "descricao": d_mp,
+                            "departamento": dep_mp,
+                            "eh_mp": bool(eh_mp_at),
+                            "sugerido_ia": bool(sug_ia_mp),
+                            "diagnostico_mp": diag_mp,
+                            "baixa_estoque": q_est_b,
+                            "saida_faturada": q_sai_f,
+                        }
+                    )
+                df_mp_catalogo = pd.DataFrame(linhas_mp_tabela)
+                qtd_mp_ativos_tot = int(df_mp_catalogo["eh_mp"].sum())
+                qtd_sug_ia_mp = int(df_mp_catalogo["sugerido_ia"].sum())
+
+                f_mp1, f_mp2, f_mp3 = st.columns([1.4, 1.3, 1.3])
+                with f_mp1:
+                    busca_mp_txt = st.text_input(
+                        "🔍 Buscar insumo / produto (código ou nome):",
+                        placeholder="Ex: milho, sorgo, bicarbonato, 2601...",
+                        key="busca_txt_mp_aba7",
+                    )
+                with f_mp2:
+                    deptos_mp_opcoes = ["Todos os Grupos"] + sorted(df_mp_catalogo["departamento"].unique())
+                    depto_mp_sel = st.selectbox(
+                        "📂 Filtrar por Grupo / Prefixo:",
+                        options=deptos_mp_opcoes,
+                        index=0,
+                        key="sel_depto_mp_aba7",
+                    )
+                with f_mp3:
+                    status_mp_filtro = st.selectbox(
+                        "🏷️ Filtrar Classificação:",
+                        options=[
+                            f"🏭 Marcados como MP ({formatar_num_br(qtd_mp_ativos_tot)}) + 💡 Sugeridos IA ({formatar_num_br(qtd_sug_ia_mp)})",
+                            f"🏭 Apenas Marcados como MP ({formatar_num_br(qtd_mp_ativos_tot)})",
+                            f"💡 Apenas Sugeridos pela IA ({formatar_num_br(qtd_sug_ia_mp)})",
+                            "📋 Todos os Produtos do Catálogo",
+                            "🏪 Apenas Loja Varejo",
+                        ],
+                        index=0,
+                        key="sel_status_mp_aba7",
+                    )
+
+                df_mp_view = df_mp_catalogo.copy()
+                if depto_mp_sel != "Todos os Grupos":
+                    df_mp_view = df_mp_view[df_mp_view["departamento"] == depto_mp_sel].copy()
+                if status_mp_filtro.startswith("🏭 Marcados como MP"):
+                    df_mp_view = df_mp_view[df_mp_view["eh_mp"] | df_mp_view["sugerido_ia"]].copy()
+                elif status_mp_filtro.startswith("🏭 Apenas Marcados"):
+                    df_mp_view = df_mp_view[df_mp_view["eh_mp"]].copy()
+                elif status_mp_filtro.startswith("💡 Apenas Sugeridos"):
+                    df_mp_view = df_mp_view[df_mp_view["sugerido_ia"]].copy()
+                elif status_mp_filtro.startswith("🏪 Apenas Loja"):
+                    df_mp_view = df_mp_view[~df_mp_view["eh_mp"]].copy()
+
+                if busca_mp_txt and busca_mp_txt.strip():
+                    t_mp = busca_mp_txt.lower().strip()
+                    df_mp_view = df_mp_view[
+                        df_mp_view["codigo"].str.lower().str.contains(t_mp, na=False, regex=False)
+                        | df_mp_view["descricao"].str.lower().str.contains(t_mp, na=False, regex=False)
+                    ].copy()
+
+                df_mp_view = df_mp_view.sort_values(
+                    ["eh_mp", "sugerido_ia", "baixa_estoque", "descricao"],
+                    ascending=[False, False, False, True],
+                ).reset_index(drop=True)
+
+                st.caption(
+                    f"Exibindo **{formatar_num_br(len(df_mp_view))} produto(s)** | "
+                    f"Total marcado como MP na empresa: **{formatar_num_br(qtd_mp_ativos_tot)}** | "
+                    f"Sugeridos pela IA: **{formatar_num_br(qtd_sug_ia_mp)}**"
+                )
+
+                df_mp_ed_in = pd.DataFrame(
+                    {
+                        "eh_mp": df_mp_view["eh_mp"].values,
+                        "Cód.": df_mp_view["codigo"].values,
+                        "Descrição": df_mp_view["descricao"].values,
+                        "Grupo": df_mp_view["departamento"].values,
+                        "Diagnóstico & Origem": df_mp_view["diagnostico_mp"].values,
+                        "Baixa Estoque": [formatar_qtd_br(v) for v in df_mp_view["baixa_estoque"].values],
+                        "Saída Faturada": [formatar_qtd_br(v) for v in df_mp_view["saida_faturada"].values],
+                    }
+                )
+                ed_mp_out = st.data_editor(
+                    df_mp_ed_in,
                     use_container_width=True,
-                    disabled=ed_mp_out.empty,
-                    key="btn_marcar_todos_filtrados_mp",
-                ):
-                    with st.spinner("Marcando todos os itens filtrados como MP..."):
-                        try:
-                            novo_mp_map = dict(mp_custom_map)
-                            for _, r_ed_m in ed_mp_out.iterrows():
-                                cod_m = normalizar_codigo_sku(r_ed_m["Cód."])
-                                if cod_m:
-                                    novo_mp_map[cod_m] = "1"
-                            df_meta_mp = montar_dataframe_meta_completo(
-                                dias_base_val=int(dias_base_atual),
-                                ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
-                                grupos_pref_custom=grupos_pref_custom,
-                                grupos_sku_custom=grupos_sku_custom,
-                                mp_custom_map=novo_mp_map,
-                            )
-                            gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
-                            carregar_estado_completo.clear()
-                            calcular_motor_giro_sazonal.clear()
-                            st.session_state["msg_sucesso_sync"] = (
-                                f"✅ Todos os {formatar_num_br(len(ed_mp_out))} item(ns) filtrados foram marcados como Matéria-Prima de Fábrica!"
-                            )
-                            st.rerun()
-                        except Exception as e_mp_all:
-                            st.error(f"❌ Erro ao marcar filtrados como MP: {e_mp_all}")
+                    hide_index=True,
+                    height=340,
+                    key="editor_tabela_mp_aba7",
+                    disabled=["Cód.", "Descrição", "Grupo", "Diagnóstico & Origem", "Baixa Estoque", "Saída Faturada"],
+                    column_config={
+                        "eh_mp": st.column_config.CheckboxColumn(
+                            "🏭 MP?",
+                            help="Marque se este produto é Matéria-Prima / Insumo de transformação da fábrica de ração.",
+                            default=False,
+                            width="small",
+                        ),
+                        "Cód.": st.column_config.TextColumn("Cód.", width="small"),
+                        "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+                        "Grupo": st.column_config.TextColumn("Grupo", width="medium"),
+                        "Diagnóstico & Origem": st.column_config.TextColumn("Diagnóstico & Origem", width="medium"),
+                        "Baixa Estoque": st.column_config.TextColumn("Baixa Estoque", help="Total de redução de saldo observada no histórico de estoque.", width="small"),
+                        "Saída Faturada": st.column_config.TextColumn("Saída Faturada", help="Total vendido registrado nas planilhas de Saídas Faturadas.", width="small"),
+                    },
+                )
+
+                cmp_b1, cmp_b2 = st.columns([1.6, 1.2])
+                with cmp_b1:
+                    if st.button(
+                        "💾 Salvar Marcações de MP da Tabela no Supabase",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=ed_mp_out.empty,
+                        key="btn_salvar_tabela_mp_aba7",
+                    ):
+                        with st.spinner("Salvando classificação de Matérias-Primas no Supabase..."):
+                            try:
+                                novo_mp_map = dict(mp_custom_map)
+                                qtd_alterados_mp = 0
+                                for idx_row_m, r_ed_m in ed_mp_out.iterrows():
+                                    cod_m = normalizar_codigo_sku(r_ed_m["Cód."])
+                                    flag_nova = bool(r_ed_m["eh_mp"])
+                                    flag_antiga = bool(df_mp_view.loc[idx_row_m, "eh_mp"])
+                                    if cod_m and flag_nova != flag_antiga:
+                                        novo_mp_map[cod_m] = "1" if flag_nova else "0"
+                                        qtd_alterados_mp += 1
+                                df_meta_mp = montar_dataframe_meta_completo(
+                                    dias_base_val=int(dias_base_atual),
+                                    ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                    grupos_pref_custom=grupos_pref_custom,
+                                    grupos_sku_custom=grupos_sku_custom,
+                                    mp_custom_map=novo_mp_map,
+                                )
+                                gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
+                                carregar_estado_completo.clear()
+                                calcular_motor_giro_sazonal.clear()
+                                st.session_state["msg_sucesso_sync"] = (
+                                    f"✅ Classificação de Matéria-Prima atualizada com sucesso ({formatar_num_br(qtd_alterados_mp)} alteração(ões) salva(s))!"
+                                )
+                                st.rerun()
+                            except Exception as e_mp_tab:
+                                st.error(f"❌ Erro ao salvar classificação MP: {e_mp_tab}")
+                with cmp_b2:
+                    if st.button(
+                        f"🏭 Marcar Todos os {formatar_num_br(len(ed_mp_out))} Filtrados como MP",
+                        use_container_width=True,
+                        disabled=ed_mp_out.empty,
+                        key="btn_marcar_todos_filtrados_mp",
+                    ):
+                        with st.spinner("Marcando todos os itens filtrados como MP..."):
+                            try:
+                                novo_mp_map = dict(mp_custom_map)
+                                for _, r_ed_m in ed_mp_out.iterrows():
+                                    cod_m = normalizar_codigo_sku(r_ed_m["Cód."])
+                                    if cod_m:
+                                        novo_mp_map[cod_m] = "1"
+                                df_meta_mp = montar_dataframe_meta_completo(
+                                    dias_base_val=int(dias_base_atual),
+                                    ult_att_val=str(estado.get("ultima_atualizacao", agora_br().strftime("%d/%m/%Y %H:%M:%S"))),
+                                    grupos_pref_custom=grupos_pref_custom,
+                                    grupos_sku_custom=grupos_sku_custom,
+                                    mp_custom_map=novo_mp_map,
+                                )
+                                gravar_tabela_sql(db_supabase, "meta", df_meta_mp)
+                                carregar_estado_completo.clear()
+                                calcular_motor_giro_sazonal.clear()
+                                st.session_state["msg_sucesso_sync"] = (
+                                    f"✅ Todos os {formatar_num_br(len(ed_mp_out))} item(ns) filtrados foram marcados como Matéria-Prima de Fábrica!"
+                                )
+                                st.rerun()
+                            except Exception as e_mp_all:
+                                st.error(f"❌ Erro ao marcar filtrados como MP: {e_mp_all}")
+
+
+        with st.expander("👥 Gerenciar Usuários de Acesso ao Aplicativo (Painel Administrador)", expanded=False):
+            st.caption(
+                "Cadastre novos usuários para consultar os painéis do sistema. **Apenas usuários com perfil Administrador** "
+                "podem subir planilhas ou alterar dados na Aba 7."
+            )
+            admin_mestre_u, _, _ = obter_credencial_admin_mestre()
+            if "msg_usuarios_aba7" in st.session_state:
+                st.success(st.session_state.pop("msg_usuarios_aba7"))
+
+            st.markdown("##### 1. Cadastrar Novo Usuário")
+            with st.form("form_novo_usuario_v22", clear_on_submit=True):
+                cu1, cu2, cu3, cu4 = st.columns([1.2, 1.5, 1.2, 1.0])
+                with cu1:
+                    novo_u_login = st.text_input("Usuário (Login):", placeholder="Ex: compras.esteio")
+                with cu2:
+                    novo_u_nome = st.text_input("Nome de Exibição:", placeholder="Ex: Compras Esteio")
+                with cu3:
+                    novo_u_senha = st.text_input("Senha Inicial:", type="password", placeholder="Mínimo 4 caracteres")
+                with cu4:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    novo_u_admin = st.checkbox("👑 Perfil Admin?", value=False, help="Deixe desmarcado para usuário padrão (não pode subir planilhas).")
+                btn_criar_u = st.form_submit_button("➕ Criar Usuário", type="primary")
+                if btn_criar_u:
+                    try:
+                        salvar_usuario_sql(
+                            db_supabase,
+                            username=novo_u_login,
+                            nome_exibicao=novo_u_nome,
+                            senha_plana=novo_u_senha,
+                            eh_admin=novo_u_admin,
+                            ativo=True,
+                        )
+                        st.session_state["msg_usuarios_aba7"] = (
+                            f"✅ Usuário `{_normalizar_username(novo_u_login)}` cadastrado com sucesso!"
+                        )
+                        st.rerun()
+                    except Exception as e_cu:
+                        st.error(f"❌ Não foi possível criar o usuário: {e_cu}")
+
+            st.markdown("---")
+            st.markdown("##### 2. Usuários Cadastrados (Ativar / Desativar / Excluir)")
+            df_usuarios_db = listar_usuarios_sql(db_supabase)
+            if not df_usuarios_db.empty:
+                df_u_ed_in = pd.DataFrame(
+                    {
+                        "Usuário": df_usuarios_db["username"].values,
+                        "Nome de Exibição": df_usuarios_db["nome_exibicao"].values,
+                        "Perfil": ["👑 Administrador" if a else "👤 Consulta (Sem Upload)" for a in df_usuarios_db["eh_admin"].values],
+                        "Ativo": df_usuarios_db["ativo"].values,
+                        "Criado em": df_usuarios_db["criado_em"].values,
+                        "Excluir": [False] * len(df_usuarios_db),
+                    }
+                )
+                ed_u_out = st.data_editor(
+                    df_u_ed_in,
+                    use_container_width=True,
+                    hide_index=True,
+                    key="editor_usuarios_v22",
+                    disabled=["Usuário", "Perfil", "Criado em"],
+                    column_config={
+                        "Usuário": st.column_config.TextColumn("Usuário", width="small"),
+                        "Nome de Exibição": st.column_config.TextColumn("Nome de Exibição", width="medium"),
+                        "Perfil": st.column_config.TextColumn("Perfil", width="small"),
+                        "Ativo": st.column_config.CheckboxColumn("Ativo?", width="small"),
+                        "Criado em": st.column_config.TextColumn("Criado em", width="small"),
+                        "Excluir": st.column_config.CheckboxColumn("Excluir?", width="small"),
+                    },
+                )
+                if st.button("💾 Salvar Alterações nos Usuários", type="primary", key="btn_salvar_ed_usuarios_v22"):
+                    try:
+                        lista_att_u = []
+                        lista_rm_u = []
+                        for _, r_u in ed_u_out.iterrows():
+                            u_cod = _normalizar_username(r_u["Usuário"])
+                            if bool(r_u["Excluir"]) and u_cod != admin_mestre_u:
+                                lista_rm_u.append(u_cod)
+                            else:
+                                lista_att_u.append((u_cod, r_u["Nome de Exibição"], bool(r_u["Ativo"])))
+                        atualizar_status_ou_remover_usuarios_sql(
+                            db_supabase,
+                            atualizacoes_status=lista_att_u,
+                            usernames_remover=lista_rm_u,
+                            admin_mestre_user=admin_mestre_u,
+                        )
+                        st.session_state["msg_usuarios_aba7"] = "✅ Lista de usuários atualizada com sucesso!"
+                        st.rerun()
+                    except Exception as e_sau:
+                        st.error(f"❌ Erro ao atualizar usuários: {e_sau}")
+
+                st.markdown("---")
+                st.markdown("##### 3. Redefinir Senha de um Usuário")
+                usuarios_redef = [u for u in df_usuarios_db["username"].tolist() if u != admin_mestre_u]
+                if usuarios_redef:
+                    cr_u1, cr_u2, cr_u3 = st.columns([1.4, 1.4, 1.0])
+                    with cr_u1:
+                        u_alvo_senha = st.selectbox("Selecione o Usuário:", options=usuarios_redef, key="sel_u_redef_senha_v22")
+                    with cr_u2:
+                        nova_senha_u_redef = st.text_input("Nova Senha:", type="password", key="txt_nova_senha_u_v22")
+                    with cr_u3:
+                        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                        if st.button("🔑 Alterar Senha", use_container_width=True, key="btn_redef_senha_u_v22"):
+                            try:
+                                row_u_sel = df_usuarios_db[df_usuarios_db["username"] == u_alvo_senha].iloc[0]
+                                salvar_usuario_sql(
+                                    db_supabase,
+                                    username=u_alvo_senha,
+                                    nome_exibicao=str(row_u_sel["nome_exibicao"]),
+                                    senha_plana=nova_senha_u_redef,
+                                    eh_admin=bool(row_u_sel["eh_admin"]),
+                                    ativo=bool(row_u_sel["ativo"]),
+                                )
+                                st.session_state["msg_usuarios_aba7"] = f"✅ Senha do usuário `{u_alvo_senha}` alterada!"
+                                st.rerun()
+                            except Exception as e_rsu:
+                                st.error(f"❌ Erro ao alterar senha: {e_rsu}")
+                else:
+                    st.caption(
+                        f"ℹ️ A senha do Administrador Mestre (`{admin_mestre_u}`) é protegida diretamente via `app_password` em `st.secrets`."
+                    )
 
     r1, r2, r3, r4 = st.columns(4)
     qtd_skus_visiveis = df_estoque["codigo"].nunique() if (not df_estoque.empty and "codigo" in df_estoque.columns) else 0
