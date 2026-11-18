@@ -510,6 +510,7 @@ COLUNAS_NUMERICAS = {
     "saldo_geral",
     "saldo_lote",
     "custo_unitario",
+    "preco_tabela",
     "qtd_vendida",
     "qtd_entrada",
     "valor_entrada",
@@ -522,7 +523,7 @@ ESQUEMA_ABAS = {
     "historico": ["codigo", "saldo_geral", "data"],
     "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "valor_entrada", "data"],
     "saidas_diarias": ["codigo", "descricao", "qtd_saida", "valor_venda", "data"],
-    "custos": ["codigo", "descricao", "custo_unitario"],
+    "custos": ["codigo", "descricao", "custo_unitario", "preco_tabela"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
     "ocultos": ["codigo", "descricao", "data_ocultado"],
     "pedidos_transito": ["codigo", "descricao", "qtd_comprada", "data_compra", "silenciar_ate"],
@@ -544,7 +545,7 @@ ORDEM_POSICIONAL_PADRAO = {
     "historico": ["codigo", "saldo_geral", "data"],
     "entradas_diarias": ["codigo", "descricao", "qtd_entrada", "valor_entrada", "data"],
     "saidas_diarias": ["codigo", "descricao", "qtd_saida", "valor_venda", "data"],
-    "custos": ["codigo", "descricao", "custo_unitario"],
+    "custos": ["codigo", "descricao", "preco_tabela", "custo_unitario"],
     "base_inicial": ["codigo", "descricao", "qtd_vendida"],
     "ocultos": ["codigo", "descricao", "data_ocultado"],
     "pedidos_transito": ["codigo", "descricao", "qtd_comprada", "data_compra", "silenciar_ate"],
@@ -646,6 +647,19 @@ MAPA_SINONIMOS = {
         "preco_custo",
         "valor_unitario",
         "cmv",
+    ],
+    "preco_tabela": [
+        "preco_tabela",
+        "t1",
+        "tabela_1",
+        "tabela1",
+        "preco_venda",
+        "preco_de_venda",
+        "preco_cheio",
+        "preco_normal",
+        "vlr_venda",
+        "valor_tabela",
+        "preco",
     ],
     "qtd_vendida": [
         "qtd_vendida",
@@ -1070,6 +1084,8 @@ def estruturar_dataframe_bruto(
             ordem_padrao = ["codigo", "descricao", "qtd_saida", "data"]
         elif aba_esquema == "entradas_diarias" and df_orig.shape[1] == 4 and "valor_entrada" not in alvos_encontrados:
             ordem_padrao = ["codigo", "descricao", "qtd_entrada", "data"]
+        elif aba_esquema == "custos" and df_orig.shape[1] == 3 and "preco_tabela" not in alvos_encontrados:
+            ordem_padrao = ["codigo", "descricao", "custo_unitario"]
         else:
             ordem_padrao = ORDEM_POSICIONAL_PADRAO.get(aba_esquema, colunas_esperadas)
         cols_orig_lista = list(df_orig.columns)
@@ -1314,8 +1330,11 @@ CREATE INDEX IF NOT EXISTS idx_saidas_data ON saidas_diarias (data);
 CREATE TABLE IF NOT EXISTS custos (
     codigo TEXT PRIMARY KEY,
     descricao TEXT DEFAULT '',
-    custo_unitario DOUBLE PRECISION DEFAULT 0
+    custo_unitario DOUBLE PRECISION DEFAULT 0,
+    preco_tabela DOUBLE PRECISION DEFAULT 0
 );
+ALTER TABLE IF EXISTS custos ADD COLUMN IF NOT EXISTS preco_tabela DOUBLE PRECISION DEFAULT 0;
+ALTER TABLE IF EXISTS _bkp_custos ADD COLUMN IF NOT EXISTS preco_tabela DOUBLE PRECISION DEFAULT 0;
 CREATE TABLE IF NOT EXISTS base_inicial (
     codigo TEXT PRIMARY KEY,
     descricao TEXT DEFAULT '',
@@ -1443,7 +1462,7 @@ class ConexaoSupabasePG:
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
-def _conectar_supabase_cached(db_url: str, versao_esquema: str = "v22") -> ConexaoSupabasePG:
+def _conectar_supabase_cached(db_url: str, versao_esquema: str = "v23") -> ConexaoSupabasePG:
     cliente_pg = ConexaoSupabasePG(db_url)
     cliente_pg.conectar()
     return cliente_pg
@@ -2610,10 +2629,13 @@ def calcular_plano_promocional_fefo(
         return pd.DataFrame()
 
     if df_custos_ref is not None and not df_custos_ref.empty:
-        df_f = df_f.merge(df_custos_ref[["codigo", "custo_unitario"]], on="codigo", how="left")
+        cols_c_fefo = ["codigo", "custo_unitario"] + (["preco_tabela"] if "preco_tabela" in df_custos_ref.columns else [])
+        df_f = df_f.merge(df_custos_ref[cols_c_fefo], on="codigo", how="left")
         df_f["custo_unitario"] = df_f["custo_unitario"].fillna(0.0)
+        df_f["preco_tabela"] = df_f["preco_tabela"].fillna(0.0) if "preco_tabela" in df_f.columns else 0.0
     else:
         df_f["custo_unitario"] = 0.0
+        df_f["preco_tabela"] = 0.0
 
     if df_giro_ref is not None and not df_giro_ref.empty and "giro_ponderado" in df_giro_ref.columns:
         mapa_giro = dict(zip(df_giro_ref["codigo"], df_giro_ref["giro_ponderado"].clip(lower=0.0)))
@@ -2694,9 +2716,13 @@ def calcular_plano_promocional_fefo(
         dias_v = r["dias_para_vencer"]
 
         preco_piso = (custo_u / fator_imposto) if custo_u > 0 else 0.0
+        preco_t1_lido = float(r.get("preco_tabela", 0.0))
         preco_real_lido = float(mapa_preco_real.get(cod, 0.0))
-        tem_preco_real = preco_real_lido > 0.0
-        if tem_preco_real:
+        tem_preco_real = (preco_t1_lido > 0.0) or (preco_real_lido > 0.0)
+        if preco_t1_lido > 0.0:
+            preco_est = preco_t1_lido
+            origem_p_txt = "🏷️ Tabela Oficial T1"
+        elif preco_real_lido > 0.0:
             preco_est = preco_real_lido
             origem_p_txt = "✔️ Venda Real (Saídas)"
         elif custo_u > 0:
@@ -3072,16 +3098,20 @@ def processar_planilha_custos(
 ) -> tuple[pd.DataFrame, dict]:
     df_raw = ler_arquivo_upload(arquivo, exigir_multiplas_colunas=True)
     if df_raw.shape[1] < 3:
-        raise ValueError("A planilha de custos precisa ter pelo menos 3 colunas (Código, Descrição, Custo).")
+        raise ValueError("A planilha de Custos & Preços precisa ter pelo menos 3 colunas (Código, Descrição, T1/C1).")
+    cols_norm_raw = {normalizar_chave_coluna(c) for c in df_raw.columns}
+    tem_coluna_t1 = (df_raw.shape[1] >= 4) or any(
+        n in MAPA_SINONIMOS["preco_tabela"] for n in cols_norm_raw
+    )
     df = estruturar_dataframe_bruto(df_raw, "custos", exigir_colunas_obrigatorias=True)
     if df.empty:
         raise ValueError(
-            "Trava de Segurança (Custos): Nenhum produto válido encontrado na planilha de custos."
+            "Trava de Segurança (Custos & Preços): Nenhum produto válido encontrado na planilha."
         )
     taxa_coincidencia = validar_estrutura_e_coincidencia_codigos(
         df_novo=df,
         codigos_referencia=codigos_ref,
-        nome_planilha="Custos",
+        nome_planilha="Custos & Preços (C1/T1)",
         ignorar_trava_catalogo=ignorar_trava_catalogo,
         exigir_cobertura_total=False,
     )
@@ -3090,14 +3120,17 @@ def processar_planilha_custos(
     qtd_positivos = int((df_final["custo_unitario"] > 0).sum())
     if qtd_positivos == 0:
         raise ValueError(
-            "Trava de Segurança (Custos): Todos os custos unitários vieram ZERADOS (R$ 0,00). "
-            "A importação foi bloqueada para proteger a Curva ABC e o FEFO. Verifique a 3ª coluna da planilha."
+            "Trava de Segurança (Custos C1): Todos os custos unitários vieram ZERADOS (R$ 0,00). "
+            "A importação foi bloqueada para proteger a Curva ABC e o FEFO. Verifique a coluna C1 da planilha."
         )
     qtd_zerados = int((df_final["custo_unitario"] <= 0).sum())
+    qtd_t1_positivos = int((df_final["preco_tabela"] > 0).sum()) if "preco_tabela" in df_final.columns else 0
     info_custos = {
         "total_itens": len(df_final),
         "qtd_positivos": qtd_positivos,
         "qtd_zerados": qtd_zerados,
+        "qtd_t1_positivos": qtd_t1_positivos,
+        "tem_coluna_t1": tem_coluna_t1,
         "qtd_duplicadas": qtd_dup_custos,
         "taxa_coincidencia": taxa_coincidencia,
     }
@@ -3399,7 +3432,13 @@ def atualizar_custos_via_entradas_df(
             "registros_auditoria": registros_auditoria,
         }
 
+    mapa_t1_atual = (
+        dict(zip(df_base_c["codigo"], df_base_c["preco_tabela"]))
+        if (not df_base_c.empty and "preco_tabela" in df_base_c.columns)
+        else {}
+    )
     df_novos_validos = pd.DataFrame(linhas_validas)[["codigo", "descricao", "custo_unitario"]].copy()
+    df_novos_validos["preco_tabela"] = df_novos_validos["codigo"].map(mapa_t1_atual).fillna(0.0)
     cods_aplicados = set(df_novos_validos["codigo"].unique())
     qtd_atualizados = len(cods_aplicados & cods_existentes)
     qtd_inseridos = len(cods_aplicados - cods_existentes)
@@ -3418,6 +3457,66 @@ def atualizar_custos_via_entradas_df(
         "exemplos_inalterados": inalterados_custo[:10],
         "registros_auditoria": registros_auditoria,
     }
+
+
+def auditar_descontos_saidas_df(
+    df_saidas_ref: pd.DataFrame,
+    df_custos_ref: pd.DataFrame,
+    limite_desconto_pct: float = 5.0,
+) -> pd.DataFrame:
+    """
+    Cruza as Saídas Reais (Valor Total da Proposta / Qtd. Saída) com o Preço Tabela Oficial T1
+    (sem sobrescrever nenhum dos dois) e retorna os produtos vendidos com desconto > limite_desconto_pct (padrão 5%).
+    """
+    if (
+        df_saidas_ref is None
+        or df_saidas_ref.empty
+        or df_custos_ref is None
+        or df_custos_ref.empty
+        or "preco_tabela" not in df_custos_ref.columns
+        or "valor_venda" not in df_saidas_ref.columns
+    ):
+        return pd.DataFrame()
+
+    df_s = df_saidas_ref[(df_saidas_ref["qtd_saida"] > 0) & (df_saidas_ref["valor_venda"] > 0)].copy()
+    if df_s.empty:
+        return pd.DataFrame()
+
+    mapa_t1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["preco_tabela"].fillna(0.0)))
+    mapa_c1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["custo_unitario"].fillna(0.0)))
+
+    df_s["preco_tabela_t1"] = df_s["codigo"].map(mapa_t1).fillna(0.0)
+    df_s["custo_c1"] = df_s["codigo"].map(mapa_c1).fillna(0.0)
+    df_s = df_s[df_s["preco_tabela_t1"] > 0.0].copy()
+    if df_s.empty:
+        return pd.DataFrame()
+
+    df_s["preco_vendido_un"] = (df_s["valor_venda"] / df_s["qtd_saida"]).round(4)
+    df_s["desconto_pct"] = (
+        ((df_s["preco_tabela_t1"] - df_s["preco_vendido_un"]) / df_s["preco_tabela_t1"]) * 100.0
+    ).round(2)
+    df_s["desconto_total_rs"] = (
+        (df_s["preco_tabela_t1"] - df_s["preco_vendido_un"]).clip(lower=0.0) * df_s["qtd_saida"]
+    ).round(2)
+    df_s["valor_cheio_t1_total"] = (df_s["preco_tabela_t1"] * df_s["qtd_saida"]).round(2)
+    df_s["margem_real_pct"] = [
+        round(((pv - c1) / pv) * 100.0, 2) if (pv > 0 and c1 > 0) else 0.0
+        for pv, c1 in zip(df_s["preco_vendido_un"], df_s["custo_c1"])
+    ]
+    df_s["margem_t1_pct"] = [
+        round(((t1 - c1) / t1) * 100.0, 2) if (t1 > 0 and c1 > 0) else 0.0
+        for t1, c1 in zip(df_s["preco_tabela_t1"], df_s["custo_c1"])
+    ]
+
+    df_alerta = df_s[df_s["desconto_pct"] > float(limite_desconto_pct)].copy()
+    if df_alerta.empty:
+        return pd.DataFrame()
+
+    df_alerta["status_desconto"] = [
+        f"🚨 Desconto Alto (-{formatar_num_br(d, 1)}%)" if float(d) >= 10.0 else f"⚠️ Acima de 5% (-{formatar_num_br(d, 1)}%)"
+        for d in df_alerta["desconto_pct"]
+    ]
+    return df_alerta.sort_values(["desconto_total_rs", "desconto_pct"], ascending=[False, False]).reset_index(drop=True)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -4799,6 +4898,11 @@ with aba_dash:
         st.markdown("#### 4. Evolução do Patrimônio Diário e Balanço de Entradas (NFs) vs. Saídas (CMV e Faturamento)")
         ev_col1, ev_col2 = st.columns(2)
         mapa_custo_bi = dict(zip(df_custos_rel["codigo"], df_custos_rel["custo_unitario"])) if not df_custos_rel.empty else {}
+        mapa_t1_bi = (
+            dict(zip(df_custos_rel["codigo"], df_custos_rel["preco_tabela"].fillna(0.0)))
+            if (not df_custos_rel.empty and "preco_tabela" in df_custos_rel.columns)
+            else {}
+        )
         with ev_col1:
             if not df_historico.empty and "data" in df_historico.columns:
                 df_h_bi = df_historico[df_historico["codigo"].isin(cods_escopo_bi)].copy()
@@ -4910,8 +5014,13 @@ with aba_dash:
                     lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
                 )
                 df_sai_escopo["custo_u"] = df_sai_escopo["codigo"].map(mapa_custo_bi).fillna(0.0)
+                df_sai_escopo["preco_t1_u"] = df_sai_escopo["codigo"].map(mapa_t1_bi).fillna(0.0)
                 df_sai_escopo["cmv_total"] = df_sai_escopo["qtd_saida"] * df_sai_escopo["custo_u"]
                 df_sai_escopo["fat_bruto"] = df_sai_escopo["valor_venda"].fillna(0.0)
+                df_sai_escopo["fat_cheio_t1"] = [
+                    (float(q) * float(t1)) if float(t1) > 0.0 else float(fb)
+                    for q, t1, fb in zip(df_sai_escopo["qtd_saida"], df_sai_escopo["preco_t1_u"], df_sai_escopo["fat_bruto"])
+                ]
                 df_sai_escopo["mes_ano"] = df_sai_escopo["data"].astype(str).str.slice(0, 7)
                 df_sai_escopo["ano"] = df_sai_escopo["data"].astype(str).str.slice(0, 4)
             else:
@@ -5117,11 +5226,12 @@ with aba_dash:
                 delta_color="normal" if lucro_liq_periodo >= 0 else "inverse",
             )
 
-            tab_mom, tab_grp_mg, tab_sku_lucro, tab_sku_alerta = st.tabs(
+            tab_mom, tab_grp_mg, tab_sku_lucro, tab_desc_t1, tab_sku_alerta = st.tabs(
                 [
                     "📆 Consolidado Anual (Compras × CMV × Faturamento × Lucro)" if visao_tempo_margem == "📆 Consolidado Anual" else "📅 Comparativo Mês a Mês (Compras NF × CMV × Faturamento × Lucro)",
                     "📊 Margem Média por Grupo / Departamento",
                     "🏆 Top Produtos Campeões de Lucro Líquido",
+                    "🏷️ Descontos > 5% vs. Tabela T1",
                     "⚠️ Auditoria de Margem Baixa ou Negativa",
                 ]
             )
@@ -5361,6 +5471,7 @@ with aba_dash:
                             departamento=("departamento", "last"),
                             qtd_vendida=("qtd_saida", "sum"),
                             custo_u=("custo_u", "last"),
+                            preco_t1_u=("preco_t1_u", "last"),
                             cmv_total=("cmv_total", "sum"),
                             faturamento=("fat_bruto", "sum"),
                             impostos=("imposto_est", "sum"),
@@ -5369,6 +5480,10 @@ with aba_dash:
                         )
                     )
                     grp_sku_fat["preco_medio_venda"] = grp_sku_fat["faturamento"] / grp_sku_fat["qtd_vendida"].replace(0.0, float("nan"))
+                    grp_sku_fat["desconto_vs_t1_pct"] = [
+                        round(((t1 - pv) / t1) * 100.0, 2) if (t1 > 0 and pv > 0) else 0.0
+                        for t1, pv in zip(grp_sku_fat["preco_t1_u"], grp_sku_fat["preco_medio_venda"])
+                    ]
                     grp_sku_fat["margem_bruta_pct"] = (grp_sku_fat["lucro_bruto"] / grp_sku_fat["faturamento"]) * 100.0
                     grp_sku_fat["margem_liq_pct"] = (grp_sku_fat["lucro_liq"] / grp_sku_fat["faturamento"]) * 100.0
                     top_lucro_df = grp_sku_fat.sort_values("lucro_liq", ascending=False).head(50).reset_index(drop=True)
@@ -5378,8 +5493,10 @@ with aba_dash:
                             "descricao": "Descrição",
                             "departamento": "Grupo",
                             "qtd_vendida": "Qtd. Vendida",
-                            "custo_u": "Custo Unit. C1 (R$)",
-                            "preco_medio_venda": "Preço Médio Venda (R$)",
+                            "custo_u": "Custo C1 (R$)",
+                            "preco_t1_u": "Preço Tabela T1 (R$)",
+                            "preco_medio_venda": "Preço Vendido Balcão (R$)",
+                            "desconto_vs_t1_pct": "Desc. vs T1 (%)",
                             "faturamento": "Faturamento (R$)",
                             "cmv_total": "CMV Total (R$)",
                             "impostos": "Impostos Est. (R$)",
@@ -5393,8 +5510,10 @@ with aba_dash:
                             "Descrição",
                             "Grupo",
                             "Qtd. Vendida",
-                            "Custo Unit. C1 (R$)",
-                            "Preço Médio Venda (R$)",
+                            "Custo C1 (R$)",
+                            "Preço Tabela T1 (R$)",
+                            "Preço Vendido Balcão (R$)",
+                            "Desc. vs T1 (%)",
                             "Faturamento (R$)",
                             "CMV Total (R$)",
                             "Impostos Est. (R$)",
@@ -5408,8 +5527,10 @@ with aba_dash:
                             top_lucro_exib,
                             formatadores={
                                 "Qtd. Vendida": formatar_qtd_br,
-                                "Custo Unit. C1 (R$)": formatar_moeda_br,
-                                "Preço Médio Venda (R$)": formatar_moeda_br,
+                                "Custo C1 (R$)": formatar_moeda_br,
+                                "Preço Tabela T1 (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                                "Preço Vendido Balcão (R$)": formatar_moeda_br,
+                                "Desc. vs T1 (%)": lambda x: "-" if (pd.isna(x) or abs(float(x)) < 0.05) else formatar_pct_br(x, 1, com_sinal=True),
                                 "Faturamento (R$)": formatar_moeda_br,
                                 "CMV Total (R$)": formatar_moeda_br,
                                 "Impostos Est. (R$)": formatar_moeda_br,
@@ -5430,6 +5551,102 @@ with aba_dash:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="dl_rentabilidade_skus_bi",
                     )
+
+            with tab_desc_t1:
+                if df_sai_com_fat.empty:
+                    st.info("Importe uma planilha de Saídas com a 4ª coluna (`Valor Total da Proposta`) para auditar os descontos concedidos.")
+                elif not mapa_t1_bi or sum(1 for v in mapa_t1_bi.values() if float(v) > 0) == 0:
+                    st.info("Suba a planilha **Custos & Preços (`C1 + T1`)** na Aba 7 para comparar o Preço Tabela T1 com o Preço Vendido no Balcão.")
+                else:
+                    cd_lim1, cd_lim2 = st.columns([1.2, 2.8])
+                    with cd_lim1:
+                        limite_desc_bi = st.number_input(
+                            "🎯 Alertar descontos acima de (%):",
+                            min_value=1.0,
+                            max_value=50.0,
+                            value=5.0,
+                            step=0.5,
+                            key="bi_limite_desc_t1",
+                            help="O padrão do sistema é até 2,1%. Acima de 5,0%, o item aparece na lista de auditoria.",
+                        )
+                    df_desc_aud_bi = auditar_descontos_saidas_df(
+                        df_saidas_ref=df_sai_com_fat,
+                        df_custos_ref=df_custos_rel,
+                        limite_desconto_pct=float(limite_desc_bi),
+                    )
+                    if df_desc_aud_bi.empty:
+                        st.success(f"✅ Nenhum produto vendido no período selecionado teve desconto acima de {formatar_num_br(limite_desc_bi, 1)}% em relação à Tabela T1!")
+                    else:
+                        df_desc_aud_bi["departamento"] = df_desc_aud_bi["codigo"].map(
+                            lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
+                        )
+                        tot_desc_concedido_rs = float(df_desc_aud_bi["desconto_total_rs"].sum())
+                        tot_cheio_t1_rs = float(df_desc_aud_bi["valor_cheio_t1_total"].sum())
+                        tot_vendido_balcao_rs = float(df_desc_aud_bi["valor_venda"].sum())
+                        with cd_lim2:
+                            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                            st.warning(
+                                f"🏷️ **{formatar_num_br(len(df_desc_aud_bi))} venda(s)** com desconto > {formatar_num_br(limite_desc_bi, 1)}%  |  "
+                                f"Valor Cheio T1: **{formatar_moeda_br(tot_cheio_t1_rs)}** ➔ Vendido: **{formatar_moeda_br(tot_vendido_balcao_rs)}**  |  "
+                                f"Desconto Concedido: **{formatar_moeda_br(tot_desc_concedido_rs)}**"
+                            )
+                        df_desc_bi_exib = df_desc_aud_bi[
+                            [
+                                "data",
+                                "codigo",
+                                "descricao",
+                                "departamento",
+                                "qtd_saida",
+                                "preco_tabela_t1",
+                                "preco_vendido_un",
+                                "desconto_pct",
+                                "desconto_total_rs",
+                                "custo_c1",
+                                "margem_t1_pct",
+                                "margem_real_pct",
+                            ]
+                        ].rename(
+                            columns={
+                                "data": "Data",
+                                "codigo": "Código",
+                                "descricao": "Descrição",
+                                "departamento": "Grupo",
+                                "qtd_saida": "Qtd.",
+                                "preco_tabela_t1": "Preço Tabela T1 (R$)",
+                                "preco_vendido_un": "Preço Vendido Balcão (R$)",
+                                "desconto_pct": "Desconto (%)",
+                                "desconto_total_rs": "Desconto Total (R$)",
+                                "custo_c1": "Custo C1 (R$)",
+                                "margem_t1_pct": "Margem T1 (%)",
+                                "margem_real_pct": "Margem Real (%)",
+                            }
+                        )
+                        st.dataframe(
+                            estilizar_tabela_br(
+                                df_desc_bi_exib,
+                                formatadores={
+                                    "Qtd.": formatar_qtd_br,
+                                    "Preço Tabela T1 (R$)": formatar_moeda_br,
+                                    "Preço Vendido Balcão (R$)": formatar_moeda_br,
+                                    "Desconto (%)": lambda x: f"-{formatar_pct_br(x, 1)}",
+                                    "Desconto Total (R$)": formatar_moeda_br,
+                                    "Custo C1 (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                                    "Margem T1 (%)": lambda x: formatar_pct_br(x, 1),
+                                    "Margem Real (%)": lambda x: formatar_pct_br(x, 1),
+                                },
+                                colunas_esquerda=["Descrição", "Grupo"],
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=300,
+                        )
+                        st.download_button(
+                            label="📥 Baixar Auditoria de Descontos vs. Tabela T1 (.xlsx)",
+                            data=gerar_excel_relatorio(df_desc_bi_exib, "Descontos_Acima_5pct"),
+                            file_name=f"Auditoria_Descontos_T1_Esteio_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_auditoria_descontos_bi",
+                        )
 
             with tab_sku_alerta:
                 if df_sai_com_fat.empty:
@@ -5555,6 +5772,45 @@ with aba1:
                 st.warning(aviso_dup["texto"])
             else:
                 st.info(aviso_dup["texto"])
+        if st.session_state.get("auditoria_descontos_ultima_saida"):
+            regs_desc_sai = st.session_state["auditoria_descontos_ultima_saida"]
+            dt_aud_sai_str = st.session_state.get("data_auditoria_descontos_sai", "")
+            df_aud_desc_sai = pd.DataFrame(regs_desc_sai)
+            tot_desc_rs_nf = float(df_aud_desc_sai["Desconto Total (R$)"].sum()) if not df_aud_desc_sai.empty else 0.0
+            with st.expander(
+                f"🏷️ Conferência de Descontos > 5% nas Saídas ({dt_aud_sai_str}) — "
+                f"{formatar_num_br(len(df_aud_desc_sai))} Item(ns) | Total Concedido: {formatar_moeda_br(tot_desc_rs_nf)}",
+                expanded=True,
+            ):
+                st.caption(
+                    "Comparação entre o **Preço Tabela Oficial (T1)** e o **Preço Vendido no Balcão** (sem sobrescrever nenhum dos dois). "
+                    "O padrão normal do sistema é até 2,1%; abaixo estão os itens vendidos com desconto superior a **5,0%**."
+                )
+                st.download_button(
+                    label="📥 Baixar Conferência de Descontos > 5% (.xlsx)",
+                    data=gerar_excel_relatorio(df_aud_desc_sai, "Descontos_Saida_5pct"),
+                    file_name=f"Conferencia_Descontos_Saida_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_conf_desc_sai_aba7",
+                )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_aud_desc_sai,
+                        formatadores={
+                            "Qtd. Vendida": formatar_qtd_br,
+                            "Preço Tabela T1 (R$)": formatar_moeda_br,
+                            "Preço Vendido Balcão (R$)": formatar_moeda_br,
+                            "Desconto (%)": lambda x: f"-{formatar_pct_br(x, 1)}",
+                            "Desconto Total (R$)": formatar_moeda_br,
+                            "Custo C1 (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "Margem Real (%)": lambda x: formatar_pct_br(x, 1),
+                        },
+                        colunas_esquerda=["Descrição", "Status Desconto"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=260,
+                )
         if st.session_state.get("auditoria_custos_ultima_nf"):
             regs_aud_nf = st.session_state["auditoria_custos_ultima_nf"]
             dt_aud_nf_str = st.session_state.get("data_auditoria_custos_nf", "")
@@ -5675,7 +5931,7 @@ with aba1:
                 "💰 Atualizar custo unitário pelos itens desta NF",
                 value=True,
                 key="chk_att_custo_ent_nf",
-                help="Marcado (padrão): atualiza o custo unitário apenas para os produtos desta NF cuja data seja igual ou posterior à última entrada registrada. Desmarque se preferir manter apenas o Custo C1 da Planilha Geral.",
+                help="Marcado (padrão): atualiza o custo unitário apenas para os produtos desta NF cuja data seja igual ou posterior à última entrada registrada. Desmarque em notas de bonificação quando quiser apenas auditar.",
             )
         with c3:
             st.markdown(
@@ -5706,15 +5962,15 @@ with aba1:
                 key="chk_somar_sai_dia",
                 help="Desmarcado (padrão): substitui as saídas desta data. Marcado: soma o novo arquivo às saídas já salvas nesta mesma data.",
             )
-        with st.expander("📦 Carga Geral Avulsa de Custos C1 ou Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
+        with st.expander("💰 Carga Diária de Custos (C1) & Preço Tabela (T1) + Base Inicial Histórica", expanded=True):
             st.caption(
-                "💡 Os custos unitários já são atualizados automaticamente sempre que você sobe a planilha de **Entradas Faturadas (Fatu416 com coluna `Valor`)** acima! "
-                "Quando você sobe a **Planilha Geral de Custos C1** abaixo (ex.: todo sábado), ela **sobrescreve e prevalece 100%** sobre a tabela de custos atual."
+                "💡 Suba aqui a planilha diária **Custo Preço (`Código`, `Descrição`, `T1`, `C1`)**: o **C1 sobrescreve 100%** o custo da Entrada "
+                "(neutralizando notas de bonificação sem reajuste no ERP) e o **T1** salva o preço cheio de tabela em coluna separada para auditar descontos > 5%."
             )
-            cb0, cb1, cb2 = st.columns([1.4, 0.8, 1.4])
+            cb0, cb1, cb2 = st.columns([1.5, 0.7, 1.4])
             with cb0:
                 arq_custos = st.file_uploader(
-                    "Planilha Geral de Custos C1 (Código, Descrição, Custo Unitário):",
+                    "Planilha Custos C1 & Preço Tabela T1 (Código, Descrição, T1, C1):",
                     type=["xlsx", "xls", "csv"],
                     key="up_custos",
                 )
@@ -6178,30 +6434,84 @@ with aba1:
                             if info_sai.get("aviso_sem_data"):
                                 teve_alerta = True
                                 mensagens_auditoria_upload.append(info_sai["aviso_sem_data"])
+                            df_custos_ref_desc = novos_custos if (arq_custos is not None and "novos_custos" in locals() and novos_custos is not None) else df_custos
+                            df_aud_desc_upload = auditar_descontos_saidas_df(
+                                df_saidas_ref=novas_saidas,
+                                df_custos_ref=df_custos_ref_desc,
+                                limite_desconto_pct=5.0,
+                            )
+                            if not df_aud_desc_upload.empty:
+                                teve_alerta = True
+                                tot_d_rs = float(df_aud_desc_upload["desconto_total_rs"].sum())
+                                ex_desc_list = [
+                                    f"SKU {r['codigo']} (-{formatar_num_br(r['desconto_pct'], 1)}% | {formatar_moeda_br(r['preco_vendido_un'])} vs T1 {formatar_moeda_br(r['preco_tabela_t1'])})"
+                                    for _, r in df_aud_desc_upload.head(5).iterrows()
+                                ]
+                                mensagens_auditoria_upload.append(
+                                    f"🏷️ **Alerta de Desconto > 5% nas Saídas:** {formatar_num_br(len(df_aud_desc_upload))} produto(s) "
+                                    f"vendido(s) acima de 5% de desconto sobre a Tabela T1 (Total concedido: {formatar_moeda_br(tot_d_rs)}): {', '.join(ex_desc_list)}."
+                                )
+                                df_tab_desc_sessao = df_aud_desc_upload[
+                                    [
+                                        "codigo",
+                                        "descricao",
+                                        "qtd_saida",
+                                        "preco_tabela_t1",
+                                        "preco_vendido_un",
+                                        "desconto_pct",
+                                        "desconto_total_rs",
+                                        "custo_c1",
+                                        "margem_real_pct",
+                                        "status_desconto",
+                                    ]
+                                ].rename(
+                                    columns={
+                                        "codigo": "Código",
+                                        "descricao": "Descrição",
+                                        "qtd_saida": "Qtd. Vendida",
+                                        "preco_tabela_t1": "Preço Tabela T1 (R$)",
+                                        "preco_vendido_un": "Preço Vendido Balcão (R$)",
+                                        "desconto_pct": "Desconto (%)",
+                                        "desconto_total_rs": "Desconto Total (R$)",
+                                        "custo_c1": "Custo C1 (R$)",
+                                        "margem_real_pct": "Margem Real (%)",
+                                        "status_desconto": "Status Desconto",
+                                    }
+                                )
+                                st.session_state["auditoria_descontos_ultima_saida"] = df_tab_desc_sessao.to_dict("records")
+                                st.session_state["data_auditoria_descontos_sai"] = data_saida.strftime("%d/%m/%Y")
                         if arq_custos is not None:
                             novos_custos, info_cus = processar_planilha_custos(
                                 arq_custos,
                                 codigos_ref=codigos_ref_geral,
                                 ignorar_trava_catalogo=ignorar_trava_catalogo,
                             )
+                            if (not info_cus.get("tem_coluna_t1", False)) and (not df_custos.empty) and ("preco_tabela" in df_custos.columns):
+                                mapa_t1_prev = dict(zip(df_custos["codigo"], df_custos["preco_tabela"].fillna(0.0)))
+                                novos_custos["preco_tabela"] = novos_custos["codigo"].map(mapa_t1_prev).fillna(0.0)
                             if info_cus["qtd_duplicadas"] > 0:
                                 teve_alerta = True
                                 mensagens_auditoria_upload.append(
-                                    f"⚠️ **Custos:** {formatar_num_br(info_cus['qtd_duplicadas'])} código(s) repetido(s) (mantido o último valor)."
+                                    f"⚠️ **Custos & Preços:** {formatar_num_br(info_cus['qtd_duplicadas'])} código(s) repetido(s) (mantido o último valor)."
                                 )
+                            str_t1_info = (
+                                f" | Preço Tabela T1: {formatar_num_br(info_cus.get('qtd_t1_positivos', 0))} SKUs"
+                                if info_cus.get("tem_coluna_t1", False)
+                                else ""
+                            )
                             if info_cus["qtd_zerados"] > 0:
                                 pct_zero = (info_cus["qtd_zerados"] / max(info_cus["total_itens"], 1)) * 100.0
                                 if pct_zero >= 30.0:
                                     teve_alerta = True
                                 mensagens_auditoria_upload.append(
-                                    f"ℹ️ **Custos:** {formatar_num_br(info_cus['qtd_positivos'])} com valor positivo e "
-                                    f"{formatar_num_br(info_cus['qtd_zerados'])} com custo R$ 0,00 ({formatar_pct_br(pct_zero, 0)} | "
+                                    f"ℹ️ **Custos C1 & T1:** {formatar_num_br(info_cus['qtd_positivos'])} C1 positivos e "
+                                    f"{formatar_num_br(info_cus['qtd_zerados'])} com C1 R$ 0,00 ({formatar_pct_br(pct_zero, 0)}{str_t1_info} | "
                                     f"Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
                                 )
                             else:
                                 mensagens_auditoria_upload.append(
-                                    f"✔️ **Custos:** {formatar_num_br(info_cus['total_itens'])} itens verificados "
-                                    f"(100% com custo > R$ 0 | Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
+                                    f"✔️ **Custos C1 & T1:** {formatar_num_br(info_cus['total_itens'])} itens verificados "
+                                    f"(100% C1 > R$ 0{str_t1_info} | Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
                                 )
                         if arq_base is not None:
                             nova_base, info_base = processar_planilha_base_vendas(
@@ -6292,11 +6602,58 @@ with aba1:
                                         pd.concat([novos_custos, df_ent_complementar], ignore_index=True), "custos"
                                     )
                                 mensagens_auditoria_upload.append(
-                                    "🛡️ **Prioridade C1 Mantida:** Como a Planilha Geral de Custos C1 foi enviada junto com a Entrada, o Custo C1 prevaleceu sobre o custo da NF."
+                                    "🛡️ **Prioridade C1 & T1 Mantida:** O Custo C1 prevaleceu sobre o custo da NF (incluindo bonificações) e o Preço Tabela T1 foi atualizado."
                                 )
                             salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
                             gravar_tabela_sql(db_supabase, "custos", novos_custos)
                             abas_ja_gravadas.append("custos")
+                            # Se não houve upload de Saídas neste clique, mas existe saída na data selecionada (data_saida), audita descontos > 5% contra o novo T1
+                            if novas_saidas is None and not df_saidas_bruto.empty and "data" in df_saidas_bruto.columns:
+                                dt_sai_ref_iso = data_saida.strftime("%Y-%m-%d")
+                                df_sai_dia_t1 = df_saidas_bruto[df_saidas_bruto["data"] == dt_sai_ref_iso].copy()
+                                if not df_sai_dia_t1.empty:
+                                    df_aud_desc_pos_t1 = auditar_descontos_saidas_df(
+                                        df_saidas_ref=df_sai_dia_t1,
+                                        df_custos_ref=novos_custos,
+                                        limite_desconto_pct=5.0,
+                                    )
+                                    if not df_aud_desc_pos_t1.empty:
+                                        teve_alerta = True
+                                        tot_d_rs_t1 = float(df_aud_desc_pos_t1["desconto_total_rs"].sum())
+                                        mensagens_auditoria_upload.append(
+                                            f"🏷️ **Conferência de Descontos > 5% (Saídas de {data_saida.strftime('%d/%m')}):** "
+                                            f"{formatar_num_br(len(df_aud_desc_pos_t1))} item(ns) vendido(s) acima de 5% de desconto vs. T1 "
+                                            f"(Total concedido: {formatar_moeda_br(tot_d_rs_t1)})."
+                                        )
+                                        df_tab_desc_sessao2 = df_aud_desc_pos_t1[
+                                            [
+                                                "codigo",
+                                                "descricao",
+                                                "qtd_saida",
+                                                "preco_tabela_t1",
+                                                "preco_vendido_un",
+                                                "desconto_pct",
+                                                "desconto_total_rs",
+                                                "custo_c1",
+                                                "margem_real_pct",
+                                                "status_desconto",
+                                            ]
+                                        ].rename(
+                                            columns={
+                                                "codigo": "Código",
+                                                "descricao": "Descrição",
+                                                "qtd_saida": "Qtd. Vendida",
+                                                "preco_tabela_t1": "Preço Tabela T1 (R$)",
+                                                "preco_vendido_un": "Preço Vendido Balcão (R$)",
+                                                "desconto_pct": "Desconto (%)",
+                                                "desconto_total_rs": "Desconto Total (R$)",
+                                                "custo_c1": "Custo C1 (R$)",
+                                                "margem_real_pct": "Margem Real (%)",
+                                                "status_desconto": "Status Desconto",
+                                            }
+                                        )
+                                        st.session_state["auditoria_descontos_ultima_saida"] = df_tab_desc_sessao2.to_dict("records")
+                                        st.session_state["data_auditoria_descontos_sai"] = data_saida.strftime("%d/%m/%Y")
                         elif not df_custos_via_entrada.empty:
                             salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
                             gravar_tabela_sql(db_supabase, "custos", df_custos_via_entrada)
