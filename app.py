@@ -52,8 +52,11 @@ st.markdown(
         display: none !important;
     }
     .block-container {
-        padding-top: 3.6rem !important;
-        padding-bottom: 2.5rem !important;
+        max-width: 100% !important;
+        padding-top: 3.4rem !important;
+        padding-bottom: 2.2rem !important;
+        padding-left: 1.15rem !important;
+        padding-right: 1.15rem !important;
     }
     /* Cartões Bento Glassmorphism */
     .glass-card {
@@ -112,19 +115,19 @@ st.markdown(
         background: rgba(18, 22, 36, 0.90) !important;
         border: 1px solid rgba(148, 163, 184, 0.16) !important;
         border-radius: 16px !important;
-        padding: 6px 8px !important;
-        gap: 6px !important;
+        padding: 5px 6px !important;
+        gap: 4px !important;
         box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45) !important;
-        margin-bottom: 18px !important;
+        margin-bottom: 16px !important;
         flex-wrap: wrap !important;
     }
     button[data-baseweb="tab"] {
         background: transparent !important;
-        border-radius: 11px !important;
-        padding: 9px 16px !important;
+        border-radius: 10px !important;
+        padding: 8px 11px !important;
         color: #94a3b8 !important;
         font-weight: 600 !important;
-        font-size: 0.88rem !important;
+        font-size: 0.83rem !important;
         border: 1px solid transparent !important;
         transition: all 0.2s ease !important;
     }
@@ -3095,7 +3098,16 @@ def processar_planilha_custos(
     arquivo,
     codigos_ref: set,
     ignorar_trava_catalogo: bool = False,
+    data_custos: date = None,
+    ignorar_trava_data: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
+    aviso_sem_data = (
+        validar_coerencia_data_upload(
+            arquivo, data_custos, "Custos C1 & Preços T1", ignorar_trava=ignorar_trava_data
+        )
+        if data_custos is not None
+        else ""
+    )
     df_raw = ler_arquivo_upload(arquivo, exigir_multiplas_colunas=True)
     if df_raw.shape[1] < 3:
         raise ValueError("A planilha de Custos & Preços precisa ter pelo menos 3 colunas (Código, Descrição, T1/C1).")
@@ -3133,6 +3145,7 @@ def processar_planilha_custos(
         "tem_coluna_t1": tem_coluna_t1,
         "qtd_duplicadas": qtd_dup_custos,
         "taxa_coincidencia": taxa_coincidencia,
+        "aviso_sem_data": aviso_sem_data,
     }
     return df_final, info_custos
 
@@ -4057,15 +4070,15 @@ else:
 # ==============================================================================
 # 7. NAVEGAÇÃO POR ABAS (100% NUVEM — DASHBOARD EM 1º E IMPORTAÇÃO EM ÚLTIMO)
 # ==============================================================================
-aba_dash, aba2, aba3, aba4, aba5, aba6, aba1 = st.tabs(
+aba_dash, aba2, aba3, aba4, aba5, aba1, aba6 = st.tabs(
     [
         "📊 1. Dashboard Executivo (Power BI)",
         "🛒 2. Sugestão de Compras & Cotação",
         "⏳ 3. Radar FEFO & Promoções IA",
         "📈 4. Curva ABC Financeira",
         "🔍 5. Auditoria de ERP",
-        f"👁️‍🗨️ 6. Ocultar Produtos ({formatar_num_br(len(codigos_ocultos))})",
-        "📥 7. Importação & Backup",
+        "📥 6. Importação & Backup",
+        f"👁️‍🗨️ 7. Ocultar Produtos ({formatar_num_br(len(codigos_ocultos))})",
     ]
 )
 
@@ -4079,7 +4092,7 @@ with aba_dash:
         "Nível de Serviço dos Campeões de Venda, Risco FEFO Dinâmico e Fluxo Diário de Compras vs. Saídas."
     )
     if df_estoque.empty and df_base_vendas_rel.empty:
-        st.info("Importe as planilhas de Estoque e Custos na Aba 7 (Importação & Backup) para ativar o Dashboard Executivo.")
+        st.info("Importe as planilhas de Estoque e Custos na Aba 6 (Importação & Backup) para ativar o Dashboard Executivo.")
     else:
         f_col1, f_col2, f_col3, f_col4 = st.columns([1.3, 1.8, 1.0, 1.0])
         with f_col1:
@@ -4981,7 +4994,7 @@ with aba_dash:
                     height=230,
                 )
             else:
-                st.info("Importe planilhas de Entradas e Saídas na Aba 7 para visualizar o fluxo financeiro diário.")
+                st.info("Importe planilhas de Entradas e Saídas na Aba 6 para visualizar o fluxo financeiro diário.")
 
         st.markdown("---")
         st.markdown("#### 5. Resultado Comercial Real: Margem Média por Grupo, Visão Mensal / Anual & Impostos")
@@ -5003,7 +5016,7 @@ with aba_dash:
 
         if df_sai_escopo.empty and df_ent_escopo.empty:
             st.info(
-                "💡 Importe suas planilhas de **Saídas / Vendas Diárias** (com a 4ª coluna `Valor Total da Proposta`) na Aba 7 "
+                "💡 Importe suas planilhas de **Saídas / Vendas Diárias** (com a 4ª coluna `Valor Total da Proposta`) na Aba 6 "
                 "para destravar a auditoria de Faturamento Bruto, Margem Média por Grupo e o Comparativo Mensal / Anual!"
             )
         else:
@@ -5195,7 +5208,7 @@ with aba_dash:
             else:
                 st.warning(
                     "ℹ️ As saídas registradas neste filtro ainda não possuem a 4ª coluna (`Valor Total da Proposta` > R$ 0,00). "
-                    "Ao subir planilhas como `Saida venda 12-11-2026.xlsx` na Aba 7, o faturamento e as margens aparecerão aqui automaticamente!"
+                    "Ao subir planilhas como `Saida venda 12-11-2026.xlsx` na Aba 6, o faturamento e as margens aparecerão aqui automaticamente!"
                 )
 
             rm1, rm2, rm3, rm4, rm5 = st.columns(5)
@@ -5556,7 +5569,7 @@ with aba_dash:
                 if df_sai_com_fat.empty:
                     st.info("Importe uma planilha de Saídas com a 4ª coluna (`Valor Total da Proposta`) para auditar os descontos concedidos.")
                 elif not mapa_t1_bi or sum(1 for v in mapa_t1_bi.values() if float(v) > 0) == 0:
-                    st.info("Suba a planilha **Custos & Preços (`C1 + T1`)** na Aba 7 para comparar o Preço Tabela T1 com o Preço Vendido no Balcão.")
+                    st.info("Suba a planilha **Custos & Preços (`C1 + T1`)** na Aba 6 para comparar o Preço Tabela T1 com o Preço Vendido no Balcão.")
                 else:
                     cd_lim1, cd_lim2 = st.columns([1.2, 2.8])
                     with cd_lim1:
@@ -5876,16 +5889,16 @@ with aba1:
                     hide_index=True,
                     height=260,
                 )
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown(
                 """
                 <div class="glass-card">
-                    <strong>1. Posição de Estoque (6 colunas)</strong><br><br>
+                    <strong>1. Posição de Estoque (6 col.)</strong><br><br>
                     <span class="pill-tag">Código</span>
                     <span class="pill-tag">Saldo Geral</span>
                     <span class="pill-tag">Descrição</span>
-                    <span class="pill-tag">Código do Lote</span>
+                    <span class="pill-tag">Lote</span>
                     <span class="pill-tag">Saldo Lote</span>
                     <span class="pill-tag">Validade</span>
                 </div>
@@ -5902,11 +5915,11 @@ with aba1:
             st.markdown(
                 """
                 <div class="glass-card">
-                    <strong>2. Entradas Faturadas c/ Custo (Fatu416)</strong><br><br>
+                    <strong>2. Entradas NF c/ Custo (Fatu416)</strong><br><br>
                     <span class="pill-tag">Código</span>
                     <span class="pill-tag">Descrição</span>
                     <span class="pill-tag">Quantidade</span>
-                    <span class="pill-tag">Valor (Atualiza Custo!)</span>
+                    <span class="pill-tag">Valor (Custo NF)</span>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -5937,11 +5950,11 @@ with aba1:
             st.markdown(
                 """
                 <div class="glass-card">
-                    <strong>3. Saídas / Vendas por Data (3 ou 4 col.)</strong><br><br>
+                    <strong>3. Saídas / Vendas (3 ou 4 col.)</strong><br><br>
                     <span class="pill-tag">Código</span>
                     <span class="pill-tag">Descrição</span>
                     <span class="pill-tag">Qtd.</span>
-                    <span class="pill-tag">Valor Proposta (Opc.)</span>
+                    <span class="pill-tag">Valor Proposta</span>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -5962,18 +5975,34 @@ with aba1:
                 key="chk_somar_sai_dia",
                 help="Desmarcado (padrão): substitui as saídas desta data. Marcado: soma o novo arquivo às saídas já salvas nesta mesma data.",
             )
-        with st.expander("💰 Carga Diária de Custos (C1) & Preço Tabela (T1) + Base Inicial Histórica", expanded=True):
-            st.caption(
-                "💡 Suba aqui a planilha diária **Custo Preço (`Código`, `Descrição`, `T1`, `C1`)**: o **C1 sobrescreve 100%** o custo da Entrada "
-                "(neutralizando notas de bonificação sem reajuste no ERP) e o **T1** salva o preço cheio de tabela em coluna separada para auditar descontos > 5%."
+        with c4:
+            st.markdown(
+                """
+                <div class="glass-card">
+                    <strong>4. Custos C1 & Tabela T1 (4 col.)</strong><br><br>
+                    <span class="pill-tag">Código</span>
+                    <span class="pill-tag">Descrição</span>
+                    <span class="pill-tag">T1 (Tabela)</span>
+                    <span class="pill-tag">C1 (Custo)</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            cb0, cb1, cb2 = st.columns([1.5, 0.7, 1.4])
-            with cb0:
-                arq_custos = st.file_uploader(
-                    "Planilha Custos C1 & Preço Tabela T1 (Código, Descrição, T1, C1):",
-                    type=["xlsx", "xls", "csv"],
-                    key="up_custos",
-                )
+            data_custos = st.date_input(
+                "Data Custos / Preços (C1/T1):",
+                value=hoje_br(),
+                key="dt_custos_aba1",
+            )
+            arq_custos = st.file_uploader(
+                "Selecionar Custo Preço (.xlsx, .xls ou .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="up_custos",
+            )
+            st.caption(
+                "🛡️ C1 sobrescreve o custo da NF (neutraliza bonificação) e T1 audita descontos > 5%."
+            )
+        with st.expander("📦 Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
+            cb1, cb2 = st.columns([0.8, 1.8])
             with cb1:
                 dias_base_input = st.number_input(
                     "Período da base inicial (dias):",
@@ -6485,6 +6514,8 @@ with aba1:
                                 arq_custos,
                                 codigos_ref=codigos_ref_geral,
                                 ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                data_custos=data_custos,
+                                ignorar_trava_data=ignorar_trava_data,
                             )
                             if (not info_cus.get("tem_coluna_t1", False)) and (not df_custos.empty) and ("preco_tabela" in df_custos.columns):
                                 mapa_t1_prev = dict(zip(df_custos["codigo"], df_custos["preco_tabela"].fillna(0.0)))
@@ -6510,9 +6541,12 @@ with aba1:
                                 )
                             else:
                                 mensagens_auditoria_upload.append(
-                                    f"✔️ **Custos C1 & T1:** {formatar_num_br(info_cus['total_itens'])} itens verificados "
+                                    f"✔️ **Custos C1 & T1 ({data_custos.strftime('%d/%m')}):** {formatar_num_br(info_cus['total_itens'])} itens verificados "
                                     f"(100% C1 > R$ 0{str_t1_info} | Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
                                 )
+                            if info_cus.get("aviso_sem_data"):
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(info_cus["aviso_sem_data"])
                         if arq_base is not None:
                             nova_base, info_base = processar_planilha_base_vendas(
                                 arq_base,
@@ -7251,7 +7285,7 @@ with aba1:
         with st.expander("👥 Gerenciar Usuários de Acesso ao Aplicativo (Painel Administrador)", expanded=False):
             st.caption(
                 "Cadastre novos usuários para consultar os painéis do sistema. **Apenas usuários com perfil Administrador** "
-                "podem subir planilhas ou alterar dados na Aba 7."
+                "podem subir planilhas ou alterar dados na Aba 6."
             )
             admin_mestre_u, _, _ = obter_credencial_admin_mestre()
             if "msg_usuarios_aba7" in st.session_state:
@@ -7470,7 +7504,7 @@ with aba2:
     df_base_fonte = df_base_vendas if arq_lista_cotacao is not None else df_base_vendas_rel
     df_custos_fonte = df_custos if arq_lista_cotacao is not None else df_custos_rel
     if df_est_fonte.empty and df_base_fonte.empty and arq_lista_cotacao is None:
-        st.info("Importe a Planilha de Estoque na Aba 7 (Importação & Backup) para calcular o giro e as sugestões de compra.")
+        st.info("Importe a Planilha de Estoque na Aba 6 (Importação & Backup) para calcular o giro e as sugestões de compra.")
     else:
         df_base_giro, dias_hist_janela, peso_hist = calcular_motor_giro_sazonal(
             df_estoque=df_est_fonte,
@@ -7938,7 +7972,7 @@ with aba2:
         else:
             st.caption(
                 "Estes produtos foram marcados como comprados e estão temporariamente silenciados na Aba 2. "
-                "Eles voltam sozinhos após 15 dias ou assim que o código entrar numa planilha de Entradas (NF) na Aba 7. "
+                "Eles voltam sozinhos após 15 dias ou assim que o código entrar numa planilha de Entradas (NF) na Aba 6. "
                 "Se marcou algum por engano, selecione abaixo para devolvê-lo imediatamente:"
             )
             df_tr_view = df_pedidos_transito.copy()
@@ -8029,7 +8063,7 @@ with aba3:
         "e gerando o texto comercial pronto para WhatsApp e para a equipe de vendas."
     )
     if df_estoque.empty:
-        st.info("Importe a Planilha de Estoque na Aba 7 (Importação & Backup) para monitorar os lotes e validades.")
+        st.info("Importe a Planilha de Estoque na Aba 6 (Importação & Backup) para monitorar os lotes e validades.")
     else:
         c_p1, c_p2, c_p3, c_p4 = st.columns([1.2, 1.1, 1.1, 1.4])
         with c_p1:
@@ -8421,7 +8455,7 @@ with aba4:
         "Marque a opção abaixo quando quiser visualizar também os itens do catálogo com saldo zerado ou sem custo (ex: linha completa de um fornecedor)."
     )
     if df_estoque.empty and df_custos_rel.empty:
-        st.info("Importe a Planilha de Estoque e a Planilha de Custos na Aba 7 (Importação & Backup) para gerar a Curva ABC Financeira.")
+        st.info("Importe a Planilha de Estoque e a Planilha de Custos na Aba 6 (Importação & Backup) para gerar a Curva ABC Financeira.")
     else:
         col_f_abc1, col_f_abc2 = st.columns([2.2, 1.3])
         with col_f_abc1:
@@ -8736,7 +8770,7 @@ with aba6:
     with col_esq:
         st.markdown("#### ✅ Produtos Visíveis nos Relatórios")
         if df_catalogo.empty:
-            st.info("Importe suas planilhas na Aba 1 para listar os produtos aqui.")
+            st.info("Importe suas planilhas na Aba 6 para listar os produtos aqui.")
         else:
             df_visiveis = df_catalogo[~df_catalogo["codigo"].isin(codigos_ocultos)].copy()
             busca_visiveis = st.text_input(
