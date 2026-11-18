@@ -349,6 +349,7 @@ def _autenticar_usuario_no_banco(username_norm: str, senha_digitada: str) -> tup
         return False, "", False, "Conexão `database_url` não configurada em `st.secrets`."
     try:
         cliente_pg = _conectar_supabase_cached(db_url)
+        garantir_tabela_usuarios_sql(cliente_pg)
         linhas = cliente_pg.executar_leitura(
             "SELECT nome_exibicao, senha_hash, eh_admin, ativo FROM usuarios WHERE username = %s",
             (username_norm,),
@@ -365,6 +366,35 @@ def _autenticar_usuario_no_banco(username_norm: str, senha_digitada: str) -> tup
         return False, "", False, f"Erro ao consultar usuários no banco: {exc_login}"
 
 
+DDL_TABELA_USUARIOS = """
+CREATE TABLE IF NOT EXISTS usuarios (
+    username TEXT PRIMARY KEY,
+    nome_exibicao TEXT DEFAULT '',
+    senha_hash TEXT NOT NULL DEFAULT '',
+    eh_admin BOOLEAN DEFAULT FALSE,
+    ativo BOOLEAN DEFAULT TRUE,
+    criado_em TEXT DEFAULT ''
+);
+"""
+
+
+def garantir_tabela_usuarios_sql(planilha) -> None:
+    """Garante a existência da tabela `usuarios` no Supabase mesmo que a conexão tenha vindo de cache."""
+    if planilha is None:
+        return
+    conn = planilha.conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(DDL_TABELA_USUARIOS)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+
+
 def _sincronizar_admin_mestre_supabase(planilha) -> None:
     """Garante que o usuário mestre configurado em `st.secrets` exista como Admin ativo na tabela `usuarios`."""
     if planilha is None:
@@ -373,6 +403,7 @@ def _sincronizar_admin_mestre_supabase(planilha) -> None:
     if not admin_pass:
         return
     try:
+        garantir_tabela_usuarios_sql(planilha)
         linhas = planilha.executar_leitura(
             "SELECT senha_hash, eh_admin, ativo FROM usuarios WHERE username = %s",
             (admin_user,),
@@ -1412,7 +1443,7 @@ class ConexaoSupabasePG:
 
 
 @st.cache_resource(ttl=3600, show_spinner=False)
-def _conectar_supabase_cached(db_url: str) -> ConexaoSupabasePG:
+def _conectar_supabase_cached(db_url: str, versao_esquema: str = "v22") -> ConexaoSupabasePG:
     cliente_pg = ConexaoSupabasePG(db_url)
     cliente_pg.conectar()
     return cliente_pg
@@ -1955,6 +1986,7 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
 
 def listar_usuarios_sql(planilha: ConexaoSupabasePG) -> pd.DataFrame:
     colunas_u = ["username", "nome_exibicao", "senha_hash", "eh_admin", "ativo", "criado_em"]
+    garantir_tabela_usuarios_sql(planilha)
     linhas = planilha.executar_leitura(
         "SELECT username, nome_exibicao, senha_hash, eh_admin, ativo, criado_em FROM usuarios ORDER BY eh_admin DESC, username ASC"
     )
@@ -1986,6 +2018,7 @@ def salvar_usuario_sql(
     nome_limpo = str(nome_exibicao or "").strip() or user_norm
     senha_h = gerar_hash_senha_segura(str(senha_plana))
     criado_s = agora_br().strftime("%d/%m/%Y %H:%M:%S")
+    garantir_tabela_usuarios_sql(planilha)
     conn = planilha.conectar()
     try:
         with conn.cursor() as cur:
@@ -2013,6 +2046,7 @@ def atualizar_status_ou_remover_usuarios_sql(
     usernames_remover: list,
     admin_mestre_user: str,
 ):
+    garantir_tabela_usuarios_sql(planilha)
     conn = planilha.conectar()
     try:
         with conn.cursor() as cur:
