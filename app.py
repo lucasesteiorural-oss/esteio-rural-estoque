@@ -2114,6 +2114,7 @@ def carregar_estado_completo() -> dict:
     df_meta = ler_tabela_sql(planilha, "meta")
     dias_base = 87
     ult_att = "Sincronizado via Supabase SQL"
+    ultima_data_custos_t1 = ""
     grupos_pref_custom = {}
     grupos_sku_custom = {}
     mp_custom_map = {}
@@ -2126,6 +2127,7 @@ def carregar_estado_completo() -> dict:
         except ValueError:
             dias_base = 87
         ult_att = mapa_meta.get("ultima_atualizacao", ult_att)
+        ultima_data_custos_t1 = str(mapa_meta.get("ultima_data_custos_t1", "")).strip()
         for ch_m, val_m in mapa_meta.items():
             ch_s = str(ch_m).strip()
             val_s = str(val_m).strip()
@@ -2161,6 +2163,7 @@ def carregar_estado_completo() -> dict:
         "expirados_15d_recente": cods_exp_15d,
         "dias_base": dias_base,
         "ultima_atualizacao": ult_att,
+        "ultima_data_custos_t1": ultima_data_custos_t1,
         "grupos_pref_custom": grupos_pref_custom,
         "grupos_sku_custom": grupos_sku_custom,
         "mp_custom_map": mp_custom_map,
@@ -2216,6 +2219,8 @@ def gerar_excel_banco_dados(estado: dict) -> bytes:
         {"chave": "ultima_atualizacao", "valor": str(estado.get("ultima_atualizacao", "-"))},
         {"chave": "data_exportacao_backup", "valor": agora_br().strftime("%d/%m/%Y %H:%M:%S")},
     ]
+    if str(estado.get("ultima_data_custos_t1", "")).strip():
+        linhas_meta_bkp.append({"chave": "ultima_data_custos_t1", "valor": str(estado.get("ultima_data_custos_t1", "")).strip()})
     for pref_k, nome_g in sorted((estado.get("grupos_pref_custom") or {}).items()):
         linhas_meta_bkp.append({"chave": f"grp_pref_{pref_k}", "valor": str(nome_g)})
     for sku_k, nome_g in sorted((estado.get("grupos_sku_custom") or {}).items()):
@@ -2519,11 +2524,19 @@ def montar_dataframe_meta_completo(
     grupos_sku_custom: dict = None,
     hashes_soma_por_data: dict = None,
     mp_custom_map: dict = None,
+    ultima_data_custos_t1: str = None,
 ) -> pd.DataFrame:
     linhas = [
         {"chave": "dias_base", "valor": str(int(dias_base_val))},
         {"chave": "ultima_atualizacao", "valor": str(ult_att_val)},
     ]
+    dt_c1_t1_ref = (
+        str(ultima_data_custos_t1).strip()
+        if ultima_data_custos_t1 is not None
+        else str(st.session_state.get("ultima_data_custos_t1_sessao", "")).strip()
+    )
+    if dt_c1_t1_ref:
+        linhas.append({"chave": "ultima_data_custos_t1", "valor": dt_c1_t1_ref})
     if grupos_pref_custom:
         for pk, pv in sorted(grupos_pref_custom.items()):
             if str(pk).strip() and str(pv).strip():
@@ -3532,6 +3545,205 @@ def auditar_descontos_saidas_df(
     return df_alerta.sort_values(["desconto_total_rs", "desconto_pct"], ascending=[False, False]).reset_index(drop=True)
 
 
+def auditar_ajustes_c1_t1_df(
+    df_custos_antes: pd.DataFrame,
+    df_custos_novos: pd.DataFrame,
+    df_entradas_recentes: pd.DataFrame = None,
+    registros_auditoria_nf: list = None,
+    limite_alerta_c1_sem_t1_pct: float = 2.0,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Audita a carga diária da planilha Custos (C1) & Tabela (T1):
+    1) Detecta todo item com alteração > 0,01% em C1 ou T1, além de novos cadastros.
+    2) Cruza com a última NF de Entrada para identificar notas de bonificação em que C1 foi mantido sem reajuste.
+    3) Dispara alerta de defasagem quando C1 sobe (>= 2%) mas T1 fica parado (0,0%).
+    """
+    resumo_vazio = {
+        "total_ajustes": 0,
+        "qtd_c1_alterado": 0,
+        "qtd_t1_alterado": 0,
+        "qtd_defasagem_t1": 0,
+        "qtd_bonificacao_mantida": 0,
+        "qtd_novos": 0,
+        "exemplos_defasagem_t1": [],
+    }
+    if df_custos_novos is None or df_custos_novos.empty:
+        return pd.DataFrame(), resumo_vazio
+
+    mapa_c1_db = {}
+    mapa_t1_db = {}
+    mapa_desc_db = {}
+    if df_custos_antes is not None and not df_custos_antes.empty:
+        mapa_c1_db = dict(zip(df_custos_antes["codigo"], df_custos_antes["custo_unitario"].fillna(0.0)))
+        if "preco_tabela" in df_custos_antes.columns:
+            mapa_t1_db = dict(zip(df_custos_antes["codigo"], df_custos_antes["preco_tabela"].fillna(0.0)))
+        mapa_desc_db = dict(zip(df_custos_antes["codigo"], df_custos_antes["descricao"].fillna("")))
+
+    mapa_custo_nf = {}
+    mapa_c1_pre_nf = {}
+    if (
+        df_entradas_recentes is not None
+        and not df_entradas_recentes.empty
+        and "qtd_entrada" in df_entradas_recentes.columns
+        and "valor_entrada" in df_entradas_recentes.columns
+    ):
+        df_e_rec = df_entradas_recentes[
+            (df_entradas_recentes["qtd_entrada"] > 0) & (df_entradas_recentes["valor_entrada"] > 0)
+        ].copy()
+        if not df_e_rec.empty:
+            if "data" in df_e_rec.columns:
+                df_e_rec = df_e_rec.sort_values("data")
+            for _, r_e in df_e_rec.iterrows():
+                cod_e = str(r_e["codigo"]).strip()
+                if cod_e:
+                    mapa_custo_nf[cod_e] = round(float(r_e["valor_entrada"]) / float(r_e["qtd_entrada"]), 4)
+
+    if registros_auditoria_nf:
+        for reg_nf in registros_auditoria_nf:
+            cod_nf = str(reg_nf.get("Código", "")).strip()
+            if not cod_nf:
+                continue
+            try:
+                v_nf = float(reg_nf.get("Custo na NF (R$)", 0.0) or 0.0)
+                v_ant_nf = float(reg_nf.get("Custo Anterior (R$)", 0.0) or 0.0)
+                if v_nf > 0.0:
+                    mapa_custo_nf[cod_nf] = v_nf
+                if v_ant_nf > 0.0:
+                    mapa_c1_pre_nf[cod_nf] = v_ant_nf
+            except (ValueError, TypeError):
+                continue
+
+    linhas_aud = []
+    qtd_c1_alt = 0
+    qtd_t1_alt = 0
+    qtd_def_t1 = 0
+    qtd_bonif = 0
+    qtd_novos = 0
+    exemplos_def = []
+
+    for _, r_n in df_custos_novos.iterrows():
+        cod = str(r_n["codigo"]).strip()
+        if not cod:
+            continue
+        desc = str(r_n.get("descricao", "")).strip() or str(mapa_desc_db.get(cod, "")).strip()
+        c1_novo = float(r_n.get("custo_unitario", 0.0) or 0.0)
+        t1_novo = float(r_n.get("preco_tabela", 0.0) or 0.0)
+        c1_db = float(mapa_c1_db.get(cod, 0.0))
+        t1_ant = float(mapa_t1_db.get(cod, 0.0))
+        custo_nf = float(mapa_custo_nf.get(cod, 0.0))
+        c1_pre_nf = float(mapa_c1_pre_nf.get(cod, 0.0))
+
+        # Se uma NF recente sobrescreveu temporariamente o C1 no banco, recupera o C1 original pré-NF como base
+        if c1_pre_nf > 0.0 and custo_nf > 0.0 and abs(c1_db - custo_nf) < 0.005:
+            c1_ant = c1_pre_nf
+        else:
+            c1_ant = c1_db
+
+        var_c1_pct = ((c1_novo - c1_ant) / c1_ant * 100.0) if c1_ant > 0.0 else 0.0
+        var_t1_pct = ((t1_novo - t1_ant) / t1_ant * 100.0) if (t1_ant > 0.0 and t1_novo > 0.0) else 0.0
+        mg_t1_ant = ((t1_ant - c1_ant) / t1_ant * 100.0) if (t1_ant > 0.0 and c1_ant > 0.0) else 0.0
+        mg_t1_nova = ((t1_novo - c1_novo) / t1_novo * 100.0) if (t1_novo > 0.0 and c1_novo > 0.0) else 0.0
+
+        eh_novo = (c1_ant <= 0.0) and (c1_novo > 0.0)
+        c1_mudou = (not eh_novo) and (c1_ant > 0.0) and (abs(var_c1_pct) > 0.01) and (abs(c1_novo - c1_ant) >= 0.005)
+        t1_mudou = (t1_ant > 0.0) and (t1_novo > 0.0) and (abs(var_t1_pct) > 0.01) and (abs(t1_novo - t1_ant) >= 0.005)
+        bonif_mantida = (
+            (not eh_novo)
+            and (not c1_mudou)
+            and (custo_nf > 0.0)
+            and (abs(custo_nf - c1_novo) >= 0.01)
+            and (abs((custo_nf - c1_novo) / max(c1_novo, 0.01) * 100.0) > 0.5)
+        )
+        defasagem_t1 = (
+            c1_mudou
+            and (var_c1_pct >= float(limite_alerta_c1_sem_t1_pct))
+            and (t1_ant > 0.0)
+            and (t1_novo > 0.0)
+            and (not t1_mudou)
+        )
+        nf_confirmada = c1_mudou and (custo_nf > 0.0) and (abs(c1_novo - custo_nf) < 0.01)
+
+        if not (eh_novo or c1_mudou or t1_mudou or bonif_mantida):
+            continue
+
+        if eh_novo:
+            qtd_novos += 1
+            status_txt = "🆕 Novo Produto Cadastrado"
+            prioridade = 3
+        elif bonif_mantida:
+            qtd_bonif += 1
+            status_txt = f"🎁 Bonificação / Sem Reajuste (NF {formatar_moeda_br(custo_nf)} ➔ C1 mantido)"
+            prioridade = 1
+        elif defasagem_t1:
+            qtd_def_t1 += 1
+            qtd_c1_alt += 1
+            delta_mg = mg_t1_nova - mg_t1_ant
+            status_txt = (
+                f"⚠️ C1 Subiu ({formatar_pct_br(var_c1_pct, 1, com_sinal=True)}) s/ Reajuste no T1 "
+                f"(Margem {formatar_pct_br(delta_mg, 1, com_sinal=True)})"
+            )
+            exemplos_def.append(
+                f"SKU {cod} (C1 {formatar_moeda_br(c1_ant)} ➔ {formatar_moeda_br(c1_novo)} | T1 parado em {formatar_moeda_br(t1_novo)})"
+            )
+            prioridade = 0
+        elif c1_mudou and t1_mudou:
+            qtd_c1_alt += 1
+            qtd_t1_alt += 1
+            tag_nf = " | Conf. NF" if nf_confirmada else ""
+            status_txt = (
+                f"🔄 Ajuste C1 ({formatar_pct_br(var_c1_pct, 1, com_sinal=True)}) & "
+                f"T1 ({formatar_pct_br(var_t1_pct, 1, com_sinal=True)}){tag_nf}"
+            )
+            prioridade = 2
+        elif c1_mudou:
+            qtd_c1_alt += 1
+            tag_nf = " (Confirmado pela NF)" if nf_confirmada else ""
+            status_txt = f"💰 Ajuste Custo C1 ({formatar_pct_br(var_c1_pct, 1, com_sinal=True)}){tag_nf}"
+            prioridade = 2
+        else:
+            qtd_t1_alt += 1
+            status_txt = f"🏷️ Ajuste Tabela T1 ({formatar_pct_br(var_t1_pct, 1, com_sinal=True)})"
+            prioridade = 3
+
+        linhas_aud.append(
+            {
+                "_prio": prioridade,
+                "_abs_var": max(abs(var_c1_pct), abs(var_t1_pct)),
+                "Código": cod,
+                "Descrição": desc,
+                "C1 Anterior (R$)": c1_ant,
+                "C1 Novo (R$)": c1_novo,
+                "Var. C1 (%)": round(var_c1_pct, 2),
+                "Custo NF (R$)": custo_nf,
+                "T1 Anterior (R$)": t1_ant,
+                "T1 Novo (R$)": t1_novo,
+                "Var. T1 (%)": round(var_t1_pct, 2),
+                "Nova Margem T1 (%)": round(mg_t1_nova, 1),
+                "Status Auditoria C1 & T1": status_txt,
+            }
+        )
+
+    if not linhas_aud:
+        return pd.DataFrame(), resumo_vazio
+
+    df_res = (
+        pd.DataFrame(linhas_aud)
+        .sort_values(["_prio", "_abs_var", "Código"], ascending=[True, False, True])
+        .drop(columns=["_prio", "_abs_var"])
+        .reset_index(drop=True)
+    )
+    resumo = {
+        "total_ajustes": len(df_res),
+        "qtd_c1_alterado": qtd_c1_alt,
+        "qtd_t1_alterado": qtd_t1_alt,
+        "qtd_defasagem_t1": qtd_def_t1,
+        "qtd_bonificacao_mantida": qtd_bonif,
+        "qtd_novos": qtd_novos,
+        "exemplos_defasagem_t1": exemplos_def[:6],
+    }
+    return df_res, resumo
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def calcular_motor_giro_sazonal(
     df_estoque: pd.DataFrame,
@@ -4028,6 +4240,8 @@ df_base_vendas = estado["base_inicial"]
 df_ocultos = estado["ocultos"]
 df_pedidos_transito = estado.get("pedidos_transito", pd.DataFrame(columns=ESQUEMA_ABAS["pedidos_transito"]))
 dias_base_atual = int(estado.get("dias_base", 87))
+ultima_data_custos_t1 = str(estado.get("ultima_data_custos_t1", "")).strip()
+st.session_state["ultima_data_custos_t1_sessao"] = ultima_data_custos_t1
 grupos_pref_custom = estado.get("grupos_pref_custom", {})
 grupos_sku_custom = estado.get("grupos_sku_custom", {})
 mp_custom_map = estado.get("mp_custom_map", {})
@@ -5834,6 +6048,89 @@ with aba1:
                 st.warning(aviso_dup["texto"])
             else:
                 st.info(aviso_dup["texto"])
+        if st.session_state.get("auditoria_ajustes_c1_t1"):
+            regs_aj_c1 = st.session_state["auditoria_ajustes_c1_t1"]
+            dt_aj_c1_str = st.session_state.get("data_auditoria_ajustes_c1_t1", "")
+            res_aj_c1 = st.session_state.get("resumo_auditoria_ajustes_c1_t1", {})
+            df_aj_c1 = pd.DataFrame(regs_aj_c1)
+            q_def_t1 = int(res_aj_c1.get("qtd_defasagem_t1", 0))
+            q_bonif_m = int(res_aj_c1.get("qtd_bonificacao_mantida", 0))
+            q_c1_alt = int(res_aj_c1.get("qtd_c1_alterado", 0))
+            q_t1_alt = int(res_aj_c1.get("qtd_t1_alterado", 0))
+            q_novos_c = int(res_aj_c1.get("qtd_novos", 0))
+            with st.expander(
+                f"📊 Conferência de Ajustes (C1 & T1) ({dt_aj_c1_str}) — "
+                f"{formatar_num_br(len(df_aj_c1))} Ajuste(s) | ⚠️ Defasagem T1: {formatar_num_br(q_def_t1)} | 🎁 Bonificação Mantida: {formatar_num_br(q_bonif_m)}",
+                expanded=True,
+            ):
+                st.caption(
+                    "Comparativo automático entre a carga atual de **C1 & T1**, os valores anteriores do banco e a última **NF de Entrada**."
+                )
+                fc1, fc2 = st.columns([2.1, 1.0])
+                with fc1:
+                    filtro_aj_c1 = st.selectbox(
+                        "Filtrar movimentações de C1 & T1:",
+                        options=[
+                            f"📋 Todos os Ajustes & Eventos ({len(df_aj_c1)})",
+                            f"⚠️ Defasagem: C1 Subiu s/ Reajuste no T1 ({q_def_t1})",
+                            f"🎁 Bonificação / C1 Mantido vs. NF ({q_bonif_m})",
+                            f"💰 Apenas Custo C1 Alterado ({q_c1_alt})",
+                            f"🏷️ Apenas Tabela T1 Alterada ({q_t1_alt})",
+                            f"🆕 Novos Produtos Cadastrados ({q_novos_c})",
+                        ],
+                        index=0,
+                        key="sel_filtro_aud_c1_t1_aba6",
+                    )
+                df_aj_view = df_aj_c1.copy()
+                if filtro_aj_c1.startswith("⚠️ Defasagem"):
+                    df_aj_view = df_aj_view[
+                        df_aj_view["Status Auditoria C1 & T1"].str.contains("s/ Reajuste no T1", na=False)
+                    ].copy()
+                elif filtro_aj_c1.startswith("🎁 Bonificação"):
+                    df_aj_view = df_aj_view[
+                        df_aj_view["Status Auditoria C1 & T1"].str.contains("Bonificação", na=False)
+                    ].copy()
+                elif filtro_aj_c1.startswith("💰 Apenas Custo C1"):
+                    df_aj_view = df_aj_view[
+                        df_aj_view["Var. C1 (%)"].abs() > 0.01
+                    ].copy()
+                elif filtro_aj_c1.startswith("🏷️ Apenas Tabela T1"):
+                    df_aj_view = df_aj_view[
+                        df_aj_view["Var. T1 (%)"].abs() > 0.01
+                    ].copy()
+                elif filtro_aj_c1.startswith("🆕 Novos"):
+                    df_aj_view = df_aj_view[
+                        df_aj_view["Status Auditoria C1 & T1"].str.contains("Novo Produto", na=False)
+                    ].copy()
+                with fc2:
+                    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                    st.download_button(
+                        label="📥 Baixar Ajustes C1 & T1 (.xlsx)",
+                        data=gerar_excel_relatorio(df_aj_view, "Ajustes_C1_T1"),
+                        file_name=f"Conferencia_Ajustes_C1_T1_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_aud_ajustes_c1_t1_aba6",
+                    )
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_aj_view,
+                        formatadores={
+                            "C1 Anterior (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "C1 Novo (R$)": formatar_moeda_br,
+                            "Var. C1 (%)": lambda x: "0,0%" if (pd.isna(x) or abs(float(x)) <= 0.01) else formatar_pct_br(x, 1, com_sinal=True),
+                            "Custo NF (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "T1 Anterior (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "T1 Novo (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "Var. T1 (%)": lambda x: "0,0%" if (pd.isna(x) or abs(float(x)) <= 0.01) else formatar_pct_br(x, 1, com_sinal=True),
+                            "Nova Margem T1 (%)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_pct_br(x, 1),
+                        },
+                        colunas_esquerda=["Descrição", "Status Auditoria C1 & T1"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=280,
+                )
         if st.session_state.get("auditoria_descontos_ultima_saida"):
             regs_desc_sai = st.session_state["auditoria_descontos_ultima_saida"]
             dt_aud_sai_str = st.session_state.get("data_auditoria_descontos_sai", "")
@@ -6047,9 +6344,14 @@ with aba1:
                 type=["xlsx", "xls", "csv"],
                 key="up_custos",
             )
-            st.caption(
-                "🛡️ C1 sobrescreve o custo da NF (neutraliza bonificação) e T1 audita descontos > 5%."
-            )
+            if ultima_data_custos_t1:
+                dt_c1_disp = pd.to_datetime(ultima_data_custos_t1, format="%Y-%m-%d", errors="coerce")
+                str_c1_disp = dt_c1_disp.strftime("%d/%m/%Y") if pd.notna(dt_c1_disp) else ultima_data_custos_t1
+                st.caption(f"📅 Última carga C1/T1 no banco: **{str_c1_disp}** | C1 sobrescreve NF.")
+            else:
+                st.caption(
+                    "🛡️ C1 sobrescreve o custo da NF (neutraliza bonificação) e T1 audita descontos > 5%."
+                )
         with st.expander("📦 Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
             cb1, cb2 = st.columns([0.8, 1.8])
             with cb1:
@@ -6558,7 +6860,18 @@ with aba1:
                                 )
                                 st.session_state["auditoria_descontos_ultima_saida"] = df_tab_desc_sessao.to_dict("records")
                                 st.session_state["data_auditoria_descontos_sai"] = data_saida.strftime("%d/%m/%Y")
+                        nova_ultima_data_custos_t1 = ultima_data_custos_t1
                         if arq_custos is not None:
+                            dt_custos_iso = data_custos.strftime("%Y-%m-%d")
+                            if ultima_data_custos_t1 and dt_custos_iso < ultima_data_custos_t1 and not ignorar_trava_data:
+                                dt_ult_c_fmt = pd.to_datetime(ultima_data_custos_t1, format="%Y-%m-%d", errors="coerce")
+                                str_ult_c = dt_ult_c_fmt.strftime("%d/%m/%Y") if pd.notna(dt_ult_c_fmt) else ultima_data_custos_t1
+                                raise ValueError(
+                                    f"Trava de Data Retroativa (Custos C1 & Tabela T1): A última carga de C1 & T1 gravada no sistema "
+                                    f"é de **{str_ult_c}**, e você selecionou **{data_custos.strftime('%d/%m/%Y')}**. "
+                                    f"Para evitar sobrescrever os custos e preços atuais com uma tabela antiga, o envio foi bloqueado. "
+                                    f"Se realmente precisar reimportar uma data anterior, marque '📅 Ignorar trava de data no nome' nas Opções Avançadas."
+                                )
                             novos_custos, info_cus = processar_planilha_custos(
                                 arq_custos,
                                 codigos_ref=codigos_ref_geral,
@@ -6566,6 +6879,7 @@ with aba1:
                                 data_custos=data_custos,
                                 ignorar_trava_data=ignorar_trava_data,
                             )
+                            nova_ultima_data_custos_t1 = max(ultima_data_custos_t1, dt_custos_iso) if ultima_data_custos_t1 else dt_custos_iso
                             if (not info_cus.get("tem_coluna_t1", False)) and (not df_custos.empty) and ("preco_tabela" in df_custos.columns):
                                 mapa_t1_prev = dict(zip(df_custos["codigo"], df_custos["preco_tabela"].fillna(0.0)))
                                 novos_custos["preco_tabela"] = novos_custos["codigo"].map(mapa_t1_prev).fillna(0.0)
@@ -6687,6 +7001,49 @@ with aba1:
                                 mensagens_auditoria_upload.append(
                                     "🛡️ **Prioridade C1 & T1 Mantida:** O Custo C1 prevaleceu sobre o custo da NF (incluindo bonificações) e o Preço Tabela T1 foi atualizado."
                                 )
+                            # Audita todos os ajustes de C1 & T1, cruzando com a NF recente e detectando defasagem de T1
+                            limite_nf_rec_iso = (hoje_br() - timedelta(days=2)).strftime("%Y-%m-%d")
+                            frames_ent_rec = []
+                            if not df_entradas_bruto.empty and "data" in df_entradas_bruto.columns:
+                                frames_ent_rec.append(df_entradas_bruto[df_entradas_bruto["data"] >= limite_nf_rec_iso])
+                            if novas_entradas is not None and not novas_entradas.empty:
+                                frames_ent_rec.append(novas_entradas)
+                            df_ent_rec_aud = pd.concat(frames_ent_rec, ignore_index=True) if frames_ent_rec else pd.DataFrame()
+                            regs_nf_ref = (
+                                info_upsert_custo_ent.get("registros_auditoria")
+                                or st.session_state.get("auditoria_custos_ultima_nf")
+                                or []
+                            )
+                            df_aj_c1_t1, resumo_aj_c1_t1 = auditar_ajustes_c1_t1_df(
+                                df_custos_antes=df_custos,
+                                df_custos_novos=novos_custos,
+                                df_entradas_recentes=df_ent_rec_aud,
+                                registros_auditoria_nf=regs_nf_ref,
+                                limite_alerta_c1_sem_t1_pct=2.0,
+                            )
+                            if not df_aj_c1_t1.empty:
+                                teve_alerta = True
+                                st.session_state["auditoria_ajustes_c1_t1"] = df_aj_c1_t1.to_dict("records")
+                                st.session_state["data_auditoria_ajustes_c1_t1"] = data_custos.strftime("%d/%m/%Y")
+                                st.session_state["resumo_auditoria_ajustes_c1_t1"] = resumo_aj_c1_t1
+                                partes_aj = [
+                                    f"📊 **Ajustes C1 & T1 ({data_custos.strftime('%d/%m')}):** {formatar_num_br(resumo_aj_c1_t1['total_ajustes'])} item(ns) com movimentação"
+                                ]
+                                if resumo_aj_c1_t1["qtd_defasagem_t1"] > 0:
+                                    ex_def_str = ", ".join(resumo_aj_c1_t1["exemplos_defasagem_t1"][:4])
+                                    partes_aj.append(
+                                        f"⚠️ **{formatar_num_br(resumo_aj_c1_t1['qtd_defasagem_t1'])} item(ns) com C1 reajustado sem atualização no T1** ({ex_def_str})"
+                                    )
+                                if resumo_aj_c1_t1["qtd_bonificacao_mantida"] > 0:
+                                    partes_aj.append(
+                                        f"🎁 **{formatar_num_br(resumo_aj_c1_t1['qtd_bonificacao_mantida'])} item(ns) de Bonificação/NF mantidos sem reajuste**"
+                                    )
+                                mensagens_auditoria_upload.append(" — ".join(partes_aj) + ".")
+                            else:
+                                st.session_state.pop("auditoria_ajustes_c1_t1", None)
+                                mensagens_auditoria_upload.append(
+                                    f"✔️ **Auditoria C1 & T1 ({data_custos.strftime('%d/%m')}):** Nenhuma alteração de C1 ou T1 em relação à base anterior."
+                                )
                             salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
                             gravar_tabela_sql(db_supabase, "custos", novos_custos)
                             abas_ja_gravadas.append("custos")
@@ -6750,6 +7107,7 @@ with aba1:
                             ult_att_val=agora_str,
                             grupos_pref_custom=grupos_pref_custom,
                             grupos_sku_custom=grupos_sku_custom,
+                            ultima_data_custos_t1=nova_ultima_data_custos_t1,
                         )
                         gravar_tabela_sql(db_supabase, "meta", df_meta_novo)
                         abas_ja_gravadas.append("meta")
