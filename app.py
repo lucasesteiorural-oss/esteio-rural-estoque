@@ -4,6 +4,8 @@ import math
 import hmac
 import hashlib
 import zipfile
+import threading
+from contextlib import contextmanager
 import unicodedata
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -1404,40 +1406,67 @@ def obter_url_supabase_secrets() -> str:
 
 
 class ConexaoSupabasePG:
-    """Gerencia a conexão PostgreSQL (Supabase Transaction Pooler) com reconexão automática transparente."""
+    """Gerencia conexões PostgreSQL isoladas por thread (thread-safe) com reconexão automática."""
 
     def __init__(self, db_url: str):
         self.db_url = _sanitizar_database_url(db_url)
-        self._conn = None
+        self._local = threading.local()
+        self._schema_lock = threading.RLock()
         self._esquema_verificado = False
+
+    def _fechar_conn_local(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._local.conn = None
 
     def conectar(self):
         import psycopg2
-        if self._conn is not None and getattr(self._conn, "closed", 1) == 0:
+        from psycopg2 import extensions as pg_ext
+        conn = getattr(self._local, "conn", None)
+        if conn is not None and getattr(conn, "closed", 1) == 0:
             try:
-                with self._conn.cursor() as cur_ping:
+                if conn.info.transaction_status != pg_ext.TRANSACTION_STATUS_IDLE:
+                    conn.rollback()
+                with conn.cursor() as cur_ping:
                     cur_ping.execute("SELECT 1")
-                return self._conn
+                conn.commit()
+                return conn
             except Exception:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-                self._conn = None
+                self._fechar_conn_local()
 
         kwargs_conn = {"dsn": self.db_url, "connect_timeout": 15}
         if "sslmode=" not in self.db_url.lower() and (
             "supabase.com" in self.db_url.lower() or "supabase.co" in self.db_url.lower()
         ):
             kwargs_conn["sslmode"] = "require"
-        self._conn = psycopg2.connect(**kwargs_conn)
-        self._conn.autocommit = False
+        conn = psycopg2.connect(**kwargs_conn)
+        conn.autocommit = False
+        self._local.conn = conn
         if not self._esquema_verificado:
-            with self._conn.cursor() as cur_init:
-                cur_init.execute(DDL_INICIALIZACAO_SUPABASE)
-            self._conn.commit()
-            self._esquema_verificado = True
-        return self._conn
+            with self._schema_lock:
+                if not self._esquema_verificado:
+                    with conn.cursor() as cur_init:
+                        cur_init.execute(DDL_INICIALIZACAO_SUPABASE)
+                    conn.commit()
+                    self._esquema_verificado = True
+        return conn
+
+    @contextmanager
+    def transacao(self):
+        conn = self.conectar()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                self._fechar_conn_local()
+            raise
 
     def executar_leitura(self, sql: str, params=None) -> list:
         for tentativa in range(2):
@@ -1454,11 +1483,7 @@ class ConexaoSupabasePG:
                 except Exception:
                     pass
                 if tentativa == 0:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    self._conn = None
+                    self._fechar_conn_local()
                 else:
                     raise
         return []
@@ -1815,9 +1840,6 @@ def gravar_tabela_incremental_por_data_sql(
             padronizar_dataframe(df_base_existente, tabela, origem_banco=True), tabela
         )
 
-    if criar_backup and not df_base_existente.empty:
-        salvar_backup_automatico_sql(planilha, tabela, df_base_existente)
-
     registro_hashes_sessao = st.session_state.setdefault("hashes_soma_por_data", {})
     if hashes_soma_atuais:
         for k_h, lista_h in hashes_soma_atuais.items():
@@ -1891,6 +1913,9 @@ def gravar_tabela_incremental_por_data_sql(
     df_novo_padrao = padronizar_dataframe(df_novo_dia, tabela, origem_banco=True)
     if df_novo_padrao.empty:
         return False
+
+    if criar_backup and not df_base_existente.empty:
+        salvar_backup_automatico_sql(planilha, tabela, df_base_existente)
     df_novo_padrao["data"] = data_ref_str
     colunas = ESQUEMA_ABAS[tabela]
     tuplas = _preparar_tuplas_para_insert(df_novo_padrao, colunas)
@@ -2106,7 +2131,7 @@ def carregar_estado_completo() -> dict:
     df_ocul = ler_tabela_sql(planilha, "ocultos")
     df_trans_bruto = ler_tabela_sql(planilha, "pedidos_transito")
     df_trans, cods_desp_nf, cods_exp_15d = depurar_pedidos_transito_auto_despertar(df_trans_bruto, df_ent)
-    if len(df_trans) != len(df_trans_bruto):
+    if len(df_trans) != len(df_trans_bruto) and bool(st.session_state.get("eh_admin_esteio", False)):
         try:
             gravar_tabela_sql(planilha, "pedidos_transito", df_trans, permitir_vazio=True)
         except Exception:
@@ -2230,6 +2255,10 @@ def gerar_excel_banco_dados(estado: dict) -> bytes:
         linhas_meta_bkp.append({"chave": f"grp_pref_{pref_k}", "valor": str(nome_g)})
     for sku_k, nome_g in sorted((estado.get("grupos_sku_custom") or {}).items()):
         linhas_meta_bkp.append({"chave": f"grp_sku_{sku_k}", "valor": str(nome_g)})
+    for sku_m, flag_m in sorted((estado.get("mp_custom_map") or {}).items()):
+        sku_m_norm = normalizar_codigo_sku(sku_m)
+        if sku_m_norm and str(flag_m).strip() in ("0", "1"):
+            linhas_meta_bkp.append({"chave": f"mp_flag_{sku_m_norm}", "valor": str(flag_m).strip()})
     df_meta_bkp = pd.DataFrame(linhas_meta_bkp)
     with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
         estado.get("estoque_atual", pd.DataFrame()).to_excel(writer, sheet_name="estoque_atual", index=False)
@@ -3294,15 +3323,27 @@ def processar_planilha_movimento_diario(
     elif nome_aba == "entradas_diarias":
         termos_fin_e = ("valor", "vlr", "custo", "c1", "nf", "nota", "liquido", "bruto", "total")
         termos_nao_fin_e = ("saldo", "estoque", "lote", "validade", "cod", "qtd", "quant", "data", "preco", "venda", "proposta", "faturamento", "receita")
-        for c_orig in df_raw.columns:
-            n_c = normalizar_chave_coluna(c_orig)
-            if (n_c in MAPA_SINONIMOS["valor_entrada"] and not any(b in n_c for b in termos_nao_fin_e)) or (
-                any(t in n_c for t in termos_fin_e) and not any(b in n_c for b in termos_nao_fin_e)
-            ):
-                coluna_valor_lida = str(c_orig).strip()
-                if any(u in n_c for u in ("unitario", "unit", "c1", "medio")):
-                    eh_custo_unitario_direto = True
+        cols_norm_e = {c_orig: normalizar_chave_coluna(c_orig) for c_orig in df_raw.columns}
+        col_escolhida_ent = None
+        for sin_e in MAPA_SINONIMOS["valor_entrada"]:
+            for c_orig, n_c in cols_norm_e.items():
+                if n_c == sin_e and not any(b in n_c for b in termos_nao_fin_e):
+                    col_escolhida_ent = c_orig
+                    break
+            if col_escolhida_ent is not None:
                 break
+        if col_escolhida_ent is None:
+            for c_orig, n_c in cols_norm_e.items():
+                if any(t in n_c for t in termos_fin_e) and not any(b in n_c for b in termos_nao_fin_e):
+                    col_escolhida_ent = c_orig
+                    break
+        if col_escolhida_ent is not None:
+            coluna_valor_lida = str(col_escolhida_ent).strip()
+            n_c_esc = cols_norm_e[col_escolhida_ent]
+            if any(u in n_c_esc for u in ("unitario", "unit", "c1", "medio")):
+                eh_custo_unitario_direto = True
+            if n_c_esc not in MAPA_SINONIMOS["valor_entrada"]:
+                df_raw = df_raw.rename(columns={col_escolhida_ent: "valor_entrada"})
     df = estruturar_dataframe_bruto(df_raw, nome_aba, exigir_colunas_obrigatorias=True)
     if nome_aba == "entradas_diarias" and eh_custo_unitario_direto and "valor_entrada" in df.columns:
         df["valor_entrada"] = df["qtd_entrada"] * df["valor_entrada"]
@@ -8432,14 +8473,18 @@ with aba2:
         indices_marcados_compra = ed_compras_aba2.index[ed_compras_aba2["ja_comprei"] == True].tolist()
         qtd_marcados_compra = len(indices_marcados_compra)
 
+        if not eh_usuario_admin:
+            st.caption(
+                f"🔒 **Modo Consulta ({nome_atual_logado}):** Apenas o **Administrador** pode registrar ou devolver itens em 'Já Comprei / Em Trânsito'."
+            )
         b_act_col1, b_act_col2 = st.columns([1.3, 1.3])
         with b_act_col1:
             if st.button(
                 f"🚚 Ocultar Marcados como 'Já Comprei' por 15 dias ({formatar_num_br(qtd_marcados_compra)} selecionado(s))",
                 type="primary",
                 use_container_width=True,
-                disabled=(qtd_marcados_compra == 0),
-            ):
+                disabled=(qtd_marcados_compra == 0 or not eh_usuario_admin),
+            ) and eh_usuario_admin:
                 with st.spinner("Registrando pedido em trânsito no Supabase..."):
                     try:
                         hoje_str_c = hoje_br().strftime("%Y-%m-%d")
@@ -8548,14 +8593,15 @@ with aba2:
                     f"↩️ Devolver Marcados para Lista de Compras ({formatar_num_br(len(sel_devolver_tr))})",
                     type="primary",
                     use_container_width=True,
-                    disabled=sel_devolver_tr.empty,
+                    disabled=(sel_devolver_tr.empty or not eh_usuario_admin),
                 )
             with bt_tr2:
                 btn_dev_todos = st.button(
                     "🔄 Devolver Todos os Itens em Trânsito",
                     use_container_width=True,
+                    disabled=(not eh_usuario_admin),
                 )
-            if btn_dev_marcados or btn_dev_todos:
+            if (btn_dev_marcados or btn_dev_todos) and eh_usuario_admin:
                 with st.spinner("Atualizando lista de trânsito no Supabase..."):
                     try:
                         if btn_dev_todos:
@@ -9271,6 +9317,10 @@ with aba6:
         "Marque as caixas de seleção para ocultar vários produtos de uma só vez (ex: brindes, uso interno ou itens fora de linha). "
         "A lista fica salva diretamente no Supabase (PostgreSQL) e pode ser restaurada a qualquer momento."
     )
+    if not eh_usuario_admin:
+        st.warning(
+            f"🔒 **Acesso Somente Leitura ({nome_atual_logado}):** Apenas o usuário **Administrador** pode ocultar ou restaurar produtos."
+        )
     frames_catalogo = []
     if not df_estoque_bruto.empty:
         frames_catalogo.append(df_estoque_bruto[["codigo", "descricao"]])
@@ -9336,8 +9386,8 @@ with aba6:
                 f"🙈 Ocultar Selecionados ({formatar_num_br(len(selecionados_para_ocultar))})",
                 type="primary",
                 use_container_width=True,
-                disabled=selecionados_para_ocultar.empty,
-            ):
+                disabled=(selecionados_para_ocultar.empty or not eh_usuario_admin),
+            ) and eh_usuario_admin:
                 with st.spinner("Salvando produtos ocultos no Supabase..."):
                     try:
                         novos_ocultos = selecionados_para_ocultar[["codigo", "descricao"]].copy()
@@ -9407,14 +9457,15 @@ with aba6:
                     f"👁️ Restaurar Marcados ({formatar_num_br(len(selecionados_para_restaurar))})",
                     type="primary",
                     use_container_width=True,
-                    disabled=selecionados_para_restaurar.empty,
+                    disabled=(selecionados_para_restaurar.empty or not eh_usuario_admin),
                 )
             with b_rest_2:
                 btn_restaurar_todos = st.button(
                     "🔄 Restaurar Todos",
                     use_container_width=True,
+                    disabled=(not eh_usuario_admin),
                 )
-            if btn_restaurar_sel or btn_restaurar_todos:
+            if (btn_restaurar_sel or btn_restaurar_todos) and eh_usuario_admin:
                 with st.spinner("Restaurando produtos no Supabase..."):
                     try:
                         if btn_restaurar_todos:
