@@ -309,35 +309,56 @@ def obter_secret(chave: str, padrao=None):
         return padrao
 
 
+PBKDF2_ITERACOES_PADRAO = 310_000
+
+
 def _normalizar_username(usuario: str) -> str:
-    return re.sub(r"[^a-z0-9._-]+", "", str(usuario or "").strip().lower())
+    s = unicodedata.normalize("NFKD", str(usuario or "")).encode("ASCII", "ignore").decode("utf-8")
+    return re.sub(r"[^a-z0-9._-]+", "", s.strip().lower())
 
 
-def gerar_hash_senha_segura(senha_plana: str, salt_hex: str = "") -> str:
+def gerar_hash_senha_segura(
+    senha_plana: str,
+    salt_hex: str = "",
+    iteracoes: int = PBKDF2_ITERACOES_PADRAO,
+) -> str:
     import secrets as _py_secrets
     if not salt_hex:
         salt_hex = _py_secrets.token_hex(16)
+    n_iter = int(iteracoes) if int(iteracoes) > 0 else PBKDF2_ITERACOES_PADRAO
     dk = hashlib.pbkdf2_hmac(
         "sha256",
         str(senha_plana).encode("utf-8"),
         bytes.fromhex(salt_hex),
-        120_000,
+        n_iter,
     )
-    return f"pbkdf2_sha256${salt_hex}${dk.hex()}"
+    return f"pbkdf2_sha256${n_iter}${salt_hex}${dk.hex()}"
 
 
 def verificar_senha_hash(senha_digitada: str, senha_hash_armazenada: str) -> bool:
     if not senha_digitada or not senha_hash_armazenada:
         return False
     partes = str(senha_hash_armazenada).split("$")
-    if len(partes) != 3 or partes[0] != "pbkdf2_sha256":
+    if partes[0] != "pbkdf2_sha256":
         return False
-    _, salt_hex, _ = partes
     try:
-        calculado = gerar_hash_senha_segura(senha_digitada, salt_hex=salt_hex)
-        return hmac.compare_digest(calculado.encode("utf-8"), str(senha_hash_armazenada).encode("utf-8"))
+        if len(partes) == 4:
+            _, iter_str, salt_hex, _ = partes
+            n_iter = int(iter_str)
+            calculado = gerar_hash_senha_segura(senha_digitada, salt_hex=salt_hex, iteracoes=n_iter)
+            return hmac.compare_digest(calculado.encode("utf-8"), str(senha_hash_armazenada).encode("utf-8"))
+        elif len(partes) == 3:
+            _, salt_hex, hash_hex = partes
+            dk = hashlib.pbkdf2_hmac(
+                "sha256",
+                str(senha_digitada).encode("utf-8"),
+                bytes.fromhex(salt_hex),
+                120_000,
+            )
+            return hmac.compare_digest(dk.hex().encode("utf-8"), hash_hex.encode("utf-8"))
     except Exception:
         return False
+    return False
 
 
 def obter_credencial_admin_mestre() -> tuple[str, str, str]:
@@ -348,10 +369,10 @@ def obter_credencial_admin_mestre() -> tuple[str, str, str]:
 
 
 def _autenticar_usuario_no_banco(username_norm: str, senha_digitada: str) -> tuple[bool, str, bool, str]:
-    """Valida usuário cadastrado na tabela `usuarios` do Supabase. Retorna (ok, nome_exibicao, eh_admin, msg_erro)."""
+    """Valida usuário cadastrado na tabela `usuarios` do Supabase sem vazar detalhes internos."""
     db_url = obter_url_supabase_secrets()
     if not db_url:
-        return False, "", False, "Conexão `database_url` não configurada em `st.secrets`."
+        return False, "", False, "⚠️ Serviço de autenticação indisponível no momento."
     try:
         cliente_pg = _conectar_supabase_cached(db_url)
         garantir_tabela_usuarios_sql(cliente_pg)
@@ -362,13 +383,13 @@ def _autenticar_usuario_no_banco(username_norm: str, senha_digitada: str) -> tup
         if not linhas:
             return False, "", False, "❌ Usuário ou senha incorretos."
         nome_exib, senha_hash, eh_adm, ativo = linhas[0]
+        if not verificar_senha_hash(senha_digitada, str(senha_hash or "")):
+            return False, "", False, "❌ Usuário ou senha incorretos."
         if not bool(ativo):
             return False, "", False, "🚫 Este usuário está desativado. Contate o Administrador."
-        if verificar_senha_hash(senha_digitada, str(senha_hash or "")):
-            return True, (str(nome_exib or "").strip() or username_norm), bool(eh_adm), ""
-        return False, "", False, "❌ Usuário ou senha incorretos."
-    except Exception as exc_login:
-        return False, "", False, f"Erro ao consultar usuários no banco: {exc_login}"
+        return True, (str(nome_exib or "").strip() or username_norm), bool(eh_adm), ""
+    except Exception:
+        return False, "", False, "⚠️ Não foi possível validar o acesso no momento. Tente novamente em instantes."
 
 
 DDL_TABELA_USUARIOS = """
@@ -477,27 +498,42 @@ def verificar_autenticacao() -> bool:
             senha_digitada = st.text_input("Senha de acesso:", type="password")
             btn_entrar = st.form_submit_button("Entrar no Sistema", type="primary", use_container_width=True)
             if btn_entrar:
-                user_norm = _normalizar_username(usuario_digitado)
-                if not user_norm or not senha_digitada:
-                    st.error("⚠️ Preencha o usuário e a senha para entrar.")
-                elif user_norm == admin_user and hmac.compare_digest(
-                    senha_digitada.encode("utf-8"), senha_correta.encode("utf-8")
-                ):
-                    st.session_state["autenticado_esteio"] = True
-                    st.session_state["usuario_logado"] = admin_user
-                    st.session_state["nome_usuario_logado"] = admin_nome
-                    st.session_state["eh_admin_esteio"] = True
-                    st.rerun()
+                agora_login = agora_br()
+                bloq_ate = st.session_state.get("login_bloqueado_ate")
+                if bloq_ate is not None and agora_login < bloq_ate:
+                    seg_rest = max(1, int((bloq_ate - agora_login).total_seconds()))
+                    st.error(f"⏳ Muitas tentativas incorretas. Aguarde {seg_rest}s para tentar novamente.")
                 else:
-                    ok_db, nome_db, eh_adm_db, msg_err = _autenticar_usuario_no_banco(user_norm, senha_digitada)
-                    if ok_db:
+                    user_norm = _normalizar_username(usuario_digitado)
+                    if not user_norm or not senha_digitada:
+                        st.error("⚠️ Preencha o usuário e a senha para entrar.")
+                    elif user_norm == admin_user and hmac.compare_digest(
+                        senha_digitada.encode("utf-8"), senha_correta.encode("utf-8")
+                    ):
+                        st.session_state["login_tentativas_falhas"] = 0
+                        st.session_state.pop("login_bloqueado_ate", None)
                         st.session_state["autenticado_esteio"] = True
-                        st.session_state["usuario_logado"] = user_norm
-                        st.session_state["nome_usuario_logado"] = nome_db
-                        st.session_state["eh_admin_esteio"] = eh_adm_db
+                        st.session_state["usuario_logado"] = admin_user
+                        st.session_state["nome_usuario_logado"] = admin_nome
+                        st.session_state["eh_admin_esteio"] = True
                         st.rerun()
                     else:
-                        st.error(msg_err or "❌ Usuário ou senha incorretos. Tente novamente.")
+                        ok_db, nome_db, eh_adm_db, msg_err = _autenticar_usuario_no_banco(user_norm, senha_digitada)
+                        if ok_db:
+                            st.session_state["login_tentativas_falhas"] = 0
+                            st.session_state.pop("login_bloqueado_ate", None)
+                            st.session_state["autenticado_esteio"] = True
+                            st.session_state["usuario_logado"] = user_norm
+                            st.session_state["nome_usuario_logado"] = nome_db
+                            st.session_state["eh_admin_esteio"] = eh_adm_db
+                            st.rerun()
+                        else:
+                            falhas_at = int(st.session_state.get("login_tentativas_falhas", 0)) + 1
+                            st.session_state["login_tentativas_falhas"] = falhas_at
+                            if falhas_at >= 5:
+                                st.session_state["login_bloqueado_ate"] = agora_login + timedelta(seconds=30)
+                                st.session_state["login_tentativas_falhas"] = 0
+                            st.error(msg_err or "❌ Usuário ou senha incorretos. Tente novamente.")
     return False
 
 
@@ -968,10 +1004,21 @@ def _parse_data_segura_py(valor, ano_min: int = 2000, ano_max: int = None):
         return None
     if isinstance(valor, (datetime, date, pd.Timestamp)):
         return datetime(valor.year, valor.month, valor.day) if (ano_min <= valor.year <= ano_max) else None
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        if 36526 <= float(valor) <= 60000:
+            dt_xl = datetime(1899, 12, 30) + timedelta(days=int(float(valor)))
+            return dt_xl if (ano_min <= dt_xl.year <= ano_max) else None
+        return None
     s = str(valor).strip()
     if not s or s.lower() in {"nan", "none", "nat", "<na>", "0", "0.0", "-", "--", "sem validade", "s/v"}:
         return None
-    s_data = re.sub(r"\s+\d{1,2}:\d{2}(:\d{2})?.*$", "", s).strip()
+    if re.fullmatch(r"\d{5}(?:\.0+)?", s):
+        serial_int = int(float(s))
+        if 36526 <= serial_int <= 60000:
+            dt_xl = datetime(1899, 12, 30) + timedelta(days=serial_int)
+            return dt_xl if (ano_min <= dt_xl.year <= ano_max) else None
+        return None
+    s_data = re.sub(r"[\sT]+\d{1,2}:\d{2}(:\d{2})?.*$", "", s).strip()
     m_ano = re.search(r"\b(\d{4})\b", s_data)
     if m_ano:
         ano_int = int(m_ano.group(1))
@@ -1553,6 +1600,7 @@ def gravar_tabela_sql(
     nome_aba: str,
     df: pd.DataFrame,
     permitir_vazio: bool = False,
+    conn_externa=None,
 ):
     from psycopg2.extras import execute_values
     if df is None:
@@ -1575,17 +1623,20 @@ def gravar_tabela_sql(
         else f"ON CONFLICT ({pk_sql}) DO NOTHING"
     )
 
-    conn = planilha.conectar()
-    try:
+    if conn_externa is not None:
+        with conn_externa.cursor() as cur:
+            cur.execute(f"TRUNCATE TABLE {tabela}")
+            if tuplas:
+                sql_ins = f"INSERT INTO {tabela} ({cols_sql}) VALUES %s {clausula_conflito}"
+                execute_values(cur, sql_ins, tuplas, page_size=2000)
+        return
+
+    with planilha.transacao() as conn:
         with conn.cursor() as cur:
             cur.execute(f"TRUNCATE TABLE {tabela}")
             if tuplas:
                 sql_ins = f"INSERT INTO {tabela} ({cols_sql}) VALUES %s {clausula_conflito}"
                 execute_values(cur, sql_ins, tuplas, page_size=2000)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
 
 
 def salvar_backup_automatico_sql(
@@ -1593,6 +1644,7 @@ def salvar_backup_automatico_sql(
     nome_aba_origem: str,
     df_atual_memoria: pd.DataFrame = None,
     permitir_vazio: bool = False,
+    conn_externa=None,
 ):
     """Salva uma cópia instantânea em _bkp_<nome_aba> diretamente no PostgreSQL antes de qualquer alteração."""
     if nome_aba_origem == "historico":
@@ -1600,10 +1652,24 @@ def salvar_backup_automatico_sql(
     tabela_orig = _validar_nome_tabela_sql(nome_aba_origem)
     tabela_bkp = _validar_nome_tabela_sql(f"_bkp_{nome_aba_origem}")
     if df_atual_memoria is not None and not df_atual_memoria.empty:
-        gravar_tabela_sql(planilha, tabela_bkp, df_atual_memoria, permitir_vazio=permitir_vazio)
+        gravar_tabela_sql(
+            planilha,
+            tabela_bkp,
+            df_atual_memoria,
+            permitir_vazio=permitir_vazio,
+            conn_externa=conn_externa,
+        )
         return
-    conn = planilha.conectar()
-    try:
+    if conn_externa is not None:
+        with conn_externa.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {tabela_orig}")
+            qtd_atual = int(cur.fetchone()[0])
+            if qtd_atual > 0 or permitir_vazio:
+                cur.execute(f"TRUNCATE TABLE {tabela_bkp}")
+                if qtd_atual > 0:
+                    cur.execute(f"INSERT INTO {tabela_bkp} SELECT * FROM {tabela_orig}")
+        return
+    with planilha.transacao() as conn:
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {tabela_orig}")
             qtd_atual = int(cur.fetchone()[0])
@@ -1611,10 +1677,6 @@ def salvar_backup_automatico_sql(
                 cur.execute(f"TRUNCATE TABLE {tabela_bkp}")
                 if qtd_atual > 0:
                     cur.execute(f"INSERT INTO {tabela_bkp} SELECT * FROM {tabela_orig}")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
 
 
 def remover_datas_tabela_sql(
@@ -1774,6 +1836,7 @@ def gravar_historico_incremental_sql(
     db: ConexaoSupabasePG,
     df_novo_dia: pd.DataFrame,
     data_ref: str,
+    conn_externa=None,
 ):
     """Grava o histórico diário compacto no PostgreSQL em uma única transação atômica (< 0,1s)."""
     from psycopg2.extras import execute_values
@@ -1786,8 +1849,23 @@ def gravar_historico_incremental_sql(
     df_novo_padrao = df_novo_padrao.drop_duplicates(subset=["codigo", "data"], keep="last").reset_index(drop=True)
     tuplas = _preparar_tuplas_para_insert(df_novo_padrao, ["codigo", "saldo_geral", "data"])
 
-    conn = db.conectar()
-    try:
+    if conn_externa is not None:
+        with conn_externa.cursor() as cur:
+            cur.execute(
+                "DELETE FROM historico WHERE data = %s OR data < %s",
+                (data_ref_str, limite_str),
+            )
+            if tuplas:
+                execute_values(
+                    cur,
+                    "INSERT INTO historico (codigo, saldo_geral, data) VALUES %s "
+                    "ON CONFLICT (codigo, data) DO UPDATE SET saldo_geral = EXCLUDED.saldo_geral",
+                    tuplas,
+                    page_size=2500,
+                )
+        return
+
+    with db.transacao() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM historico WHERE data = %s OR data < %s",
@@ -1801,10 +1879,6 @@ def gravar_historico_incremental_sql(
                     tuplas,
                     page_size=2500,
                 )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
 
 
 def gravar_tabela_incremental_por_data_sql(
@@ -1818,12 +1892,13 @@ def gravar_tabela_incremental_por_data_sql(
     criar_backup: bool = True,
     hashes_soma_atuais: dict = None,
     permitir_somar_codigos_repetidos_dia: bool = False,
+    conn_externa=None,
 ) -> bool:
     from psycopg2.extras import execute_values
     if df_novo_dia is None or df_novo_dia.empty:
         return False
     if nome_aba == "historico":
-        gravar_historico_incremental_sql(planilha, df_novo_dia, data_ref)
+        gravar_historico_incremental_sql(planilha, df_novo_dia, data_ref, conn_externa=conn_externa)
         return False
 
     tabela = _validar_nome_tabela_sql(nome_aba)
@@ -1915,15 +1990,30 @@ def gravar_tabela_incremental_por_data_sql(
         return False
 
     if criar_backup and not df_base_existente.empty:
-        salvar_backup_automatico_sql(planilha, tabela, df_base_existente)
+        salvar_backup_automatico_sql(planilha, tabela, df_base_existente, conn_externa=conn_externa)
     df_novo_padrao["data"] = data_ref_str
     colunas = ESQUEMA_ABAS[tabela]
     tuplas = _preparar_tuplas_para_insert(df_novo_padrao, colunas)
     cols_sql = ", ".join(colunas)
     set_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in colunas if c not in ("codigo", "data"))
 
-    conn = planilha.conectar()
-    try:
+    if conn_externa is not None:
+        with conn_externa.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {tabela} WHERE data = %s OR data < %s",
+                (data_ref_str, limite_str),
+            )
+            if tuplas:
+                execute_values(
+                    cur,
+                    f"INSERT INTO {tabela} ({cols_sql}) VALUES %s "
+                    f"ON CONFLICT (codigo, data) DO UPDATE SET {set_sql}",
+                    tuplas,
+                    page_size=2000,
+                )
+        return False
+
+    with planilha.transacao() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"DELETE FROM {tabela} WHERE data = %s OR data < %s",
@@ -1937,10 +2027,6 @@ def gravar_tabela_incremental_por_data_sql(
                     tuplas,
                     page_size=2000,
                 )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
     return False
 
 
@@ -2015,6 +2101,12 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
                     if set_sql
                     else f"ON CONFLICT ({pk_sql}) DO NOTHING"
                 )
+                bkp_tab = f"_bkp_{nome_tab}"
+                if (not nome_tab.startswith("_bkp_")) and (bkp_tab in TABELAS_SQL_VALIDAS) and (bkp_tab not in abas_lidas):
+                    cur.execute(f"SELECT COUNT(*) FROM {nome_tab}")
+                    if int(cur.fetchone()[0]) > 0:
+                        cur.execute(f"TRUNCATE TABLE {bkp_tab}")
+                        cur.execute(f"INSERT INTO {bkp_tab} SELECT * FROM {nome_tab}")
                 cur.execute(f"TRUNCATE TABLE {nome_tab}")
                 if tuplas:
                     execute_values(
@@ -2721,6 +2813,8 @@ def calcular_plano_promocional_fefo(
     aliquota_impostos_pct: float = 0.0,
     margem_referencia_pct: float = 30.0,
     df_saidas_ref: pd.DataFrame = None,
+    grupos_sku_custom: dict = None,
+    mp_custom_map: dict = None,
 ) -> pd.DataFrame:
     if df_estoque_ref is None or df_estoque_ref.empty:
         return pd.DataFrame()
@@ -2776,7 +2870,9 @@ def calcular_plano_promocional_fefo(
             return "🟡 3. Atenção (31 a 60 dias)"
         if dias <= 90:
             return "🔵 4. Preventivo (61 a 90 dias)"
-        return "🟢 5. Seguro (> 90 dias)"
+        if dias <= 120:
+            return "🟣 5. Preventivo Longo (91 a 120 dias)"
+        return "🟢 6. Seguro (> 120 dias)"
 
     df_f["status_fefo"] = df_f["dias_para_vencer"].apply(_classificar_faixa_fefo)
 
@@ -2882,7 +2978,7 @@ def calcular_plano_promocional_fefo(
                     diag_txt = f"🟠 Sobra {formatar_qtd_br(sobra_p)} un. (Atenção 31-60d)"
                     alvo_p = max(preco_piso * 1.06, preco_est * 0.82) if preco_est > 0 else 0.0
                     mec_txt = (
-                        "⚡ Promoção Leve 4 Pague 3 / Atacado (-18%)"
+                        "⚡ Promoção Leve 6 Pague 5 / Atacado (-18%)"
                         if saldo_l >= 6
                         else "⚡ Desconto Progressivo no Balcão (-15% a -18%)"
                     )
@@ -2937,7 +3033,7 @@ def calcular_plano_promocional_fefo(
     df_f["mecanica_ia"] = mecanica_ia_list
     df_f["precisa_promocao"] = precisa_promo_list
     df_f["eh_mp"] = [
-        identificar_produto_mp(c, d)
+        identificar_produto_mp(c, d, grupos_sku_custom, mp_custom_map)
         for c, d in zip(df_f["codigo"], df_f["descricao"])
     ]
     return df_f.drop(columns=["_ord_dias", "_saldo_vendavel"]).reset_index(drop=True)
@@ -2970,11 +3066,15 @@ def gerar_textos_campanha_promocional_fefo(
     margem_liq_pct = ((resultado_liq_lote / receita_total_lote) * 100.0) if receita_total_lote > 0 else 0.0
 
     if exibir_preco_de_whatsapp and economia_un > 0.01:
+        detalhe_lote_3 = (
+            f" (levando 3 un., você economiza *{formatar_moeda_br(economia_lote_3)}*)"
+            if saldo_lote >= 3
+            else ""
+        )
         bloco_preco_wpp = (
             f"💰 De: ~{formatar_moeda_br(preco_de)}~\n"
             f"🔥 *Por apenas: {formatar_moeda_br(preco_por)} à vista!* (*-{formatar_num_br(desconto_pct, 1)}%* de desconto)\n"
-            f"📉 Economia imediata de *{formatar_moeda_br(economia_un)} por unidade* "
-            f"(levando 3 un., você economiza *{formatar_moeda_br(economia_lote_3)}*)!\n\n"
+            f"📉 Economia imediata de *{formatar_moeda_br(economia_un)} por unidade*{detalhe_lote_3}!\n\n"
         )
     else:
         bloco_preco_wpp = (
@@ -4183,6 +4283,11 @@ def calcular_motor_giro_sazonal(
             peso_historico = min(float(intervalo_historico_dias) / float(janela_dias), 1.0)
             saida_total = quedas_por_sku.sum(axis=1)
             cols_mov = list(quedas_por_sku.columns)
+            div_dias_todas = pd.Series({c: float(dias_por_coluna.get(c, 1)) for c in cols_mov})
+            saldo_prev_alinhado = saldo_prev_sku.reindex(index=quedas_por_sku.index, columns=cols_mov).fillna(0.0)
+            mask_com_estoque_ou_venda = (saldo_prev_alinhado > 0.0) | (quedas_por_sku > 0.0)
+            dias_disponiveis_sku = mask_com_estoque_ou_venda.mul(div_dias_todas, axis=1).sum(axis=1).clip(lower=1.0)
+
             ult_col = cols_mov[-1]
             dt_ult_fmt = pd.to_datetime(ult_col, format="%Y-%m-%d", errors="coerce")
             str_ult_dia = dt_ult_fmt.strftime("%d/%m") if pd.notna(dt_ult_fmt) else str(ult_col)
@@ -4207,13 +4312,14 @@ def calcular_motor_giro_sazonal(
                 else:
                     saldo_antes_pico_vals.append(0.0)
                 queda_bruta_col_pico_vals.append(float(quedas_por_sku.loc[cod_idx, col_dt]))
-                dias_col_pico_vals.append(float(dias_por_coluna.get(col_dt, 1)))
+                teve_disp_pico = bool(mask_com_estoque_ou_venda.loc[cod_idx, col_dt])
+                dias_col_pico_vals.append(float(dias_por_coluna.get(col_dt, 1)) if teve_disp_pico else 0.0)
                 dt_p = pd.to_datetime(col_dt, format="%Y-%m-%d", errors="coerce")
                 data_pico_fmt_vals.append(dt_p.strftime("%d/%m") if pd.notna(dt_p) else str(col_dt))
 
             queda_bruta_pico_s = pd.Series(queda_bruta_col_pico_vals, index=quedas_por_sku.index)
             dias_sem_pico_s = pd.Series(
-                [max(float(intervalo_historico_dias) - dp, 1.0) for dp in dias_col_pico_vals],
+                [max(float(dias_disponiveis_sku.loc[cod_i]) - dp, 1.0) for cod_i, dp in zip(quedas_por_sku.index, dias_col_pico_vals)],
                 index=quedas_por_sku.index,
             )
             saida_sem_pico = (saida_total - queda_bruta_pico_s).clip(lower=0.0)
@@ -4222,7 +4328,7 @@ def calcular_motor_giro_sazonal(
             df_saidas_sku = pd.DataFrame(
                 {
                     "codigo": quedas_por_sku.index,
-                    "giro_historico": (saida_total / float(intervalo_historico_dias)).values,
+                    "giro_historico": (saida_total / dias_disponiveis_sku).values,
                     "giro_historico_sem_pico": (saida_sem_pico / dias_sem_pico_s).values,
                     "saida_ult_dia": saida_ult_dia_s.values,
                     "data_ult_dia": str_ult_dia,
@@ -7084,192 +7190,217 @@ with aba1:
                                 msg_base += f" — {formatar_num_br(info_base['qtd_desc_divergentes'])} SKU(s) tinham mais de uma descrição e foram unificados pelo código."
                             mensagens_auditoria_upload.append(msg_base)
                         agora_str = agora_br().strftime("%d/%m/%Y %H:%M:%S")
-                        if novo_estoque is not None:
-                            if atualizar_aba_estoque_atual:
-                                salvar_backup_automatico_sql(db_supabase, "estoque_atual", df_estoque_bruto)
-                                gravar_tabela_sql(db_supabase, "estoque_atual", novo_estoque)
-                                abas_ja_gravadas.append("estoque_atual")
-                            gravar_historico_incremental_sql(
-                                db_supabase,
-                                novo_estoque,
-                                data_str,
-                            )
-                            abas_ja_gravadas.append("historico")
-                        if novas_entradas is not None:
-                            gravar_tabela_incremental_por_data_sql(
-                                db_supabase,
-                                "entradas_diarias",
-                                novas_entradas,
-                                data_entrada.strftime("%Y-%m-%d"),
-                                somar_mesma_data=somar_entradas_mesmo_dia,
-                                df_atual_memoria=df_entradas_bruto,
-                                hash_arquivo=hash_arq_ent,
-                                criar_backup=True,
-                                hashes_soma_atuais=hashes_soma_meta,
-                                permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
-                            )
-                            abas_ja_gravadas.append("entradas_diarias")
-                            if not df_pedidos_transito.empty:
-                                df_ent_comb_temp = pd.concat([df_entradas_bruto, novas_entradas], ignore_index=True)
-                                df_trans_pos_nf, cods_desp_sync, _ = depurar_pedidos_transito_auto_despertar(
-                                    df_pedidos_transito, df_ent_comb_temp
-                                )
-                                if cods_desp_sync:
-                                    salvar_backup_automatico_sql(
-                                        db_supabase, "pedidos_transito", df_pedidos_transito, permitir_vazio=True
+                        hashes_snapshot = {
+                            k_snap: list(v_snap)
+                            for k_snap, v_snap in st.session_state.get("hashes_soma_por_data", {}).items()
+                        }
+                        try:
+                            with db_supabase.transacao() as conn_tx:
+                                if novo_estoque is not None:
+                                    if atualizar_aba_estoque_atual:
+                                        salvar_backup_automatico_sql(
+                                            db_supabase, "estoque_atual", df_estoque_bruto, conn_externa=conn_tx
+                                        )
+                                        gravar_tabela_sql(
+                                            db_supabase, "estoque_atual", novo_estoque, conn_externa=conn_tx
+                                        )
+                                        abas_ja_gravadas.append("estoque_atual")
+                                    gravar_historico_incremental_sql(
+                                        db_supabase,
+                                        novo_estoque,
+                                        data_str,
+                                        conn_externa=conn_tx,
                                     )
-                                    gravar_tabela_sql(
-                                        db_supabase, "pedidos_transito", df_trans_pos_nf, permitir_vazio=True
+                                    abas_ja_gravadas.append("historico")
+                                if novas_entradas is not None:
+                                    gravar_tabela_incremental_por_data_sql(
+                                        db_supabase,
+                                        "entradas_diarias",
+                                        novas_entradas,
+                                        data_entrada.strftime("%Y-%m-%d"),
+                                        somar_mesma_data=somar_entradas_mesmo_dia,
+                                        df_atual_memoria=df_entradas_bruto,
+                                        hash_arquivo=hash_arq_ent,
+                                        criar_backup=True,
+                                        hashes_soma_atuais=hashes_soma_meta,
+                                        permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                                        conn_externa=conn_tx,
                                     )
-                                    abas_ja_gravadas.append("pedidos_transito")
-                                    mensagens_auditoria_upload.append(
-                                        f"🔔 **Auto-Despertar ('Já Comprei'):** {formatar_num_br(len(cods_desp_sync))} produto(s) "
-                                        f"que estavam ocultos em trânsito chegaram nesta NF de Entrada e voltaram automaticamente ao painel!"
+                                    abas_ja_gravadas.append("entradas_diarias")
+                                    if not df_pedidos_transito.empty:
+                                        df_ent_comb_temp = pd.concat([df_entradas_bruto, novas_entradas], ignore_index=True)
+                                        df_trans_pos_nf, cods_desp_sync, _ = depurar_pedidos_transito_auto_despertar(
+                                            df_pedidos_transito, df_ent_comb_temp
+                                        )
+                                        if cods_desp_sync:
+                                            salvar_backup_automatico_sql(
+                                                db_supabase,
+                                                "pedidos_transito",
+                                                df_pedidos_transito,
+                                                permitir_vazio=True,
+                                                conn_externa=conn_tx,
+                                            )
+                                            gravar_tabela_sql(
+                                                db_supabase,
+                                                "pedidos_transito",
+                                                df_trans_pos_nf,
+                                                permitir_vazio=True,
+                                                conn_externa=conn_tx,
+                                            )
+                                            abas_ja_gravadas.append("pedidos_transito")
+                                            mensagens_auditoria_upload.append(
+                                                f"🔔 **Auto-Despertar ('Já Comprei'):** {formatar_num_br(len(cods_desp_sync))} produto(s) "
+                                                f"que estavam ocultos em trânsito chegaram nesta NF de Entrada e voltaram automaticamente ao painel!"
+                                            )
+                                if novas_saidas is not None:
+                                    hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
+                                    sai_ja_somada = gravar_tabela_incremental_por_data_sql(
+                                        db_supabase,
+                                        "saidas_diarias",
+                                        novas_saidas,
+                                        data_saida.strftime("%Y-%m-%d"),
+                                        somar_mesma_data=somar_saidas_mesmo_dia,
+                                        df_atual_memoria=df_saidas_bruto,
+                                        hash_arquivo=hash_arq_sai,
+                                        criar_backup=True,
+                                        hashes_soma_atuais=hashes_soma_meta,
+                                        permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                                        conn_externa=conn_tx,
                                     )
-                        if novas_saidas is not None:
-                            hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
-                            sai_ja_somada = gravar_tabela_incremental_por_data_sql(
-                                db_supabase,
-                                "saidas_diarias",
-                                novas_saidas,
-                                data_saida.strftime("%Y-%m-%d"),
-                                somar_mesma_data=somar_saidas_mesmo_dia,
-                                df_atual_memoria=df_saidas_bruto,
-                                hash_arquivo=hash_arq_sai,
-                                criar_backup=True,
-                                hashes_soma_atuais=hashes_soma_meta,
-                                permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
-                            )
-                            if sai_ja_somada:
-                                teve_alerta = True
-                                mensagens_auditoria_upload.append(
-                                    f"🛡️ **Proteção contra Soma Duplicada (Saídas {data_saida.strftime('%d/%m')}):** "
-                                    f"Este arquivo exato (`{arq_saidas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as vendas!"
-                                )
-                            abas_ja_gravadas.append("saidas_diarias")
-                        if novos_custos is not None:
-                            if not df_custos_via_entrada.empty:
-                                # C1 tem prioridade máxima quando a Planilha Geral de Custos C1 é enviada no mesmo lote:
-                                # preserva 100% dos custos positivos de novos_custos (C1) e só aproveita da NF itens ausentes/zerados no C1
-                                cods_c1_pos = set(novos_custos.loc[novos_custos["custo_unitario"] > 0, "codigo"].unique())
-                                df_ent_complementar = df_custos_via_entrada[~df_custos_via_entrada["codigo"].isin(cods_c1_pos)].copy()
-                                if not df_ent_complementar.empty:
-                                    novos_custos = padronizar_dataframe(
-                                        pd.concat([novos_custos, df_ent_complementar], ignore_index=True), "custos"
-                                    )
-                                mensagens_auditoria_upload.append(
-                                    "🛡️ **Prioridade C1 & T1 Mantida:** O Custo C1 prevaleceu sobre o custo da NF (incluindo bonificações) e o Preço Tabela T1 foi atualizado."
-                                )
-                            # Audita todos os ajustes de C1 & T1, cruzando com a NF recente e detectando defasagem de T1
-                            limite_nf_rec_iso = (hoje_br() - timedelta(days=2)).strftime("%Y-%m-%d")
-                            frames_ent_rec = []
-                            if not df_entradas_bruto.empty and "data" in df_entradas_bruto.columns:
-                                frames_ent_rec.append(df_entradas_bruto[df_entradas_bruto["data"] >= limite_nf_rec_iso])
-                            if novas_entradas is not None and not novas_entradas.empty:
-                                frames_ent_rec.append(novas_entradas)
-                            df_ent_rec_aud = pd.concat(frames_ent_rec, ignore_index=True) if frames_ent_rec else pd.DataFrame()
-                            regs_nf_ref = (
-                                info_upsert_custo_ent.get("registros_auditoria")
-                                or st.session_state.get("auditoria_custos_ultima_nf")
-                                or []
-                            )
-                            df_aj_c1_t1, resumo_aj_c1_t1 = auditar_ajustes_c1_t1_df(
-                                df_custos_antes=df_custos,
-                                df_custos_novos=novos_custos,
-                                df_entradas_recentes=df_ent_rec_aud,
-                                registros_auditoria_nf=regs_nf_ref,
-                                limite_alerta_c1_sem_t1_pct=2.0,
-                            )
-                            if not df_aj_c1_t1.empty:
-                                teve_alerta = True
-                                st.session_state["auditoria_ajustes_c1_t1"] = df_aj_c1_t1.to_dict("records")
-                                st.session_state["data_auditoria_ajustes_c1_t1"] = data_custos.strftime("%d/%m/%Y")
-                                st.session_state["resumo_auditoria_ajustes_c1_t1"] = resumo_aj_c1_t1
-                                partes_aj = [
-                                    f"📊 **Ajustes C1 & T1 ({data_custos.strftime('%d/%m')}):** {formatar_num_br(resumo_aj_c1_t1['total_ajustes'])} item(ns) com movimentação"
-                                ]
-                                if resumo_aj_c1_t1["qtd_defasagem_t1"] > 0:
-                                    ex_def_str = ", ".join(resumo_aj_c1_t1["exemplos_defasagem_t1"][:4])
-                                    partes_aj.append(
-                                        f"⚠️ **{formatar_num_br(resumo_aj_c1_t1['qtd_defasagem_t1'])} item(ns) com C1 reajustado sem atualização no T1** ({ex_def_str})"
-                                    )
-                                if resumo_aj_c1_t1["qtd_bonificacao_mantida"] > 0:
-                                    partes_aj.append(
-                                        f"🎁 **{formatar_num_br(resumo_aj_c1_t1['qtd_bonificacao_mantida'])} item(ns) de Bonificação/NF mantidos sem reajuste**"
-                                    )
-                                mensagens_auditoria_upload.append(" — ".join(partes_aj) + ".")
-                            else:
-                                st.session_state.pop("auditoria_ajustes_c1_t1", None)
-                                mensagens_auditoria_upload.append(
-                                    f"✔️ **Auditoria C1 & T1 ({data_custos.strftime('%d/%m')}):** Nenhuma alteração de C1 ou T1 em relação à base anterior."
-                                )
-                            salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
-                            gravar_tabela_sql(db_supabase, "custos", novos_custos)
-                            abas_ja_gravadas.append("custos")
-                            # Se não houve upload de Saídas neste clique, mas existe saída na data selecionada (data_saida), audita descontos > 5% contra o novo T1
-                            if novas_saidas is None and not df_saidas_bruto.empty and "data" in df_saidas_bruto.columns:
-                                dt_sai_ref_iso = data_saida.strftime("%Y-%m-%d")
-                                df_sai_dia_t1 = df_saidas_bruto[df_saidas_bruto["data"] == dt_sai_ref_iso].copy()
-                                if not df_sai_dia_t1.empty:
-                                    df_aud_desc_pos_t1 = auditar_descontos_saidas_df(
-                                        df_saidas_ref=df_sai_dia_t1,
-                                        df_custos_ref=novos_custos,
-                                        limite_desconto_pct=5.0,
-                                    )
-                                    if not df_aud_desc_pos_t1.empty:
+                                    if sai_ja_somada:
                                         teve_alerta = True
-                                        tot_d_rs_t1 = float(df_aud_desc_pos_t1["desconto_total_rs"].sum())
                                         mensagens_auditoria_upload.append(
-                                            f"🏷️ **Conferência de Descontos > 5% (Saídas de {data_saida.strftime('%d/%m')}):** "
-                                            f"{formatar_num_br(len(df_aud_desc_pos_t1))} item(ns) vendido(s) acima de 5% de desconto vs. T1 "
-                                            f"(Total concedido: {formatar_moeda_br(tot_d_rs_t1)})."
+                                            f"🛡️ **Proteção contra Soma Duplicada (Saídas {data_saida.strftime('%d/%m')}):** "
+                                            f"Este arquivo exato (`{arq_saidas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as vendas!"
                                         )
-                                        df_tab_desc_sessao2 = df_aud_desc_pos_t1[
-                                            [
-                                                "codigo",
-                                                "descricao",
-                                                "qtd_saida",
-                                                "preco_tabela_t1",
-                                                "preco_vendido_un",
-                                                "desconto_pct",
-                                                "desconto_total_rs",
-                                                "custo_c1",
-                                                "margem_real_pct",
-                                                "status_desconto",
-                                            ]
-                                        ].rename(
-                                            columns={
-                                                "codigo": "Código",
-                                                "descricao": "Descrição",
-                                                "qtd_saida": "Qtd. Vendida",
-                                                "preco_tabela_t1": "Preço Tabela T1 (R$)",
-                                                "preco_vendido_un": "Preço Vendido Balcão (R$)",
-                                                "desconto_pct": "Desconto (%)",
-                                                "desconto_total_rs": "Desconto Total (R$)",
-                                                "custo_c1": "Custo C1 (R$)",
-                                                "margem_real_pct": "Margem Real (%)",
-                                                "status_desconto": "Status Desconto",
-                                            }
+                                    abas_ja_gravadas.append("saidas_diarias")
+                                if novos_custos is not None:
+                                    if not df_custos_via_entrada.empty:
+                                        # C1 tem prioridade máxima quando a Planilha Geral de Custos C1 é enviada no mesmo lote:
+                                        # preserva 100% dos custos positivos de novos_custos (C1) e só aproveita da NF itens ausentes/zerados no C1
+                                        cods_c1_pos = set(novos_custos.loc[novos_custos["custo_unitario"] > 0, "codigo"].unique())
+                                        df_ent_complementar = df_custos_via_entrada[~df_custos_via_entrada["codigo"].isin(cods_c1_pos)].copy()
+                                        if not df_ent_complementar.empty:
+                                            novos_custos = padronizar_dataframe(
+                                                pd.concat([novos_custos, df_ent_complementar], ignore_index=True), "custos"
+                                            )
+                                        mensagens_auditoria_upload.append(
+                                            "🛡️ **Prioridade C1 & T1 Mantida:** O Custo C1 prevaleceu sobre o custo da NF (incluindo bonificações) e o Preço Tabela T1 foi atualizado."
                                         )
-                                        st.session_state["auditoria_descontos_ultima_saida"] = df_tab_desc_sessao2.to_dict("records")
-                                        st.session_state["data_auditoria_descontos_sai"] = data_saida.strftime("%d/%m/%Y")
-                        elif not df_custos_via_entrada.empty:
-                            salvar_backup_automatico_sql(db_supabase, "custos", df_custos)
-                            gravar_tabela_sql(db_supabase, "custos", df_custos_via_entrada)
-                            abas_ja_gravadas.append("custos")
-                        if nova_base is not None:
-                            salvar_backup_automatico_sql(db_supabase, "base_inicial", df_base_vendas)
-                            gravar_tabela_sql(db_supabase, "base_inicial", nova_base)
-                            abas_ja_gravadas.append("base_inicial")
-                        df_meta_novo = montar_dataframe_meta_completo(
-                            dias_base_val=int(dias_base_input),
-                            ult_att_val=agora_str,
-                            grupos_pref_custom=grupos_pref_custom,
-                            grupos_sku_custom=grupos_sku_custom,
-                            ultima_data_custos_t1=nova_ultima_data_custos_t1,
-                        )
-                        gravar_tabela_sql(db_supabase, "meta", df_meta_novo)
-                        abas_ja_gravadas.append("meta")
+                                    # Audita todos os ajustes de C1 & T1, cruzando com a NF recente e detectando defasagem de T1
+                                    limite_nf_rec_iso = (hoje_br() - timedelta(days=2)).strftime("%Y-%m-%d")
+                                    frames_ent_rec = []
+                                    if not df_entradas_bruto.empty and "data" in df_entradas_bruto.columns:
+                                        frames_ent_rec.append(df_entradas_bruto[df_entradas_bruto["data"] >= limite_nf_rec_iso])
+                                    if novas_entradas is not None and not novas_entradas.empty:
+                                        frames_ent_rec.append(novas_entradas)
+                                    df_ent_rec_aud = pd.concat(frames_ent_rec, ignore_index=True) if frames_ent_rec else pd.DataFrame()
+                                    regs_nf_ref = (
+                                        info_upsert_custo_ent.get("registros_auditoria")
+                                        or st.session_state.get("auditoria_custos_ultima_nf")
+                                        or []
+                                    )
+                                    df_aj_c1_t1, resumo_aj_c1_t1 = auditar_ajustes_c1_t1_df(
+                                        df_custos_antes=df_custos,
+                                        df_custos_novos=novos_custos,
+                                        df_entradas_recentes=df_ent_rec_aud,
+                                        registros_auditoria_nf=regs_nf_ref,
+                                        limite_alerta_c1_sem_t1_pct=2.0,
+                                    )
+                                    if not df_aj_c1_t1.empty:
+                                        teve_alerta = True
+                                        st.session_state["auditoria_ajustes_c1_t1"] = df_aj_c1_t1.to_dict("records")
+                                        st.session_state["data_auditoria_ajustes_c1_t1"] = data_custos.strftime("%d/%m/%Y")
+                                        st.session_state["resumo_auditoria_ajustes_c1_t1"] = resumo_aj_c1_t1
+                                        partes_aj = [
+                                            f"📊 **Ajustes C1 & T1 ({data_custos.strftime('%d/%m')}):** {formatar_num_br(resumo_aj_c1_t1['total_ajustes'])} item(ns) com movimentação"
+                                        ]
+                                        if resumo_aj_c1_t1["qtd_defasagem_t1"] > 0:
+                                            ex_def_str = ", ".join(resumo_aj_c1_t1["exemplos_defasagem_t1"][:4])
+                                            partes_aj.append(
+                                                f"⚠️ **{formatar_num_br(resumo_aj_c1_t1['qtd_defasagem_t1'])} item(ns) com C1 reajustado sem atualização no T1** ({ex_def_str})"
+                                            )
+                                        if resumo_aj_c1_t1["qtd_bonificacao_mantida"] > 0:
+                                            partes_aj.append(
+                                                f"🎁 **{formatar_num_br(resumo_aj_c1_t1['qtd_bonificacao_mantida'])} item(ns) de Bonificação/NF mantidos sem reajuste**"
+                                            )
+                                        mensagens_auditoria_upload.append(" — ".join(partes_aj) + ".")
+                                    else:
+                                        st.session_state.pop("auditoria_ajustes_c1_t1", None)
+                                        mensagens_auditoria_upload.append(
+                                            f"✔️ **Auditoria C1 & T1 ({data_custos.strftime('%d/%m')}):** Nenhuma alteração de C1 ou T1 em relação à base anterior."
+                                        )
+                                    salvar_backup_automatico_sql(db_supabase, "custos", df_custos, conn_externa=conn_tx)
+                                    gravar_tabela_sql(db_supabase, "custos", novos_custos, conn_externa=conn_tx)
+                                    abas_ja_gravadas.append("custos")
+                                    # Se não houve upload de Saídas neste clique, mas existe saída na data selecionada (data_saida), audita descontos > 5% contra o novo T1
+                                    if novas_saidas is None and not df_saidas_bruto.empty and "data" in df_saidas_bruto.columns:
+                                        dt_sai_ref_iso = data_saida.strftime("%Y-%m-%d")
+                                        df_sai_dia_t1 = df_saidas_bruto[df_saidas_bruto["data"] == dt_sai_ref_iso].copy()
+                                        if not df_sai_dia_t1.empty:
+                                            df_aud_desc_pos_t1 = auditar_descontos_saidas_df(
+                                                df_saidas_ref=df_sai_dia_t1,
+                                                df_custos_ref=novos_custos,
+                                                limite_desconto_pct=5.0,
+                                            )
+                                            if not df_aud_desc_pos_t1.empty:
+                                                teve_alerta = True
+                                                tot_d_rs_t1 = float(df_aud_desc_pos_t1["desconto_total_rs"].sum())
+                                                mensagens_auditoria_upload.append(
+                                                    f"🏷️ **Conferência de Descontos > 5% (Saídas de {data_saida.strftime('%d/%m')}):** "
+                                                    f"{formatar_num_br(len(df_aud_desc_pos_t1))} item(ns) vendido(s) acima de 5% de desconto vs. T1 "
+                                                    f"(Total concedido: {formatar_moeda_br(tot_d_rs_t1)})."
+                                                )
+                                                df_tab_desc_sessao2 = df_aud_desc_pos_t1[
+                                                    [
+                                                        "codigo",
+                                                        "descricao",
+                                                        "qtd_saida",
+                                                        "preco_tabela_t1",
+                                                        "preco_vendido_un",
+                                                        "desconto_pct",
+                                                        "desconto_total_rs",
+                                                        "custo_c1",
+                                                        "margem_real_pct",
+                                                        "status_desconto",
+                                                    ]
+                                                ].rename(
+                                                    columns={
+                                                        "codigo": "Código",
+                                                        "descricao": "Descrição",
+                                                        "qtd_saida": "Qtd. Vendida",
+                                                        "preco_tabela_t1": "Preço Tabela T1 (R$)",
+                                                        "preco_vendido_un": "Preço Vendido Balcão (R$)",
+                                                        "desconto_pct": "Desconto (%)",
+                                                        "desconto_total_rs": "Desconto Total (R$)",
+                                                        "custo_c1": "Custo C1 (R$)",
+                                                        "margem_real_pct": "Margem Real (%)",
+                                                        "status_desconto": "Status Desconto",
+                                                    }
+                                                )
+                                                st.session_state["auditoria_descontos_ultima_saida"] = df_tab_desc_sessao2.to_dict("records")
+                                                st.session_state["data_auditoria_descontos_sai"] = data_saida.strftime("%d/%m/%Y")
+                                elif not df_custos_via_entrada.empty:
+                                    salvar_backup_automatico_sql(db_supabase, "custos", df_custos, conn_externa=conn_tx)
+                                    gravar_tabela_sql(db_supabase, "custos", df_custos_via_entrada, conn_externa=conn_tx)
+                                    abas_ja_gravadas.append("custos")
+                                if nova_base is not None:
+                                    salvar_backup_automatico_sql(db_supabase, "base_inicial", df_base_vendas, conn_externa=conn_tx)
+                                    gravar_tabela_sql(db_supabase, "base_inicial", nova_base, conn_externa=conn_tx)
+                                    abas_ja_gravadas.append("base_inicial")
+                                df_meta_novo = montar_dataframe_meta_completo(
+                                    dias_base_val=int(dias_base_input),
+                                    ult_att_val=agora_str,
+                                    grupos_pref_custom=grupos_pref_custom,
+                                    grupos_sku_custom=grupos_sku_custom,
+                                    ultima_data_custos_t1=nova_ultima_data_custos_t1,
+                                )
+                                gravar_tabela_sql(db_supabase, "meta", df_meta_novo, conn_externa=conn_tx)
+                                abas_ja_gravadas.append("meta")
+                        except Exception:
+                            st.session_state["hashes_soma_por_data"] = hashes_snapshot
+                            abas_ja_gravadas.clear()
+                            raise
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
                         carregar_estado_completo.clear()
@@ -7284,20 +7415,10 @@ with aba1:
                             }
                         st.rerun()
                     except Exception as erro_gravacao:
-                        if not abas_ja_gravadas:
-                            st.error(
-                                f"❌ **Importação bloqueada antes de gravar na nuvem (nenhum dado anterior foi alterado):**\n\n"
-                                f"{erro_gravacao}"
-                            )
-                        else:
-                            carregar_estado_completo.clear()
-                            calcular_motor_giro_sazonal.clear()
-                            abas_str = ", ".join(abas_ja_gravadas)
-                            st.error(
-                                f"⚠️ **Falha parcial durante a gravação na nuvem:** {erro_gravacao}\n\n"
-                                f"As seguintes abas já haviam sido atualizadas antes da falha: **`{abas_str}`**. "
-                                f"Clique em sincronizar novamente para concluir as demais."
-                            )
+                        st.error(
+                            f"❌ **Importação bloqueada antes de gravar na nuvem (transação revertida, nenhum dado anterior foi alterado):**\n\n"
+                            f"{erro_gravacao}"
+                        )
 
         with st.expander("🗂️ Gerenciar e Editar Grupos / Departamentos de Produtos (Por Prefixo ou Produto Específico)", expanded=False):
             st.caption(
@@ -8699,6 +8820,8 @@ with aba3:
             aliquota_impostos_pct=float(aliquota_imp_fefo),
             margem_referencia_pct=float(margem_ref_fefo),
             df_saidas_ref=df_saidas,
+            grupos_sku_custom=grupos_sku_custom,
+            mp_custom_map=mp_custom_map,
         )
 
         if escopo_fefo.startswith("🏪"):
