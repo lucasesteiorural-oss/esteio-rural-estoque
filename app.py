@@ -1,5 +1,6 @@
 import io
 import re
+import html
 import math
 import hmac
 import hashlib
@@ -1286,7 +1287,7 @@ def depurar_pedidos_transito_auto_despertar(
     return df_ativos, cods_despertados_nf, cods_expirados_15d
 
 
-def podar_historico_180_dias(df_hist: pd.DataFrame, nome_aba: str = "historico") -> pd.DataFrame:
+def podar_historico_max_dias(df_hist: pd.DataFrame, nome_aba: str = "historico") -> pd.DataFrame:
     if df_hist is None or df_hist.empty or "data" not in df_hist.columns:
         return padronizar_dataframe(pd.DataFrame(), nome_aba)
     df_h = df_hist.copy()
@@ -1306,6 +1307,9 @@ def podar_historico_180_dias(df_hist: pd.DataFrame, nome_aba: str = "historico")
     if nome_aba == "historico" and "saldo_geral" in df_filtrado.columns:
         df_filtrado = df_filtrado[df_filtrado["saldo_geral"].abs() > 1e-9].copy()
     return df_filtrado.reset_index(drop=True)
+
+
+podar_historico_180_dias = podar_historico_max_dias
 
 
 # ==============================================================================
@@ -1911,7 +1915,7 @@ def gravar_tabela_incremental_por_data_sql(
         else ler_tabela_sql(planilha, tabela)
     )
     if not df_base_existente.empty:
-        df_base_existente = podar_historico_180_dias(
+        df_base_existente = podar_historico_max_dias(
             padronizar_dataframe(df_base_existente, tabela, origem_banco=True), tabela
         )
 
@@ -2054,7 +2058,7 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
                             abas_lidas[sh] = pd.read_excel(xls, sheet_name=sh, converters=conv)
                 elif nz.lower().endswith(".csv") and "historico" in nz.lower():
                     bytes_csv = zf.read(nz)
-                    for enc in ("utf-8-sig", "latin1", "cp1252"):
+                    for enc in ("utf-8-sig", "cp1252", "latin1"):
                         for sep in (";", ",", "\t"):
                             try:
                                 df_h_csv = pd.read_csv(io.BytesIO(bytes_csv), sep=sep, encoding=enc, dtype=str)
@@ -2088,7 +2092,7 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
                     continue
                 df_pad = padronizar_dataframe(df_bruto, aba_esq, origem_banco=True)
                 if aba_esq in ("historico", "entradas_diarias", "saidas_diarias"):
-                    df_pad = podar_historico_180_dias(df_pad, aba_esq)
+                    df_pad = podar_historico_max_dias(df_pad, aba_esq)
                 colunas = ESQUEMA_ABAS[aba_esq]
                 pk_cols = CHAVES_PRIMARIAS_SQL.get(aba_esq, [colunas[0]])
                 df_pad = df_pad.drop_duplicates(subset=pk_cols, keep="last").reset_index(drop=True)
@@ -2215,19 +2219,14 @@ def carregar_estado_completo() -> dict:
     if planilha is None:
         raise RuntimeError(f"Não foi possível conectar ao Supabase (PostgreSQL): {erro}")
     df_est = ler_tabela_sql(planilha, "estoque_atual")
-    df_hist = podar_historico_180_dias(ler_tabela_sql(planilha, "historico"), "historico")
-    df_ent = podar_historico_180_dias(ler_tabela_sql(planilha, "entradas_diarias"), "entradas_diarias")
-    df_sai = podar_historico_180_dias(ler_tabela_sql(planilha, "saidas_diarias"), "saidas_diarias")
+    df_hist = podar_historico_max_dias(ler_tabela_sql(planilha, "historico"), "historico")
+    df_ent = podar_historico_max_dias(ler_tabela_sql(planilha, "entradas_diarias"), "entradas_diarias")
+    df_sai = podar_historico_max_dias(ler_tabela_sql(planilha, "saidas_diarias"), "saidas_diarias")
     df_cus = ler_tabela_sql(planilha, "custos")
     df_base = ler_tabela_sql(planilha, "base_inicial")
     df_ocul = ler_tabela_sql(planilha, "ocultos")
     df_trans_bruto = ler_tabela_sql(planilha, "pedidos_transito")
     df_trans, cods_desp_nf, cods_exp_15d = depurar_pedidos_transito_auto_despertar(df_trans_bruto, df_ent)
-    if len(df_trans) != len(df_trans_bruto) and bool(st.session_state.get("eh_admin_esteio", False)):
-        try:
-            gravar_tabela_sql(planilha, "pedidos_transito", df_trans, permitir_vazio=True)
-        except Exception:
-            pass
     df_meta = ler_tabela_sql(planilha, "meta")
     dias_base = 87
     ult_att = "Sincronizado via Supabase SQL"
@@ -2400,6 +2399,7 @@ def gerar_excel_relatorio(df: pd.DataFrame, nome_aba: str = "Relatorio") -> byte
 def gerar_excel_com_formulas_cotacao(df_cotacao: pd.DataFrame) -> bytes:
     from openpyxl import load_workbook
     from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
     buffer_xlsx = io.BytesIO()
     with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
         df_cotacao.to_excel(writer, sheet_name="Cotacao_Compras", index=False)
@@ -2412,47 +2412,87 @@ def gerar_excel_com_formulas_cotacao(df_cotacao: pd.DataFrame) -> bytes:
     alin_centro = Alignment(horizontal="center", vertical="center")
     alin_esq = Alignment(horizontal="left", vertical="center")
     preenchimento_editavel = PatternFill(start_color="FFFDE7", end_color="FFFDE7", fill_type="solid")
+
+    mapa_letras = {}
     for c_idx in range(1, max_col + 1):
         ws.cell(row=1, column=c_idx).alignment = alin_centro
         ws.cell(row=1, column=c_idx).font = fonte_negrito
+        tit_norm = normalizar_chave_coluna(ws.cell(row=1, column=c_idx).value or "")
+        if tit_norm:
+            mapa_letras[tit_norm] = get_column_letter(c_idx)
+
+    def _col(chave_norm: str, fallback_letra: str) -> str:
+        return mapa_letras.get(chave_norm, fallback_letra)
+
+    col_desc = _col("descricao", "B")
+    col_saldo = _col("saldo_atual", "D")
+    col_venc = _col("vencido_ou_vencendo_60d", "E")
+    col_giro = _col("giro_medio_dia", "F")
+    col_auton = _col("autonomia_dias", "G")
+    col_sug = _col("sugestao_sistema", "H")
+    col_qtd = _col("qtd_a_comprar", "I")
+    col_custo_erp = _col("ultimo_custo_erp_r", "J")
+    col_custo_cot = _col("custo_atual_cotado_r", "K")
+    col_var = _col("variacao_custo_pct", "L")
+    col_total = _col("total_do_item_r", "M")
+
     for r in range(2, max_row + 1):
         for c_idx in range(1, max_col + 1):
-            ws.cell(row=r, column=c_idx).alignment = alin_esq if c_idx == 2 else alin_centro
-        ws[f"D{r}"].number_format = "#,##0"
-        ws[f"E{r}"].number_format = "#,##0"
-        ws[f"F{r}"].number_format = "#,##0.00"
-        ws[f"G{r}"].number_format = "#,##0.0"
-        ws[f"H{r}"].number_format = "#,##0"
-        ws[f"I{r}"].number_format = "#,##0"
-        ws[f"I{r}"].fill = preenchimento_editavel
-        ws[f"K{r}"].fill = preenchimento_editavel
-        val_k = ws[f"K{r}"].value
+            letra_c = get_column_letter(c_idx)
+            ws.cell(row=r, column=c_idx).alignment = alin_esq if letra_c == col_desc else alin_centro
+        ws[f"{col_saldo}{r}"].number_format = "#,##0"
+        ws[f"{col_venc}{r}"].number_format = "#,##0"
+        ws[f"{col_giro}{r}"].number_format = "#,##0.00"
+        ws[f"{col_auton}{r}"].number_format = "#,##0.0"
+        ws[f"{col_sug}{r}"].number_format = "#,##0"
+        ws[f"{col_qtd}{r}"].number_format = "#,##0"
+        ws[f"{col_qtd}{r}"].fill = preenchimento_editavel
+        ws[f"{col_custo_cot}{r}"].fill = preenchimento_editavel
+        val_k = ws[f"{col_custo_cot}{r}"].value
         if val_k is not None and float(val_k) == 0.0:
-            ws[f"K{r}"].value = None
-        ws[f"J{r}"].number_format = "R$ #,##0.00"
-        ws[f"K{r}"].number_format = "R$ #,##0.00"
-        ws[f"L{r}"] = f"=IF(AND(K{r}>0,J{r}>0),(K{r}-J{r})/J{r},0)"
-        ws[f"L{r}"].number_format = "+0.0%;-0.0%;0.0%"
-        ws[f"M{r}"] = f"=I{r}*IF(K{r}>0,K{r},J{r})"
-        ws[f"M{r}"].number_format = "R$ #,##0.00"
+            ws[f"{col_custo_cot}{r}"].value = None
+        ws[f"{col_custo_erp}{r}"].number_format = "R$ #,##0.00"
+        ws[f"{col_custo_cot}{r}"].number_format = "R$ #,##0.00"
+        ws[f"{col_var}{r}"] = (
+            f"=IF(AND({col_custo_cot}{r}>0,{col_custo_erp}{r}>0),"
+            f"({col_custo_cot}{r}-{col_custo_erp}{r})/{col_custo_erp}{r},0)"
+        )
+        ws[f"{col_var}{r}"].number_format = "+0.0%;-0.0%;0.0%"
+        ws[f"{col_total}{r}"] = f"={col_qtd}{r}*IF({col_custo_cot}{r}>0,{col_custo_cot}{r},{col_custo_erp}{r})"
+        ws[f"{col_total}{r}"].number_format = "R$ #,##0.00"
+
     linha_total = max_row + 2
-    ws[f"H{linha_total}"] = "TOTAL DO PEDIDO:"
-    ws[f"H{linha_total}"].font = fonte_negrito
-    ws[f"H{linha_total}"].alignment = Alignment(horizontal="right", vertical="center")
-    ws[f"I{linha_total}"] = f"=SUM(I2:I{max_row})"
-    ws[f"I{linha_total}"].font = fonte_negrito
-    ws[f"I{linha_total}"].alignment = alin_centro
-    ws[f"I{linha_total}"].number_format = "#,##0"
-    ws[f"M{linha_total}"] = f"=SUM(M2:M{max_row})"
-    ws[f"M{linha_total}"].font = fonte_negrito
-    ws[f"M{linha_total}"].alignment = alin_centro
-    ws[f"M{linha_total}"].number_format = "R$ #,##0.00"
-    larguras = {
-        "A": 14, "B": 38, "C": 26, "D": 15, "E": 26, "F": 16,
-        "G": 16, "H": 17, "I": 18, "J": 20, "K": 22, "L": 18, "M": 20,
+    ws[f"{col_sug}{linha_total}"] = "TOTAL DO PEDIDO:"
+    ws[f"{col_sug}{linha_total}"].font = fonte_negrito
+    ws[f"{col_sug}{linha_total}"].alignment = Alignment(horizontal="right", vertical="center")
+    ws[f"{col_qtd}{linha_total}"] = f"=SUM({col_qtd}2:{col_qtd}{max_row})"
+    ws[f"{col_qtd}{linha_total}"].font = fonte_negrito
+    ws[f"{col_qtd}{linha_total}"].alignment = alin_centro
+    ws[f"{col_qtd}{linha_total}"].number_format = "#,##0"
+    ws[f"{col_total}{linha_total}"] = f"=SUM({col_total}2:{col_total}{max_row})"
+    ws[f"{col_total}{linha_total}"].font = fonte_negrito
+    ws[f"{col_total}{linha_total}"].alignment = alin_centro
+    ws[f"{col_total}{linha_total}"].number_format = "R$ #,##0.00"
+
+    larguras_por_chave = {
+        "codigo": 14,
+        "descricao": 38,
+        "saida_recente_alerta": 26,
+        "saldo_atual": 15,
+        "vencido_ou_vencendo_60d": 26,
+        "giro_medio_dia": 16,
+        "autonomia_dias": 16,
+        "sugestao_sistema": 17,
+        "qtd_a_comprar": 18,
+        "ultimo_custo_erp_r": 20,
+        "custo_atual_cotado_r": 22,
+        "variacao_custo_pct": 18,
+        "total_do_item_r": 20,
     }
-    for col_letra, larg in larguras.items():
-        ws.column_dimensions[col_letra].width = larg
+    for c_idx in range(1, max_col + 1):
+        letra_c = get_column_letter(c_idx)
+        tit_norm = normalizar_chave_coluna(ws.cell(row=1, column=c_idx).value or "")
+        ws.column_dimensions[letra_c].width = larguras_por_chave.get(tit_norm, 16)
     out_buffer = io.BytesIO()
     wb.save(out_buffer)
     return out_buffer.getvalue()
@@ -2522,7 +2562,7 @@ def ler_arquivo_upload(arquivo, exigir_multiplas_colunas: bool = False) -> pd.Da
     conteudo = arquivo.getvalue()
     if nome.endswith(".csv"):
         candidato_1_col = None
-        for enc in ["utf-8-sig", "latin1", "cp1252"]:
+        for enc in ["utf-8-sig", "cp1252", "latin1"]:
             for sep in [";", ",", "\t"]:
                 try:
                     df = pd.read_csv(io.BytesIO(conteudo), sep=sep, encoding=enc, dtype=str)
@@ -4399,8 +4439,8 @@ with col_status:
     st.markdown(
         f"""
         <div class="status-box">
-            <div class="status-label">{tag_perfil_topo}: {nome_atual_logado}</div>
-            <div class="status-value" title="{texto_status}">{texto_status}</div>
+            <div class="status-label">{tag_perfil_topo}: {html.escape(nome_atual_logado)}</div>
+            <div class="status-value" title="{html.escape(texto_status)}">{html.escape(texto_status)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -4471,7 +4511,7 @@ if len(codigos_ocultos) > 0:
     col_aviso_oc, col_toggle_oc = st.columns([2.8, 1.2])
     with col_aviso_oc:
         st.caption(
-            f"🙈 Atualmente há **{formatar_num_br(len(codigos_ocultos))} produto(s) oculto(s)** dos relatórios (gerencie na Aba 6)."
+            f"🙈 Atualmente há **{formatar_num_br(len(codigos_ocultos))} produto(s) oculto(s)** dos relatórios (gerencie na Aba 7)."
         )
     with col_toggle_oc:
         mostrar_ocultos_temp = st.toggle(
@@ -4695,7 +4735,8 @@ with aba_dash:
         else:
             df_bi["abc_giro"] = "Sem Giro"
 
-        teto_cobertura_longa_bi = max(180, int(meta_cobertura_bi) + 60)
+        meta_ref_longa_bi = max(int(meta_cobertura_bi), int(lead_bi))
+        teto_cobertura_longa_bi = max(180, meta_ref_longa_bi + 60)
 
         def _classificar_faixa_saude_bi(r):
             s_pos = float(r["saldo_pos"])
@@ -4707,10 +4748,10 @@ with aba_dash:
                 return "5. Estoque Parado (Sem Giro)"
             if aut <= float(lead_bi):
                 return f"1. Crítico / Ruptura (≤ {int(lead_bi)}d)"
-            if aut <= float(meta_cobertura_bi):
+            if int(meta_cobertura_bi) > int(lead_bi) and aut <= float(meta_cobertura_bi):
                 return f"2. Saudável ({int(lead_bi)+1} a {int(meta_cobertura_bi)}d)"
             if aut <= float(teto_cobertura_longa_bi):
-                return f"3. Cobertura Longa ({int(meta_cobertura_bi)+1} a {teto_cobertura_longa_bi}d)"
+                return f"3. Cobertura Longa ({meta_ref_longa_bi+1} a {teto_cobertura_longa_bi}d)"
             return f"4. Excesso (> {teto_cobertura_longa_bi}d)"
 
         df_bi["faixa_saude"] = df_bi.apply(_classificar_faixa_saude_bi, axis=1)
@@ -4720,38 +4761,26 @@ with aba_dash:
             for v, alv, g in zip(df_bi["valor_estoque"], df_bi["estoque_alvo_val"], df_bi["giro_dia"])
         ]
 
-        # Cálculo de Risco FEFO Dinâmico (lotes que vencem em até 90d vs. giro)
+        # Cálculo de Risco FEFO Dinâmico (reutilizando o motor oficial `calcular_plano_promocional_fefo`)
         cods_escopo_bi = set(df_bi["codigo"].unique())
-        df_lotes_bi = df_estoque[
-            (df_estoque["codigo"].isin(cods_escopo_bi)) & (df_estoque["saldo_lote"] > 0)
-        ].copy()
+        df_estoque_escopo_bi = df_estoque[df_estoque["codigo"].isin(cods_escopo_bi)].copy()
+        df_fefo_bi = calcular_plano_promocional_fefo(
+            df_estoque_ref=df_estoque_escopo_bi,
+            df_custos_ref=df_custos_rel,
+            df_giro_ref=df_bi_base,
+            df_saidas_ref=df_saidas,
+            grupos_sku_custom=grupos_sku_custom,
+            mp_custom_map=mp_custom_map,
+        )
         vlr_fefo_90d = 0.0
         vlr_sobra_fefo_90d = 0.0
-        if not df_lotes_bi.empty:
-            df_lotes_bi["dt_val"] = converter_datas_deterministico(df_lotes_bi["validade"])
-            hoje_ts_bi = pd.Timestamp(hoje_br())
-            df_lotes_bi["dias_venc"] = (df_lotes_bi["dt_val"] - hoje_ts_bi).dt.days
-            df_lotes_bi = df_lotes_bi.merge(
-                df_bi[["codigo", "custo_unitario", "giro_dia"]], on="codigo", how="left"
-            ).fillna({"custo_unitario": 0.0, "giro_dia": 0.0})
-            df_lotes_bi["valor_lote"] = df_lotes_bi["saldo_lote"] * df_lotes_bi["custo_unitario"]
-            lotes_ate_90 = df_lotes_bi[df_lotes_bi["dias_venc"].notna() & (df_lotes_bi["dias_venc"] <= 90)].copy()
+        if not df_fefo_bi.empty:
+            lotes_ate_90 = df_fefo_bi[
+                df_fefo_bi["dias_para_vencer"].notna() & (df_fefo_bi["dias_para_vencer"] <= 90)
+            ]
             if not lotes_ate_90.empty:
-                vlr_fefo_90d = float(lotes_ate_90["valor_lote"].sum())
-                lotes_ate_90 = lotes_ate_90.sort_values(["codigo", "dias_venc"])
-                lotes_ate_90["_sl_vendavel"] = [
-                    float(sl) if float(dv) >= 0 else 0.0
-                    for sl, dv in zip(lotes_ate_90["saldo_lote"], lotes_ate_90["dias_venc"])
-                ]
-                lotes_ate_90["acum_lote"] = lotes_ate_90.groupby("codigo")["_sl_vendavel"].cumsum()
-                lotes_ate_90["antes_lote"] = (lotes_ate_90["acum_lote"] - lotes_ate_90["_sl_vendavel"]).clip(lower=0.0)
-                lotes_ate_90["consumo_ate_venc"] = lotes_ate_90["dias_venc"].clip(lower=0.0) * lotes_ate_90["giro_dia"]
-                lotes_ate_90["cap_absorcao"] = (lotes_ate_90["consumo_ate_venc"] - lotes_ate_90["antes_lote"]).clip(lower=0.0)
-                lotes_ate_90["qtd_sobra"] = [
-                    float(sl) if float(dv) < 0 else max(0.0, float(sl) - float(cap))
-                    for sl, dv, cap in zip(lotes_ate_90["saldo_lote"], lotes_ate_90["dias_venc"], lotes_ate_90["cap_absorcao"])
-                ]
-                vlr_sobra_fefo_90d = float((lotes_ate_90["qtd_sobra"] * lotes_ate_90["custo_unitario"]).sum())
+                vlr_fefo_90d = float(lotes_ate_90["valor_em_risco"].sum())
+                vlr_sobra_fefo_90d = float(lotes_ate_90["capital_sobra"].sum())
 
         # Indicadores de Nível de Serviço da Curva A de Giro (descontando itens já comprados em trânsito)
         df_giro_a = df_bi[df_bi["abc_giro"] == "A"]
@@ -6254,7 +6283,7 @@ with aba1:
     if not eh_usuario_admin:
         st.warning(
             f"🔒 **Acesso Somente Leitura ({nome_atual_logado}):** Apenas o usuário **Administrador** tem permissão para "
-            "subir planilhas, restaurar backups ou alterar configurações do banco. Você pode consultar normalmente todas as abas de análise (Abas 1 a 6)."
+            "subir planilhas, restaurar backups ou alterar configurações do banco. Você pode consultar normalmente todas as abas de análise (Abas 1 a 5)."
         )
     else:
         with st.expander(
