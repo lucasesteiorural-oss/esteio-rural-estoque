@@ -2115,6 +2115,7 @@ def carregar_estado_completo() -> dict:
     dias_base = 87
     ult_att = "Sincronizado via Supabase SQL"
     ultima_data_custos_t1 = ""
+    ultimo_backup_semanal = ""
     grupos_pref_custom = {}
     grupos_sku_custom = {}
     mp_custom_map = {}
@@ -2128,6 +2129,7 @@ def carregar_estado_completo() -> dict:
             dias_base = 87
         ult_att = mapa_meta.get("ultima_atualizacao", ult_att)
         ultima_data_custos_t1 = str(mapa_meta.get("ultima_data_custos_t1", "")).strip()
+        ultimo_backup_semanal = str(mapa_meta.get("ultimo_backup_semanal", "")).strip()
         for ch_m, val_m in mapa_meta.items():
             ch_s = str(ch_m).strip()
             val_s = str(val_m).strip()
@@ -2164,6 +2166,7 @@ def carregar_estado_completo() -> dict:
         "dias_base": dias_base,
         "ultima_atualizacao": ult_att,
         "ultima_data_custos_t1": ultima_data_custos_t1,
+        "ultimo_backup_semanal": ultimo_backup_semanal,
         "grupos_pref_custom": grupos_pref_custom,
         "grupos_sku_custom": grupos_sku_custom,
         "mp_custom_map": mp_custom_map,
@@ -2221,6 +2224,8 @@ def gerar_excel_banco_dados(estado: dict) -> bytes:
     ]
     if str(estado.get("ultima_data_custos_t1", "")).strip():
         linhas_meta_bkp.append({"chave": "ultima_data_custos_t1", "valor": str(estado.get("ultima_data_custos_t1", "")).strip()})
+    if str(estado.get("ultimo_backup_semanal", "")).strip():
+        linhas_meta_bkp.append({"chave": "ultimo_backup_semanal", "valor": str(estado.get("ultimo_backup_semanal", "")).strip()})
     for pref_k, nome_g in sorted((estado.get("grupos_pref_custom") or {}).items()):
         linhas_meta_bkp.append({"chave": f"grp_pref_{pref_k}", "valor": str(nome_g)})
     for sku_k, nome_g in sorted((estado.get("grupos_sku_custom") or {}).items()):
@@ -2517,6 +2522,48 @@ def identificar_produto_mp(
     return desc_up.startswith("MP ") or desc_up.startswith("ME ")
 
 
+def registrar_backup_semanal_sql(planilha: ConexaoSupabasePG, data_bkp_iso: str = "") -> str:
+    """Grava a data do último backup semanal baixado na tabela `meta` do Supabase."""
+    dt_iso = str(data_bkp_iso).strip() or hoje_br().strftime("%Y-%m-%d")
+    if planilha is not None:
+        conn = planilha.conectar()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO meta (chave, valor)
+                    VALUES ('ultimo_backup_semanal', %s)
+                    ON CONFLICT (chave) DO UPDATE SET valor = EXCLUDED.valor
+                    """,
+                    (dt_iso,),
+                )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    st.session_state["ultimo_backup_semanal_sessao"] = dt_iso
+    return dt_iso
+
+
+def avaliar_alerta_backup_semanal(ultimo_backup_iso: str, hoje_ref: date = None) -> tuple[bool, int | None, str]:
+    """
+    Avalia se o alerta semanal de backup deve ser exibido (7 dias ou mais sem download).
+    Retorna (deve_alertar, dias_decorridos, data_formatada_br).
+    """
+    ref = hoje_ref or hoje_br()
+    s_bkp = str(ultimo_backup_iso or "").strip()
+    if not s_bkp:
+        return True, None, ""
+    dt_parsed = _parse_data_segura_py(s_bkp, ano_min=2020, ano_max=ref.year + 2)
+    if dt_parsed is None:
+        return True, None, ""
+    dias_diff = max(0, int((ref - dt_parsed.date()).days))
+    return (dias_diff >= 7), dias_diff, dt_parsed.strftime("%d/%m/%Y")
+
+
 def montar_dataframe_meta_completo(
     dias_base_val: int,
     ult_att_val: str,
@@ -2525,6 +2572,7 @@ def montar_dataframe_meta_completo(
     hashes_soma_por_data: dict = None,
     mp_custom_map: dict = None,
     ultima_data_custos_t1: str = None,
+    ultimo_backup_semanal: str = None,
 ) -> pd.DataFrame:
     linhas = [
         {"chave": "dias_base", "valor": str(int(dias_base_val))},
@@ -2537,6 +2585,13 @@ def montar_dataframe_meta_completo(
     )
     if dt_c1_t1_ref:
         linhas.append({"chave": "ultima_data_custos_t1", "valor": dt_c1_t1_ref})
+    dt_bkp_ref = (
+        str(ultimo_backup_semanal).strip()
+        if ultimo_backup_semanal is not None
+        else str(st.session_state.get("ultimo_backup_semanal_sessao", "")).strip()
+    )
+    if dt_bkp_ref:
+        linhas.append({"chave": "ultimo_backup_semanal", "valor": dt_bkp_ref})
     if grupos_pref_custom:
         for pk, pv in sorted(grupos_pref_custom.items()):
             if str(pk).strip() and str(pv).strip():
@@ -4242,6 +4297,16 @@ df_pedidos_transito = estado.get("pedidos_transito", pd.DataFrame(columns=ESQUEM
 dias_base_atual = int(estado.get("dias_base", 87))
 ultima_data_custos_t1 = str(estado.get("ultima_data_custos_t1", "")).strip()
 st.session_state["ultima_data_custos_t1_sessao"] = ultima_data_custos_t1
+ultimo_backup_semanal = str(estado.get("ultimo_backup_semanal", "")).strip()
+st.session_state["ultimo_backup_semanal_sessao"] = ultimo_backup_semanal
+
+
+def _on_download_backup_confirmado():
+    try:
+        registrar_backup_semanal_sql(db_supabase)
+        carregar_estado_completo.clear()
+    except Exception:
+        pass
 grupos_pref_custom = estado.get("grupos_pref_custom", {})
 grupos_sku_custom = estado.get("grupos_sku_custom", {})
 mp_custom_map = estado.get("mp_custom_map", {})
@@ -4280,6 +4345,53 @@ else:
     df_base_vendas_rel = df_base_vendas
     df_custos_rel = df_custos
 
+
+if eh_usuario_admin and (not df_estoque_bruto.empty):
+    exibir_alerta_bkp, dias_sem_bkp, data_ult_bkp_br = avaliar_alerta_backup_semanal(ultimo_backup_semanal)
+    if exibir_alerta_bkp:
+        if dias_sem_bkp is None:
+            txt_alerta_bkp = (
+                "💾 **Lembrete Semanal de Backup:** Você ainda não baixou nenhuma cópia de segurança (`.zip`) "
+                "do banco de dados no seu computador."
+            )
+        else:
+            txt_alerta_bkp = (
+                f"💾 **Lembrete Semanal de Backup:** Já se passaram **{formatar_num_br(dias_sem_bkp)} dia(s)** "
+                f"desde o último backup baixado (em **{data_ult_bkp_br}**). Baixe o pacote `.zip` para manter uma cópia segura no seu computador."
+            )
+        col_bkp_msg, col_bkp_act1, col_bkp_act2 = st.columns([2.6, 1.0, 0.7])
+        with col_bkp_msg:
+            st.warning(txt_alerta_bkp)
+        with col_bkp_act1:
+            st.markdown("<div style='margin-top: 4px;'></div>", unsafe_allow_html=True)
+            if "backup_zip_bytes" not in st.session_state:
+                if st.button("📦 Preparar Backup (.zip)", type="primary", use_container_width=True, key="btn_prep_bkp_topo"):
+                    with st.spinner("Gerando pacote de backup (.zip)..."):
+                        st.session_state["backup_zip_bytes"] = gerar_pacote_backup_leve(estado)
+                        st.session_state["backup_zip_nome"] = (
+                            f"Backup_Completo_Esteio_{hoje_br().strftime('%Y-%m-%d')}.zip"
+                        )
+                    st.rerun()
+            else:
+                st.download_button(
+                    label="📥 Baixar Backup (.zip)",
+                    data=st.session_state["backup_zip_bytes"],
+                    file_name=st.session_state.get("backup_zip_nome", "Backup_Completo_Esteio.zip"),
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                    on_click=_on_download_backup_confirmado,
+                    key="dl_bkp_zip_topo",
+                )
+        with col_bkp_act2:
+            st.markdown("<div style='margin-top: 4px;'></div>", unsafe_allow_html=True)
+            if st.button("⏭️ Adiar 7d", use_container_width=True, key="btn_adiar_bkp_topo", help="Marca o lembrete como visto e avisa novamente daqui a 7 dias."):
+                try:
+                    registrar_backup_semanal_sql(db_supabase)
+                    carregar_estado_completo.clear()
+                    st.rerun()
+                except Exception as erro_adiar:
+                    st.error(f"Erro ao registrar adiamento: {erro_adiar}")
 
 # ==============================================================================
 # 7. NAVEGAÇÃO POR ABAS (100% NUVEM — DASHBOARD EM 1º E IMPORTAÇÃO EM ÚLTIMO)
@@ -6405,10 +6517,14 @@ with aba1:
         )
         st.markdown("---")
         st.markdown("#### 💾 Salvar Cópia do Banco de Dados no Computador & Restauração Rápida")
+        _, dias_bkp_aba6, dt_bkp_aba6_br = avaliar_alerta_backup_semanal(ultimo_backup_semanal)
+        info_ult_bkp_txt = (
+            f"📅 **Último backup baixado no computador:** **{dt_bkp_aba6_br}** (há {formatar_num_br(dias_bkp_aba6)} dia(s) — lembrete automático a cada 7 dias)."
+            if dt_bkp_aba6_br
+            else "📅 **Último backup baixado no computador:** Nenhum download registrado ainda (lembrete automático a cada 7 dias)."
+        )
         st.caption(
-            "Baixe quando quiser uma planilha Excel (`.xlsx`) com todas as abas ativas do seu banco de dados "
-            "(`estoque_atual`, `entradas_diarias`, `saidas_diarias`, `custos`, `base_inicial`, `ocultos` e `meta`), "
-            "ou restaure a cópia automática imediatamente anterior caso tenha importado algum arquivo por engano."
+            f"{info_ult_bkp_txt} Baixe uma planilha Excel (`.xlsx`) ou o pacote completo (`.zip`) com o histórico de 2 anos."
         )
         col_bkp_xlsx, col_bkp_zip = st.columns(2)
         with col_bkp_xlsx:
@@ -6427,6 +6543,7 @@ with aba1:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         type="primary",
                         use_container_width=True,
+                        on_click=_on_download_backup_confirmado,
                     )
         with col_bkp_zip:
             if not df_estoque_bruto.empty:
@@ -6444,6 +6561,7 @@ with aba1:
                         mime="application/zip",
                         type="primary",
                         use_container_width=True,
+                        on_click=_on_download_backup_confirmado,
                     )
         with st.expander("⏪ Desfazer Última Importação ou Excluir Data de Movimento (Backups Automáticos Leves)", expanded=False):
             st.caption(
