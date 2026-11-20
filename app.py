@@ -2429,11 +2429,12 @@ def gerar_excel_com_formulas_cotacao(df_cotacao: pd.DataFrame) -> bytes:
     col_venc = _col("vencido_ou_vencendo_60d", "E")
     col_giro = _col("giro_medio_dia", "F")
     col_auton = _col("autonomia_dias", "G")
+    col_pped = mapa_letras.get("ponto_de_pedido_c_seg", "")
     col_sug = _col("sugestao_sistema", "H")
     col_qtd = _col("qtd_a_comprar", "I")
     col_custo_erp = _col("ultimo_custo_erp_r", "J")
     col_custo_cot = _col("custo_atual_cotado_r", "K")
-    col_var = _col("variacao_custo_pct", "L")
+    col_var = _col("variacao_custo", "L")
     col_total = _col("total_do_item_r", "M")
 
     for r in range(2, max_row + 1):
@@ -2444,6 +2445,8 @@ def gerar_excel_com_formulas_cotacao(df_cotacao: pd.DataFrame) -> bytes:
         ws[f"{col_venc}{r}"].number_format = "#,##0"
         ws[f"{col_giro}{r}"].number_format = "#,##0.00"
         ws[f"{col_auton}{r}"].number_format = "#,##0.0"
+        if col_pped:
+            ws[f"{col_pped}{r}"].number_format = "#,##0"
         ws[f"{col_sug}{r}"].number_format = "#,##0"
         ws[f"{col_qtd}{r}"].number_format = "#,##0"
         ws[f"{col_qtd}{r}"].fill = preenchimento_editavel
@@ -2482,11 +2485,12 @@ def gerar_excel_com_formulas_cotacao(df_cotacao: pd.DataFrame) -> bytes:
         "vencido_ou_vencendo_60d": 26,
         "giro_medio_dia": 16,
         "autonomia_dias": 16,
+        "ponto_de_pedido_c_seg": 19,
         "sugestao_sistema": 17,
         "qtd_a_comprar": 18,
         "ultimo_custo_erp_r": 20,
         "custo_atual_cotado_r": 22,
-        "variacao_custo_pct": 18,
+        "variacao_custo": 18,
         "total_do_item_r": 20,
     }
     for c_idx in range(1, max_col + 1):
@@ -4043,6 +4047,9 @@ def calcular_motor_giro_sazonal(
             "codigo",
             "giro_historico",
             "giro_historico_sem_pico",
+            "desvio_diario",
+            "mediana_diaria",
+            "mad_diario",
             "saida_ult_dia",
             "data_ult_dia",
             "queda_pico_recente",
@@ -4328,6 +4335,16 @@ def calcular_motor_giro_sazonal(
             mask_com_estoque_ou_venda = (saldo_prev_alinhado > 0.0) | (quedas_por_sku > 0.0)
             dias_disponiveis_sku = mask_com_estoque_ou_venda.mul(div_dias_todas, axis=1).sum(axis=1).clip(lower=1.0)
 
+            taxa_diaria_todas_df = quedas_por_sku.divide(div_dias_todas, axis=1)
+            taxa_disp_df = taxa_diaria_todas_df.where(mask_com_estoque_ou_venda)
+            media_disp_s = saida_total / dias_disponiveis_sku
+            qtd_int_disp_s = mask_com_estoque_ou_venda.sum(axis=1)
+            sq_diff_disp = (taxa_disp_df.sub(media_disp_s, axis=0) ** 2).fillna(0.0)
+            var_diaria_s = sq_diff_disp.mul(div_dias_todas, axis=1).sum(axis=1) / (dias_disponiveis_sku - 1.0).clip(lower=1.0)
+            desvio_diario_s = (var_diaria_s ** 0.5).where(qtd_int_disp_s >= 2, 0.0).fillna(0.0)
+            mediana_diaria_s = taxa_disp_df.median(axis=1).fillna(0.0)
+            mad_diario_s = taxa_disp_df.sub(mediana_diaria_s, axis=0).abs().median(axis=1).fillna(0.0)
+
             ult_col = cols_mov[-1]
             dt_ult_fmt = pd.to_datetime(ult_col, format="%Y-%m-%d", errors="coerce")
             str_ult_dia = dt_ult_fmt.strftime("%d/%m") if pd.notna(dt_ult_fmt) else str(ult_col)
@@ -4370,6 +4387,9 @@ def calcular_motor_giro_sazonal(
                     "codigo": quedas_por_sku.index,
                     "giro_historico": (saida_total / dias_disponiveis_sku).values,
                     "giro_historico_sem_pico": (saida_sem_pico / dias_sem_pico_s).values,
+                    "desvio_diario": desvio_diario_s.values,
+                    "mediana_diaria": mediana_diaria_s.values,
+                    "mad_diario": mad_diario_s.values,
                     "saida_ult_dia": saida_ult_dia_s.values,
                     "data_ult_dia": str_ult_dia,
                     "queda_pico_recente": queda_pico_s.values,
@@ -4381,6 +4401,9 @@ def calcular_motor_giro_sazonal(
     df_calc = df_prod.merge(df_saidas_sku, on="codigo", how="left")
     df_calc["giro_historico"] = df_calc["giro_historico"].fillna(0.0)
     df_calc["giro_historico_sem_pico"] = df_calc["giro_historico_sem_pico"].fillna(0.0)
+    df_calc["desvio_diario"] = df_calc["desvio_diario"].fillna(0.0)
+    df_calc["mediana_diaria"] = df_calc["mediana_diaria"].fillna(0.0)
+    df_calc["mad_diario"] = df_calc["mad_diario"].fillna(0.0)
     df_calc["saida_ult_dia"] = df_calc["saida_ult_dia"].fillna(0.0)
     df_calc["data_ult_dia"] = df_calc["data_ult_dia"].fillna("-")
     df_calc["queda_pico_recente"] = df_calc["queda_pico_recente"].fillna(0.0)
@@ -4395,6 +4418,62 @@ def calcular_motor_giro_sazonal(
         (df_calc["giro_historico_sem_pico"] * peso_historico)
         + (df_calc["giro_base"] * (1.0 - peso_historico))
     )
+
+    # Sazonalidade Automática por SKU (compara mesmo período do ano anterior com a média anual do próprio SKU)
+    mapa_fator_saz_sku = {}
+    if datas_todas:
+        dt_max_yoy = pd.to_datetime(datas_todas[-1], format="%Y-%m-%d", errors="coerce")
+        dt_min_yoy = pd.to_datetime(datas_todas[0], format="%Y-%m-%d", errors="coerce")
+        if pd.notna(dt_max_yoy) and pd.notna(dt_min_yoy) and int((dt_max_yoy - dt_min_yoy).days) >= 330:
+            dt_base_ini_iso = (dt_max_yoy - pd.Timedelta(days=395)).strftime("%Y-%m-%d")
+            dt_base_fim_iso = (dt_max_yoy - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+            dt_saz_ini_iso = (dt_max_yoy - pd.Timedelta(days=380)).strftime("%Y-%m-%d")
+            dt_saz_fim_iso = (dt_max_yoy - pd.Timedelta(days=335)).strftime("%Y-%m-%d")
+
+            df_s_yoy = (
+                df_saidas[(df_saidas["data"] >= dt_base_ini_iso) & (df_saidas["data"] <= dt_base_fim_iso)].copy()
+                if (df_saidas is not None and not df_saidas.empty and "data" in df_saidas.columns)
+                else pd.DataFrame()
+            )
+            df_h_yoy = (
+                df_historico[(df_historico["data"] >= dt_base_ini_iso) & (df_historico["data"] <= dt_base_fim_iso)].copy()
+                if (df_historico is not None and not df_historico.empty and "data" in df_historico.columns)
+                else pd.DataFrame()
+            )
+            if not df_s_yoy.empty:
+                df_s_grp_y = df_s_yoy.groupby(["codigo", "data"], as_index=False)["qtd_saida"].sum()
+                piv_s_y = df_s_grp_y.pivot(index="codigo", columns="data", values="qtd_saida").fillna(0.0)
+                if not df_h_yoy.empty:
+                    piv_h_y = (
+                        df_h_yoy.drop_duplicates(subset=["codigo", "data"], keep="last")
+                        .pivot(index="codigo", columns="data", values="saldo_geral")
+                        .reindex(index=piv_s_y.index, columns=piv_s_y.columns)
+                        .ffill(axis=1)
+                        .fillna(0.0)
+                    )
+                    mask_disp_y = (piv_h_y > 0.0) | (piv_s_y > 0.0)
+                else:
+                    mask_disp_y = pd.DataFrame(True, index=piv_s_y.index, columns=piv_s_y.columns)
+
+                cols_yoy_all = sorted(piv_s_y.columns)
+                cols_yoy_saz = [c for c in cols_yoy_all if dt_saz_ini_iso <= c <= dt_saz_fim_iso]
+                if len(cols_yoy_all) >= 60 and len(cols_yoy_saz) >= 15:
+                    dias_all_y = mask_disp_y[cols_yoy_all].sum(axis=1)
+                    dias_saz_y = mask_disp_y[cols_yoy_saz].sum(axis=1)
+                    soma_all_y = piv_s_y[cols_yoy_all].where(mask_disp_y[cols_yoy_all], 0.0).sum(axis=1)
+                    soma_saz_y = piv_s_y[cols_yoy_saz].where(mask_disp_y[cols_yoy_saz], 0.0).sum(axis=1)
+                    for cod_y in piv_s_y.index:
+                        d_a = float(dias_all_y.loc[cod_y])
+                        d_s = float(dias_saz_y.loc[cod_y])
+                        if d_a >= 60.0 and d_s >= 15.0:
+                            med_a = float(soma_all_y.loc[cod_y]) / d_a
+                            med_s = float(soma_saz_y.loc[cod_y]) / d_s
+                            if med_a > 0.0:
+                                idx_raw = med_s / med_a
+                                idx_clamped = min(max(idx_raw, 0.60), 2.20)
+                                mapa_fator_saz_sku[cod_y] = 1.0 if abs(idx_clamped - 1.0) < 0.05 else round(idx_clamped, 3)
+
+    df_calc["fator_sazonal_sku"] = df_calc["codigo"].map(mapa_fator_saz_sku).fillna(1.0)
     return df_calc, intervalo_historico_dias, peso_historico
 
 
@@ -8161,7 +8240,7 @@ with aba2:
             st.success(
                 "✅ Planilha de cotação ativa! Todos os produtos enviados abaixo serão mantidos na tabela e no Excel gerado (inclusive itens com sugestão 0)."
             )
-    p1, p2, p3, p4, p5 = st.columns([1.0, 1.0, 1.0, 1.1, 2.0])
+    p1, p2, p3, p4 = st.columns([1.0, 1.0, 1.0, 2.5])
     janela_dias = p1.selectbox(
         "Janela de Giro (dias):",
         options=[15, 30, 45, 60, 90, 120, 180, 365],
@@ -8170,8 +8249,7 @@ with aba2:
     )
     cobertura_desejada = p2.number_input("Cobertura Alvo (dias):", min_value=5, max_value=180, value=120)
     lead_time = p3.number_input("Entrega / Lead (dias):", min_value=0, max_value=90, value=10)
-    fator_sazonal = p4.slider("Ajuste Sazonal (%):", min_value=-50, max_value=200, value=0, step=5)
-    filtro_busca = p5.text_input(
+    filtro_busca = p4.text_input(
         "🔍 Fornecedor / Linha / Produto (use vírgula p/ vários):",
         placeholder="Ex: tigre  |  roda d'água, gaxeta  |  joelho 25",
         help="Busca inteligente: ignora acentos/apóstrofos (encontra RODA D'AGUA, RODA DAGUA e RODA D AGUA), aceita palavras fora de ordem e múltiplos termos separados por vírgula.",
@@ -8267,11 +8345,14 @@ with aba2:
                 )
                 for col_num_fill in [
                     "saldo_atual", "giro_base", "giro_historico", "giro_historico_sem_pico",
-                    "giro_ponderado", "giro_ponderado_sem_pico", "saida_ult_dia",
+                    "giro_ponderado", "giro_ponderado_sem_pico", "desvio_diario",
+                    "mediana_diaria", "mad_diario", "saida_ult_dia",
                     "queda_pico_recente", "saldo_antes_pico"
                 ]:
                     if col_num_fill in df_merged.columns:
                         df_merged[col_num_fill] = df_merged[col_num_fill].fillna(0.0)
+                if "fator_sazonal_sku" in df_merged.columns:
+                    df_merged["fator_sazonal_sku"] = df_merged["fator_sazonal_sku"].fillna(1.0)
                 df_merged["data_ult_dia"] = df_merged["data_ult_dia"].fillna("-")
                 df_merged["data_pico_recente"] = df_merged["data_pico_recente"].fillna("-")
                 df_merged["alerta_nf_nao_refletida"] = df_merged["alerta_nf_nao_refletida"].fillna("")
@@ -8291,9 +8372,9 @@ with aba2:
         if codigos_em_transito and (not mostrar_comprados_transito) and (arq_lista_cotacao is None):
             df_calc = df_calc[~df_calc["codigo"].isin(codigos_em_transito)].copy()
 
-        fator_mult = 1.0 + (fator_sazonal / 100.0)
-        df_calc["giro_diario"] = (df_calc["giro_ponderado"] * fator_mult).clip(lower=0.0)
-        df_calc["giro_diario_sem_pico"] = (df_calc["giro_ponderado_sem_pico"] * fator_mult).clip(lower=0.0)
+        fator_saz_sku_s = df_calc.get("fator_sazonal_sku", pd.Series(1.0, index=df_calc.index)).fillna(1.0)
+        df_calc["giro_diario"] = (df_calc["giro_ponderado"] * fator_saz_sku_s).clip(lower=0.0)
+        df_calc["giro_diario_sem_pico"] = (df_calc["giro_ponderado_sem_pico"] * fator_saz_sku_s).clip(lower=0.0)
         if not df_custos.empty:
             df_calc = df_calc.merge(
                 df_custos[["codigo", "custo_unitario"]], on="codigo", how="left"
@@ -8311,9 +8392,39 @@ with aba2:
                 if not df_curto.empty:
                     mapa_venc_60d = df_curto.groupby("codigo")["saldo_lote"].sum().to_dict()
         df_calc["vencendo_60d"] = df_calc["codigo"].map(mapa_venc_60d).fillna(0.0)
+
+        # Estoque de Segurança (ES) e Ponto de Pedido (PP) por variabilidade da demanda (Z=1.65 Curva A, Z=1.28 B/C)
+        cmv_diario_sku = df_calc["giro_diario"] * df_calc["custo_unitario"]
+        tot_cmv_dia_ab2 = float(cmv_diario_sku.sum())
+        if tot_cmv_dia_ab2 > 0.0 and not df_calc.empty:
+            ordem_cmv = cmv_diario_sku.sort_values(ascending=False)
+            acum_cmv_ant = (ordem_cmv.cumsum() - ordem_cmv) / tot_cmv_dia_ab2
+            z_series = pd.Series(
+                [1.65 if float(a) < 0.80 else 1.28 for a in acum_cmv_ant],
+                index=ordem_cmv.index,
+            ).reindex(df_calc.index).fillna(1.28)
+        else:
+            z_series = pd.Series(1.28, index=df_calc.index)
+
+        if int(lead_time) > 0 and not df_calc.empty:
+            desvio_saz_s = df_calc.get("desvio_diario", pd.Series(0.0, index=df_calc.index)).fillna(0.0) * fator_saz_sku_s
+            es_bruto_s = z_series * desvio_saz_s * math.sqrt(float(lead_time))
+            teto_es_s = df_calc["giro_diario"] * max(float(lead_time) * 1.5, 15.0)
+            es_final_s = es_bruto_s.clip(lower=0.0).where(df_calc["giro_diario"] > 0.0, 0.0)
+            es_final_s = es_final_s.combine(teto_es_s, min)
+            df_calc["estoque_seguranca"] = es_final_s.apply(
+                lambda x: float(math.ceil(x - 1e-9)) if x > 0.05 else 0.0
+            )
+        else:
+            df_calc["estoque_seguranca"] = 0.0
+
+        df_calc["ponto_pedido"] = (
+            (df_calc["giro_diario"] * float(lead_time)) + df_calc["estoque_seguranca"]
+        ).apply(lambda x: float(math.ceil(x - 1e-9)) if x > 0.05 else 0.0)
+
         dias_totais_nec = float(cobertura_desejada + lead_time)
-        df_calc["estoque_ideal"] = df_calc["giro_diario"] * dias_totais_nec
-        df_calc["estoque_ideal_sem_pico"] = df_calc["giro_diario_sem_pico"] * dias_totais_nec
+        df_calc["estoque_ideal"] = (df_calc["giro_diario"] * dias_totais_nec) + df_calc["estoque_seguranca"]
+        df_calc["estoque_ideal_sem_pico"] = (df_calc["giro_diario_sem_pico"] * dias_totais_nec) + df_calc["estoque_seguranca"]
         necessidade_padrao = (df_calc["estoque_ideal"] - df_calc["saldo_atual"]).clip(lower=0.0)
         df_calc["sugestao_padrao"] = necessidade_padrao.apply(
             lambda x: float(math.ceil(x - 1e-9)) if x > 0 else 0.0
@@ -8338,6 +8449,10 @@ with aba2:
             saldo_at = float(r.get("saldo_atual", 0.0))
             giro_d = float(r.get("giro_diario", 0.0))
             giro_sem_p = float(r.get("giro_diario_sem_pico", 0.0))
+            mediana_d = float(r.get("mediana_diaria", 0.0))
+            mad_d = float(r.get("mad_diario", 0.0))
+            fator_saz_i = float(r.get("fator_sazonal_sku", 1.0))
+            ponto_ped = float(r.get("ponto_pedido", 0.0))
             est_ideal = float(r.get("estoque_ideal", 0.0))
             est_ideal_sem_p = float(r.get("estoque_ideal_sem_pico", 0.0))
             sug_padrao = float(r.get("sugestao_padrao", 0.0))
@@ -8346,21 +8461,28 @@ with aba2:
             dt_ult = str(r.get("data_ult_dia", "-"))
             dt_pico = str(r.get("data_pico_recente", "-"))
             alerta_nf = str(r.get("alerta_nf_nao_refletida", "")).strip()
-            eh_ruptura = (giro_d > 0.0) and (autonomia <= float(lead_time))
+
+            sufixo_saz = (
+                f" | 📅 Saz. {formatar_pct_br((fator_saz_i - 1.0) * 100.0, 0, com_sinal=True)}"
+                if abs(fator_saz_i - 1.0) >= 0.05
+                else ""
+            )
+            eh_ruptura = (giro_d > 0.0) and ((autonomia <= float(lead_time)) or (saldo_at <= ponto_ped))
             nao_reposto = (saldo_antes <= 0.0) or (saldo_at < (saldo_antes * 0.85))
             proporcao_estoque = (queda_pico / saldo_antes) if saldo_antes > 0 else 1.0
+
+            # Detecção relativa de pico por SKU via Mediana + MAD (sem limiares fixos 3 e 5)
+            sigma_robusto = 1.4826 * mad_d
+            limiar_pico_sku = max(mediana_d + (3.5 * sigma_robusto), giro_sem_p * 2.5, giro_d * 2.5, 2.0)
             eh_pico = (
-                queda_pico >= 3.0
+                (queda_pico >= limiar_pico_sku)
+                and (queda_pico > 0.0)
                 and nao_reposto
-                and (
-                    (queda_pico >= 5.0 and proporcao_estoque >= 0.35)
-                    or (queda_pico >= 5.0 and giro_sem_p > 0 and queda_pico >= (giro_sem_p * 3.0))
-                    or (queda_pico > sug_padrao and queda_pico > saldo_at)
-                )
+                and ((proporcao_estoque >= 0.30) or (queda_pico > sug_padrao and queda_pico > saldo_at))
             )
             sug_ref = sug_padrao
             if eh_pico:
-                reserva_min = max(est_ideal_sem_p, giro_d * float(lead_time))
+                reserva_min = max(est_ideal_sem_p, ponto_ped)
                 teto_recompor_anterior = (
                     min(saldo_antes, queda_pico + est_ideal)
                     if saldo_antes > 0
@@ -8373,26 +8495,28 @@ with aba2:
             if eh_pico and eh_ruptura:
                 aut_str = "0d" if saldo_at <= 0 else f"{formatar_num_br(autonomia, 1)}d"
                 txt_alerta = (
-                    prefixo_tr + f"🔥 Rupt. ({aut_str}) + 🚨 Pico -{formatar_qtd_br(queda_pico)} ({dt_pico})"
+                    prefixo_tr + f"🔥 Rupt. ({aut_str}) + 🚨 Pico -{formatar_qtd_br(queda_pico)} ({dt_pico}){sufixo_saz}"
                 )
                 return True, True, txt_alerta, sug_ref
             if eh_pico:
                 txt_alerta = (
                     prefixo_tr + f"🚨 Pico -{formatar_qtd_br(queda_pico)} ({dt_pico}) | "
-                    f"Pad.: {formatar_qtd_br(sug_padrao)}"
+                    f"Pad.: {formatar_qtd_br(sug_padrao)}{sufixo_saz}"
                 )
                 return True, False, txt_alerta, sug_ref
             if eh_ruptura:
                 if saldo_at <= 0:
-                    txt_alerta = prefixo_tr + "🔥 Zerado c/ Giro"
+                    txt_alerta = prefixo_tr + f"🔥 Zerado c/ Giro{sufixo_saz}"
+                elif autonomia <= float(lead_time):
+                    txt_alerta = prefixo_tr + f"🔥 Dura {formatar_num_br(autonomia, 1)}d (≤{lead_time}d){sufixo_saz}"
                 else:
-                    txt_alerta = prefixo_tr + f"🔥 Dura {formatar_num_br(autonomia, 1)}d (≤{lead_time}d)"
+                    txt_alerta = prefixo_tr + f"🔥 Ponto Pedido (≤{formatar_qtd_br(ponto_ped)} un.){sufixo_saz}"
                 return False, True, txt_alerta, sug_ref
             if alerta_nf:
-                return False, False, prefixo_tr + alerta_nf, sug_padrao
+                return False, False, prefixo_tr + alerta_nf + sufixo_saz, sug_padrao
             if saida_ult > 0:
-                return False, False, prefixo_tr + f"✔️ -{formatar_qtd_br(saida_ult)} un. ({dt_ult})", sug_padrao
-            return False, False, prefixo_tr + "➖ Sem saída", sug_padrao
+                return False, False, prefixo_tr + f"✔️ -{formatar_qtd_br(saida_ult)} un. ({dt_ult}){sufixo_saz}", sug_padrao
+            return False, False, prefixo_tr + f"➖ Sem saída{sufixo_saz}", sug_padrao
 
         if not df_calc.empty:
             res_analise = df_calc.apply(_avaliar_ruptura_pico_e_sugestao, axis=1)
@@ -8480,6 +8604,7 @@ with aba2:
                 "Vencido ou vencendo (≤60d)": df_compras["vencendo_60d"].values,
                 "Giro Médio/Dia": df_compras["giro_diario"].values,
                 "Autonomia (Dias)": df_compras["autonomia_dias"].values,
+                "Ponto de Pedido (c/ Seg.)": df_compras["ponto_pedido"].values,
                 "Sugestão Sistema": df_compras["sugestao_compra"].values,
                 "Qtd. a Comprar": df_compras["sugestao_compra"].values,
                 "Último Custo ERP (R$)": df_compras["custo_unitario"].values,
@@ -8536,6 +8661,7 @@ with aba2:
                     "S/ Giro" if (pd.notna(v) and float(v) >= 999.0) else f"{formatar_num_br(v, 1)}d"
                     for v in df_compras["autonomia_dias"].values
                 ],
+                "P. Pedido": [formatar_qtd_br(v) for v in df_compras["ponto_pedido"].values],
                 "Sugestão": [formatar_qtd_br(v) for v in df_compras["sugestao_compra"].values],
                 "Custo Un.": [formatar_moeda_br(v) for v in df_compras["custo_unitario"].values],
                 "Total (R$)": [formatar_moeda_br(v) for v in total_item_s.values],
@@ -8556,6 +8682,7 @@ with aba2:
                 "Venc. ≤60d",
                 "Giro/Dia",
                 "Auton.",
+                "P. Pedido",
                 "Sugestão",
                 "Custo Un.",
                 "Total (R$)",
@@ -8602,9 +8729,14 @@ with aba2:
                     help="Autonomia Estimada do Estoque Atual em Dias (Saldo Atual ÷ Giro Médio/Dia).",
                     width="small",
                 ),
+                "P. Pedido": st.column_config.TextColumn(
+                    "P. Pedido",
+                    help="Ponto de Pedido = Demanda no Prazo de Entrega + Estoque de Segurança (calculado pela oscilação diária de vendas). Quando o Saldo atinge ou fica abaixo deste valor, é hora de comprar!",
+                    width="small",
+                ),
                 "Sugestão": st.column_config.TextColumn(
                     "Sugestão",
-                    help="Sugestão Inteligente de Compra em unidades para cobrir (Cobertura Alvo + Prazo de Entrega).",
+                    help="Sugestão Inteligente de Compra em unidades para cobrir (Cobertura Alvo + Prazo de Entrega + Estoque de Segurança).",
                     width="small",
                 ),
                 "Custo Un.": st.column_config.TextColumn(
@@ -8675,7 +8807,7 @@ with aba2:
         with b_act_col2:
             if not df_completo_13_cols.empty:
                 st.download_button(
-                    label="📥 Baixar Planilha de Sugestão & Cotação (.xlsx com 13 Colunas e Fórmulas Vivas)",
+                    label="📥 Baixar Planilha de Sugestão & Cotação (.xlsx com 14 Colunas e Fórmulas Vivas)",
                     data=gerar_excel_com_formulas_cotacao(df_completo_13_cols),
                     file_name=f"Cotacao_Compras_Esteio_{janela_dias}d_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
