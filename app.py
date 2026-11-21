@@ -1479,6 +1479,8 @@ class ConexaoSupabasePG:
         from psycopg2 import extensions as pg_ext
         conn = getattr(self._local, "conn", None)
         if conn is not None and getattr(conn, "closed", 1) == 0:
+            if conn.info.transaction_status == pg_ext.TRANSACTION_STATUS_INTRANS:
+                return conn
             try:
                 if conn.info.transaction_status != pg_ext.TRANSACTION_STATUS_IDLE:
                     conn.rollback()
@@ -1520,15 +1522,20 @@ class ConexaoSupabasePG:
             raise
 
     def executar_leitura(self, sql: str, params=None) -> list:
+        from psycopg2 import extensions as pg_ext
         for tentativa in range(2):
             conn = self.conectar()
+            estava_idle = (conn.info.transaction_status == pg_ext.TRANSACTION_STATUS_IDLE)
             try:
                 with conn.cursor() as cur:
                     cur.execute(sql, params or ())
                     linhas = cur.fetchall()
-                conn.commit()
+                if estava_idle:
+                    conn.commit()
                 return linhas
             except Exception:
+                if not estava_idle:
+                    raise
                 try:
                     conn.rollback()
                 except Exception:
@@ -1911,7 +1918,7 @@ def gravar_tabela_incremental_por_data_sql(
 
     df_base_existente = (
         df_atual_memoria.copy()
-        if (df_atual_memoria is not None and not df_atual_memoria.empty)
+        if df_atual_memoria is not None
         else ler_tabela_sql(planilha, tabela)
     )
     if not df_base_existente.empty:
