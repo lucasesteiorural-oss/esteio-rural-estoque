@@ -1918,7 +1918,7 @@ def gravar_tabela_incremental_por_data_sql(
 
     df_base_existente = (
         df_atual_memoria.copy()
-        if df_atual_memoria is not None
+        if (df_atual_memoria is not None and not df_atual_memoria.empty)
         else ler_tabela_sql(planilha, tabela)
     )
     if not df_base_existente.empty:
