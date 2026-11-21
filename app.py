@@ -3863,7 +3863,7 @@ def auditar_ajustes_c1_t1_df(
     """
     Audita a carga diária da planilha Custos (C1) & Tabela (T1):
     1) Detecta todo item com alteração > 0,01% em C1 ou T1, além de novos cadastros.
-    2) Cruza com a última NF de Entrada (janela padrão de 7 dias) e separa:
+    2) Cruza com a última NF de Entrada (janela padrão de 3 dias) e separa:
        - 🚨 NF Acima do C1 (suspeita de esquecimento fiscal acima da tolerância de frete/imposto)
        - 🎁 Bonificação / Desconto Promocional NF (queda >= 30%)
        - 📉 Custo NF Menor que C1 (queda moderada entre tolerância e 30%)
@@ -4110,14 +4110,14 @@ def auditar_fiscal_permanente_nf_c1_t1(
     df_entradas_ref: pd.DataFrame,
     df_custos_ref: pd.DataFrame,
     df_estoque_ref: pd.DataFrame = None,
-    janela_dias_nf: int = 7,
+    janela_dias_nf: int = 3,
     tolerancia_frete_pct: float = 1.5,
     margem_minima_t1_pct: float = 5.0,
 ) -> tuple[pd.DataFrame, dict]:
     """
-    Auditoria Fiscal Permanente (Aba 5):
+    Auditoria Fiscal Permanente (Aba 5 — Seção 4):
     Recalcula diretamente das tabelas `entradas_diarias` e `custos` gravadas no Supabase (nunca some ao dar F5)
-    todas as entradas com valor nos últimos `janela_dias_nf` dias (padrão 7 dias), identificando:
+    todas as entradas com valor nos últimos `janela_dias_nf` dias (padrão 3 dias), identificando:
     1) 🚨 Esquecimento Fiscal: Custo da última NF acima do C1 atual (+tolerância de frete/imposto).
     2) ⚠️ Margem Comprimida / Prejuízo na Tabela T1: Custo da NF deixa margem vs. T1 abaixo do mínimo (ou Custo NF ≥ T1).
     3) ⚪ Sem Custo C1 Cadastrado: Item entrou com valor na NF mas continua com C1 = R$ 0,00.
@@ -4212,7 +4212,6 @@ def auditar_fiscal_permanente_nf_c1_t1(
 
         var_nf_c1 = ((custo_nf - c1_at) / c1_at * 100.0) if c1_at > 0.0 else 0.0
         mg_t1_nf = ((t1_at - custo_nf) / t1_at * 100.0) if (t1_at > 0.0 and custo_nf > 0.0) else 0.0
-        mg_t1_c1 = ((t1_at - c1_at) / t1_at * 100.0) if (t1_at > 0.0 and c1_at > 0.0) else 0.0
 
         t1_comprimido = (t1_at > 0.0) and (custo_nf > 0.0) and (mg_t1_nf < float(margem_minima_t1_pct))
         if t1_comprimido:
@@ -6826,7 +6825,8 @@ with aba1:
             ):
                 st.caption(
                     "Comparação entre o **Preço Tabela Oficial (T1)** e o **Preço Vendido no Balcão** (sem sobrescrever nenhum dos dois). "
-                    "O padrão normal do sistema é até 2,1%; abaixo estão os itens vendidos com desconto superior a **5,0%**."
+                    "O padrão normal do sistema é até 2,1%; abaixo estão os itens vendidos com desconto superior a **5,0%** "
+                    "(o histórico permanente também fica sempre disponível na **Aba 5 — Seção 5** e na **Aba 1 — Seção 5**)."
                 )
                 st.download_button(
                     label="📥 Baixar Conferência de Descontos > 5% (.xlsx)",
@@ -7058,10 +7058,10 @@ with aba1:
                     "📅 Janela Cruzamento NF × C1 (dias):",
                     min_value=1,
                     max_value=60,
-                    value=7,
+                    value=3,
                     step=1,
                     key="num_janela_nf_c1_aba6",
-                    help="Padrão de 7 dias: ao importar Custos C1 & T1, cruza com todas as NFs de Entrada lançadas nos últimos 7 dias para detectar esquecimentos fiscais.",
+                    help="Padrão de 3 dias: ao importar Custos C1 & T1, cruza com todas as NFs de Entrada lançadas nos últimos 3 dias para detectar esquecimentos fiscais.",
                 )
             with ca_f2:
                 tolerancia_frete_nf_c1_pct = st.number_input(
@@ -7738,7 +7738,7 @@ with aba1:
                                         mensagens_auditoria_upload.append(
                                             "🛡️ **Prioridade C1 & T1 Mantida:** O Custo C1 prevaleceu sobre o custo da NF (incluindo bonificações) e o Preço Tabela T1 foi atualizado."
                                         )
-                                    # Audita todos os ajustes de C1 & T1, cruzando com NFs na janela configurada (padrão 7 dias)
+                                    # Audita todos os ajustes de C1 & T1, cruzando com NFs na janela configurada (padrão 3 dias)
                                     dt_ref_cruz_nf = max(hoje_br(), data_custos)
                                     limite_nf_rec_iso = (dt_ref_cruz_nf - timedelta(days=int(janela_cruzamento_nf_c1_dias))).strftime("%Y-%m-%d")
                                     frames_ent_rec = []
@@ -9943,7 +9943,7 @@ with aba5:
             )
 
     st.markdown("---")
-    st.markdown("#### 4. Auditoria Fiscal Permanente (Última NF × Custo C1 × Tabela T1)")
+    st.markdown("#### 4. Auditoria Fiscal Permanente — Compras & Custos (Última NF × C1 × Tabela T1)")
     st.caption(
         "Recalculada diretamente a partir das tabelas gravadas no Supabase (não some ao atualizar a página). "
         "Compara o custo unitário da última NF de Entrada (`Fatu416`) com o **C1 Atual** e a **Tabela T1** para apontar "
@@ -9958,10 +9958,10 @@ with aba5:
                 "📅 Janela NFs (dias):",
                 min_value=1,
                 max_value=120,
-                value=7,
+                value=3,
                 step=1,
                 key="aud5_janela_nf_dias",
-                help="Padrão de 7 dias: analisa a entrada mais recente de cada SKU nos últimos 7 dias.",
+                help="Padrão de 3 dias: analisa a entrada mais recente de cada SKU nos últimos 3 dias.",
             )
         with af2:
             tol_aud5_pct = st.number_input(
@@ -10103,6 +10103,186 @@ with aba5:
                     use_container_width=True,
                     hide_index=True,
                     height=340,
+                )
+
+    st.markdown("---")
+    st.markdown("#### 5. Auditoria Permanente de Descontos nas Vendas (Saídas × Tabela T1)")
+    st.caption(
+        "Recalculada diretamente das tabelas `saidas_diarias` e `custos` gravadas no Supabase (não some ao atualizar a página). "
+        "O padrão normal do balcão é até **2,1%**; abaixo são listadas as vendas realizadas com desconto superior ao limite configurado."
+    )
+    if df_saidas.empty:
+        st.info("Importe planilhas de Saídas / Vendas na Aba 6 para ativar a auditoria permanente de descontos.")
+    elif df_custos_rel.empty or "preco_tabela" not in df_custos_rel.columns or float(df_custos_rel["preco_tabela"].fillna(0.0).sum()) <= 0.0:
+        st.info("Suba a planilha **Custos & Preços (`C1 + T1`)** na Aba 6 para comparar o Preço Tabela T1 com o Preço Vendido no Balcão.")
+    else:
+        ad1, ad2, ad3, ad4 = st.columns([1.0, 1.0, 1.3, 1.5])
+        with ad1:
+            janela_desc_aud5 = st.number_input(
+                "📅 Janela Vendas (dias):",
+                min_value=1,
+                max_value=120,
+                value=3,
+                step=1,
+                key="aud5_desc_janela_dias",
+                help="Padrão de 3 dias: analisa as saídas registradas nos últimos 3 dias.",
+            )
+        with ad2:
+            limite_desc_aud5 = st.number_input(
+                "🎯 Desconto Mínimo (%):",
+                min_value=0.5,
+                max_value=50.0,
+                value=5.0,
+                step=0.5,
+                key="aud5_desc_limite_pct",
+                help="O padrão do sistema é até 2,1%. Acima de 5,0%, o item aparece na lista de auditoria.",
+            )
+        dt_sai_s5 = converter_datas_deterministico(df_saidas["data"])
+        df_sai_v5 = df_saidas[dt_sai_s5.notna()].copy()
+        df_sai_v5["_dt_ts"] = dt_sai_s5[dt_sai_s5.notna()]
+        dt_max_sai5 = max(pd.Timestamp(hoje_br()), df_sai_v5["_dt_ts"].max()) if not df_sai_v5.empty else pd.Timestamp(hoje_br())
+        dt_corte_sai5 = dt_max_sai5 - pd.Timedelta(days=int(janela_desc_aud5))
+        df_sai_win5 = df_sai_v5[df_sai_v5["_dt_ts"] >= dt_corte_sai5].drop(columns=["_dt_ts"]).copy()
+
+        df_desc_perm5 = auditar_descontos_saidas_df(
+            df_saidas_ref=df_sai_win5,
+            df_custos_ref=df_custos_rel,
+            limite_desconto_pct=float(limite_desc_aud5),
+        )
+        if not df_desc_perm5.empty:
+            df_desc_perm5["departamento"] = df_desc_perm5["codigo"].map(
+                lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
+            )
+            deptos_desc5 = ["Todos os Grupos"] + sorted(df_desc_perm5["departamento"].unique())
+        else:
+            deptos_desc5 = ["Todos os Grupos"]
+
+        with ad3:
+            depto_desc5_sel = st.selectbox(
+                "📂 Filtrar Grupo / Departamento:",
+                options=deptos_desc5,
+                index=0,
+                key="aud5_desc_depto_sel",
+            )
+        with ad4:
+            busca_desc5_txt = st.text_input(
+                "🔍 Buscar produto com desconto:",
+                placeholder="Digite código ou nome...",
+                key="aud5_desc_busca_txt",
+            )
+
+        if df_desc_perm5.empty:
+            st.success(
+                f"✅ Nenhuma venda com desconto acima de **{formatar_num_br(limite_desc_aud5, 1)}%** encontrada nos últimos "
+                f"**{int(janela_desc_aud5)} dia(s)** (desde {dt_corte_sai5.strftime('%d/%m/%Y')})."
+            )
+        else:
+            df_desc5_view = df_desc_perm5.copy()
+            if depto_desc5_sel != "Todos os Grupos":
+                df_desc5_view = df_desc5_view[df_desc5_view["departamento"] == depto_desc5_sel].copy()
+            if busca_desc5_txt and busca_desc5_txt.strip():
+                td5 = busca_desc5_txt.lower().strip()
+                df_desc5_view = df_desc5_view[
+                    df_desc5_view["codigo"].str.lower().str.contains(td5, na=False, regex=False)
+                    | df_desc5_view["descricao"].str.lower().str.contains(td5, na=False, regex=False)
+                ].copy()
+
+            qtd_vendas_desc5 = len(df_desc5_view)
+            qtd_skus_desc5 = int(df_desc5_view["codigo"].nunique()) if not df_desc5_view.empty else 0
+            tot_desc_rs5 = float(df_desc5_view["desconto_total_rs"].sum()) if not df_desc5_view.empty else 0.0
+            tot_cheio_rs5 = float(df_desc5_view["valor_cheio_t1_total"].sum()) if not df_desc5_view.empty else 0.0
+            tot_vendido_rs5 = float(df_desc5_view["valor_venda"].sum()) if not df_desc5_view.empty else 0.0
+            qtd_mg_baixa5 = (
+                int(((df_desc5_view["custo_c1"] > 0.0) & (df_desc5_view["margem_real_pct"] < 10.0)).sum())
+                if not df_desc5_view.empty
+                else 0
+            )
+
+            dm1, dm2, dm3, dm4 = st.columns(4)
+            dm1.metric(
+                f"🏷️ Vendas > {formatar_num_br(limite_desc_aud5, 1)}% Desc.",
+                f"{formatar_num_br(qtd_vendas_desc5)} ({formatar_num_br(qtd_skus_desc5)} SKUs)",
+                f"Desde {dt_corte_sai5.strftime('%d/%m/%Y')}",
+            )
+            dm2.metric(
+                "💸 Desconto Total Concedido",
+                formatar_moeda_br(tot_desc_rs5),
+                f"-{formatar_pct_br((tot_desc_rs5 / max(tot_cheio_rs5, 1.0)) * 100.0, 1)} s/ Tabela T1" if tot_cheio_rs5 > 0 else "-",
+                delta_color="inverse" if tot_desc_rs5 > 0 else "normal",
+            )
+            dm3.metric(
+                "💵 Tabela T1 vs. Vendido",
+                formatar_moeda_br(tot_vendido_rs5),
+                f"Valor Cheio T1: {formatar_moeda_br(tot_cheio_rs5)}",
+            )
+            dm4.metric(
+                "⚠️ Vendas c/ Margem < 10%",
+                formatar_num_br(qtd_mg_baixa5),
+                "Abaixo de 10% s/ C1" if qtd_mg_baixa5 > 0 else "Margem preservada",
+                delta_color="inverse" if qtd_mg_baixa5 > 0 else "normal",
+            )
+
+            df_desc5_exib = df_desc5_view[
+                [
+                    "data",
+                    "codigo",
+                    "descricao",
+                    "departamento",
+                    "qtd_saida",
+                    "preco_tabela_t1",
+                    "preco_vendido_un",
+                    "desconto_pct",
+                    "desconto_total_rs",
+                    "custo_c1",
+                    "margem_t1_pct",
+                    "margem_real_pct",
+                    "status_desconto",
+                ]
+            ].rename(
+                columns={
+                    "data": "Data",
+                    "codigo": "Código",
+                    "descricao": "Descrição",
+                    "departamento": "Grupo",
+                    "qtd_saida": "Qtd.",
+                    "preco_tabela_t1": "Preço Tabela T1 (R$)",
+                    "preco_vendido_un": "Preço Vendido Balcão (R$)",
+                    "desconto_pct": "Desconto (%)",
+                    "desconto_total_rs": "Desconto Total (R$)",
+                    "custo_c1": "Custo C1 (R$)",
+                    "margem_t1_pct": "Margem T1 (%)",
+                    "margem_real_pct": "Margem Real (%)",
+                    "status_desconto": "Status Desconto",
+                }
+            )
+            st.download_button(
+                label="📥 Baixar Auditoria Permanente de Descontos (.xlsx)",
+                data=gerar_excel_relatorio(df_desc5_exib, "Descontos_Vendas_T1"),
+                file_name=f"Auditoria_Descontos_Vendas_T1_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_auditoria_desc_perm_aba5",
+            )
+            if df_desc5_exib.empty:
+                st.info("Nenhum item corresponde aos filtros de grupo/busca selecionados.")
+            else:
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_desc5_exib,
+                        formatadores={
+                            "Qtd.": formatar_qtd_br,
+                            "Preço Tabela T1 (R$)": formatar_moeda_br,
+                            "Preço Vendido Balcão (R$)": formatar_moeda_br,
+                            "Desconto (%)": lambda x: f"-{formatar_pct_br(x, 1)}",
+                            "Desconto Total (R$)": formatar_moeda_br,
+                            "Custo C1 (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "Margem T1 (%)": lambda x: formatar_pct_br(x, 1),
+                            "Margem Real (%)": lambda x: formatar_pct_br(x, 1),
+                        },
+                        colunas_esquerda=["Descrição", "Grupo", "Status Desconto"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=320,
                 )
 
 # ------------------------------------------------------------------------------
