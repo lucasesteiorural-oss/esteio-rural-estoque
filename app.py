@@ -3753,14 +3753,161 @@ def atualizar_custos_via_entradas_df(
     }
 
 
+def resolver_custo_e_t1_temporal_saidas(
+    df_saidas_ref: pd.DataFrame,
+    df_custos_ref: pd.DataFrame,
+    df_entradas_ref: pd.DataFrame = None,
+) -> pd.DataFrame:
+    """
+    Resolve o Custo Unitário (C1) e o Preço Tabela (T1) vigentes NA DATA DE CADA VENDA,
+    cruzando `saidas_diarias` com o histórico cronológico de `entradas_diarias`:
+    - Se houve uma NF de Entrada posterior à venda (`dt_ent > dt_venda`) com reajuste de preço:
+      1) Se existir NF anterior ou no dia (`dt_ent <= dt_venda`), aplica o custo histórico daquela NF
+         e neutraliza o T1 novo para não gerar falso desconto.
+      2) Se não existir NF anterior (lote antigo vendido antes do reajuste), marca `pre_reajuste = True`
+         e `tem_custo_historico = False` (custo vigente = 0,00) para não fabricar falso prejuízo
+         nem falso desconto sobre o novo preço reajustado.
+    """
+    if df_saidas_ref is None or df_saidas_ref.empty:
+        return pd.DataFrame()
+    df_s = df_saidas_ref.copy()
+
+    mapa_c1 = {}
+    mapa_t1 = {}
+    if df_custos_ref is not None and not df_custos_ref.empty:
+        mapa_c1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["custo_unitario"].fillna(0.0)))
+        if "preco_tabela" in df_custos_ref.columns:
+            mapa_t1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["preco_tabela"].fillna(0.0)))
+
+    # Mapa cronológico de entradas com valor por SKU: {codigo: [(dt_iso, custo_nf), ...]}
+    hist_nf_por_sku = {}
+    if (
+        df_entradas_ref is not None
+        and not df_entradas_ref.empty
+        and "qtd_entrada" in df_entradas_ref.columns
+        and "valor_entrada" in df_entradas_ref.columns
+        and "data" in df_entradas_ref.columns
+    ):
+        df_e_v = df_entradas_ref[
+            (df_entradas_ref["qtd_entrada"] > 0) & (df_entradas_ref["valor_entrada"] > 0)
+        ].copy()
+        if not df_e_v.empty:
+            dt_e_s = converter_datas_deterministico(df_e_v["data"])
+            df_e_v["_dt_iso"] = dt_e_s.dt.strftime("%Y-%m-%d").fillna("")
+            df_e_v = df_e_v[df_e_v["_dt_iso"] != ""]
+            if not df_e_v.empty:
+                grp_nf = (
+                    df_e_v.groupby(["codigo", "_dt_iso"], as_index=False)
+                    .agg(qtd_entrada=("qtd_entrada", "sum"), valor_entrada=("valor_entrada", "sum"))
+                    .sort_values(["codigo", "_dt_iso"])
+                )
+                for _, r_nf in grp_nf.iterrows():
+                    cod_nf = str(r_nf["codigo"]).strip()
+                    if cod_nf:
+                        c_u_nf = round(float(r_nf["valor_entrada"]) / float(r_nf["qtd_entrada"]), 4)
+                        hist_nf_por_sku.setdefault(cod_nf, []).append((str(r_nf["_dt_iso"]), c_u_nf))
+
+    custo_ef_list = []
+    t1_ef_list = []
+    pre_reaj_list = []
+    tem_hist_list = []
+    motivo_list = []
+
+    for _, r in df_s.iterrows():
+        cod = str(r.get("codigo", "")).strip()
+        dt_v = str(r.get("data", "")).strip()
+        qtd_v = float(r.get("qtd_saida", 0.0) or 0.0)
+        vlr_v = float(r.get("valor_venda", 0.0) or 0.0)
+        pv_un = (vlr_v / qtd_v) if (qtd_v > 0.0 and vlr_v > 0.0) else 0.0
+
+        c1_at = float(mapa_c1.get(cod, 0.0))
+        t1_at = float(mapa_t1.get(cod, 0.0))
+        lista_nfs = hist_nf_por_sku.get(cod, [])
+
+        if not lista_nfs or not dt_v:
+            custo_ef_list.append(c1_at)
+            t1_ef_list.append(t1_at)
+            pre_reaj_list.append(False)
+            tem_hist_list.append(c1_at > 0.0)
+            motivo_list.append("")
+            continue
+
+        nfs_antes = [(d, c) for (d, c) in lista_nfs if d <= dt_v]
+        nfs_depois = [(d, c) for (d, c) in lista_nfs if d > dt_v]
+
+        if not nfs_depois:
+            custo_ef_list.append(c1_at)
+            t1_ef_list.append(t1_at)
+            pre_reaj_list.append(False)
+            tem_hist_list.append(c1_at > 0.0)
+            motivo_list.append("")
+            continue
+
+        dt_nf_post, custo_nf_post = nfs_depois[0]
+        dt_post_p = pd.to_datetime(dt_nf_post, format="%Y-%m-%d", errors="coerce")
+        dt_post_br = dt_post_p.strftime("%d/%m/%Y") if pd.notna(dt_post_p) else dt_nf_post
+
+        if nfs_antes:
+            dt_nf_ant, custo_nf_ant = nfs_antes[-1]
+            # Verifica se houve reajuste relevante na NF posterior em relação à NF vigente na data da venda
+            houve_reajuste_post = (custo_nf_ant > 0.0) and (
+                abs(custo_nf_post - custo_nf_ant) / custo_nf_ant > 0.015
+            )
+            if houve_reajuste_post:
+                dt_ant_p = pd.to_datetime(dt_nf_ant, format="%Y-%m-%d", errors="coerce")
+                dt_ant_br = dt_ant_p.strftime("%d/%m/%Y") if pd.notna(dt_ant_p) else dt_nf_ant
+                custo_ef_list.append(custo_nf_ant)
+                t1_ef_list.append(0.0)
+                pre_reaj_list.append(True)
+                tem_hist_list.append(True)
+                motivo_list.append(
+                    f"⏳ Custo NF {dt_ant_br} ({formatar_moeda_br(custo_nf_ant)}) — anterior ao reajuste de {dt_post_br}"
+                )
+            else:
+                custo_ef_list.append(c1_at)
+                t1_ef_list.append(t1_at)
+                pre_reaj_list.append(False)
+                tem_hist_list.append(c1_at > 0.0)
+                motivo_list.append("")
+        else:
+            # Não havia NF anterior no histórico (estoque inicial antigo), mas entrou NF reajustada depois da venda
+            c1_reflete_post = (
+                (pv_un > 0.0 and custo_nf_post > pv_un * 1.005)
+                or (c1_at > 0.0 and abs(custo_nf_post - c1_at) / max(c1_at, 0.01) <= 0.15)
+            )
+            if c1_reflete_post:
+                custo_ef_list.append(0.0)
+                t1_ef_list.append(0.0)
+                pre_reaj_list.append(True)
+                tem_hist_list.append(False)
+                motivo_list.append(
+                    f"⏳ Venda anterior ao reajuste (NF em {dt_post_br} a {formatar_moeda_br(custo_nf_post)} | C1 atual {formatar_moeda_br(c1_at)})"
+                )
+            else:
+                custo_ef_list.append(c1_at)
+                t1_ef_list.append(t1_at)
+                pre_reaj_list.append(False)
+                tem_hist_list.append(c1_at > 0.0)
+                motivo_list.append("")
+
+    df_s["custo_u_efetivo"] = custo_ef_list
+    df_s["t1_efetivo"] = t1_ef_list
+    df_s["pre_reajuste"] = pre_reaj_list
+    df_s["tem_custo_historico"] = tem_hist_list
+    df_s["motivo_temporal"] = motivo_list
+    return df_s
+
+
 def auditar_descontos_saidas_df(
     df_saidas_ref: pd.DataFrame,
     df_custos_ref: pd.DataFrame,
     limite_desconto_pct: float = 5.0,
+    df_entradas_ref: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Cruza as Saídas Reais (Valor Total da Proposta / Qtd. Saída) com o Preço Tabela Oficial T1
-    (sem sobrescrever nenhum dos dois) e retorna os produtos vendidos com desconto > limite_desconto_pct (padrão 5%).
+    vigente na data da venda (ignorando vendas anteriores a reajustes de preço) e retorna os
+    produtos vendidos com desconto > limite_desconto_pct (padrão 5%).
     """
     if (
         df_saidas_ref is None
@@ -3776,11 +3923,13 @@ def auditar_descontos_saidas_df(
     if df_s.empty:
         return pd.DataFrame()
 
-    mapa_t1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["preco_tabela"].fillna(0.0)))
-    mapa_c1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["custo_unitario"].fillna(0.0)))
-
-    df_s["preco_tabela_t1"] = df_s["codigo"].map(mapa_t1).fillna(0.0)
-    df_s["custo_c1"] = df_s["codigo"].map(mapa_c1).fillna(0.0)
+    df_s = resolver_custo_e_t1_temporal_saidas(
+        df_saidas_ref=df_s,
+        df_custos_ref=df_custos_ref,
+        df_entradas_ref=df_entradas_ref,
+    )
+    df_s["preco_tabela_t1"] = df_s["t1_efetivo"].fillna(0.0)
+    df_s["custo_c1"] = df_s["custo_u_efetivo"].fillna(0.0)
     df_s = df_s[df_s["preco_tabela_t1"] > 0.0].copy()
     if df_s.empty:
         return pd.DataFrame()
@@ -5957,8 +6106,13 @@ with aba_dash:
                 df_sai_escopo["departamento"] = df_sai_escopo["codigo"].map(
                     lambda c: identificar_departamento_sku(c, grupos_pref_custom, grupos_sku_custom)
                 )
-                df_sai_escopo["custo_u"] = df_sai_escopo["codigo"].map(mapa_custo_bi).fillna(0.0)
-                df_sai_escopo["preco_t1_u"] = df_sai_escopo["codigo"].map(mapa_t1_bi).fillna(0.0)
+                df_sai_escopo = resolver_custo_e_t1_temporal_saidas(
+                    df_saidas_ref=df_sai_escopo,
+                    df_custos_ref=df_custos_rel,
+                    df_entradas_ref=df_entradas,
+                )
+                df_sai_escopo["custo_u"] = df_sai_escopo["custo_u_efetivo"].fillna(0.0)
+                df_sai_escopo["preco_t1_u"] = df_sai_escopo["t1_efetivo"].fillna(0.0)
                 df_sai_escopo["cmv_total"] = df_sai_escopo["qtd_saida"] * df_sai_escopo["custo_u"]
                 df_sai_escopo["fat_bruto"] = df_sai_escopo["valor_venda"].fillna(0.0)
                 df_sai_escopo["fat_cheio_t1"] = [
@@ -5969,7 +6123,11 @@ with aba_dash:
                 df_sai_escopo["ano"] = df_sai_escopo["data"].astype(str).str.slice(0, 4)
             else:
                 df_sai_escopo = pd.DataFrame(
-                    columns=["codigo", "descricao", "departamento", "qtd_saida", "valor_venda", "data", "custo_u", "cmv_total", "fat_bruto", "mes_ano", "ano"]
+                    columns=[
+                        "codigo", "descricao", "departamento", "qtd_saida", "valor_venda", "data",
+                        "custo_u", "preco_t1_u", "pre_reajuste", "tem_custo_historico", "motivo_temporal",
+                        "cmv_total", "fat_bruto", "mes_ano", "ano"
+                    ]
                 )
 
             if not df_ent_escopo.empty:
@@ -6517,6 +6675,7 @@ with aba_dash:
                         df_saidas_ref=df_sai_com_fat,
                         df_custos_ref=df_custos_rel,
                         limite_desconto_pct=float(limite_desc_bi),
+                        df_entradas_ref=df_entradas,
                     )
                     if df_desc_aud_bi.empty:
                         st.success(f"✅ Nenhum produto vendido no período selecionado teve desconto acima de {formatar_num_br(limite_desc_bi, 1)}% em relação à Tabela T1!")
@@ -6596,11 +6755,35 @@ with aba_dash:
                 if df_sai_com_fat.empty:
                     st.info("Importe uma planilha de Saídas com a 4ª coluna (`Valor Total da Proposta`) para auditar margens comprimidas.")
                 else:
-                    df_alerta_mg = grp_sku_fat[(grp_sku_fat["custo_u"] > 0) & (grp_sku_fat["margem_liq_pct"] < 10.0)].sort_values(
-                        "lucro_liq", ascending=True
-                    ).reset_index(drop=True)
+                    # Avalia apenas vendas com custo histórico válido na data da operação (evita falso prejuízo de vendas anteriores ao reajuste)
+                    df_sai_custo_valido = df_sai_com_fat[df_sai_com_fat["custo_u"] > 0].copy()
+                    df_sai_pre_reaj_sem_hist = df_sai_com_fat[
+                        (df_sai_com_fat["pre_reajuste"] == True) & (df_sai_com_fat["custo_u"] <= 0)
+                    ].copy()
+
+                    if not df_sai_custo_valido.empty:
+                        grp_alerta_sku = (
+                            df_sai_custo_valido.groupby("codigo", as_index=False)
+                            .agg(
+                                descricao=("descricao", "last"),
+                                departamento=("departamento", "last"),
+                                qtd_vendida=("qtd_saida", "sum"),
+                                cmv_total=("cmv_total", "sum"),
+                                faturamento=("fat_bruto", "sum"),
+                                lucro_liq=("lucro_liquido", "sum"),
+                            )
+                        )
+                        grp_alerta_sku["custo_u"] = (grp_alerta_sku["cmv_total"] / grp_alerta_sku["qtd_vendida"].replace(0.0, float("nan"))).fillna(0.0)
+                        grp_alerta_sku["preco_medio_venda"] = (grp_alerta_sku["faturamento"] / grp_alerta_sku["qtd_vendida"].replace(0.0, float("nan"))).fillna(0.0)
+                        grp_alerta_sku["margem_liq_pct"] = (grp_alerta_sku["lucro_liq"] / grp_alerta_sku["faturamento"]) * 100.0
+                        df_alerta_mg = grp_alerta_sku[grp_alerta_sku["margem_liq_pct"] < 10.0].sort_values(
+                            "lucro_liq", ascending=True
+                        ).reset_index(drop=True)
+                    else:
+                        df_alerta_mg = pd.DataFrame()
+
                     if df_alerta_mg.empty:
-                        st.success(f"✅ Excelente! Nenhum produto vendido com custo cadastrado teve margem líquida inferior a 10% (impostos: {formatar_num_br(aliq_imp_efetiva, 1)}%).")
+                        st.success(f"✅ Excelente! Nenhum produto vendido com custo vigente na data teve margem líquida inferior a 10% (impostos: {formatar_num_br(aliq_imp_efetiva, 1)}%).")
                     else:
                         df_alerta_mg["status_margem"] = [
                             "🔴 Prejuízo Líquido (Abaixo de Custo + Impostos)" if float(m) < 0.0 else "🟠 Margem Comprimida (< 10% Líq.)"
@@ -6650,6 +6833,47 @@ with aba_dash:
                             hide_index=True,
                             height=280,
                         )
+
+                    if not df_sai_pre_reaj_sem_hist.empty:
+                        with st.expander(
+                            f"⏳ Vendas Anteriores ao Reajuste de Custo ({formatar_num_br(df_sai_pre_reaj_sem_hist['codigo'].nunique())} SKU(s) — Ignoradas no alerta de prejuízo)",
+                            expanded=False,
+                        ):
+                            st.caption(
+                                "Estes itens foram vendidos antes da entrada da NF reajustada e ainda não possuíam custo anterior gravado; "
+                                "por isso o sistema não aplica o custo novo retroativamente para evitar falso prejuízo."
+                            )
+                            df_pr_exib = df_sai_pre_reaj_sem_hist.copy()
+                            df_pr_exib["preco_praticado"] = (df_pr_exib["fat_bruto"] / df_pr_exib["qtd_saida"].replace(0.0, float("nan"))).fillna(0.0)
+                            df_pr_exib["custo_atual_ref"] = df_pr_exib["codigo"].map(mapa_custo_bi).fillna(0.0)
+                            df_pr_tab = df_pr_exib[
+                                ["data", "codigo", "descricao", "qtd_saida", "preco_praticado", "fat_bruto", "custo_atual_ref", "motivo_temporal"]
+                            ].rename(
+                                columns={
+                                    "data": "Data Venda",
+                                    "codigo": "Código",
+                                    "descricao": "Descrição",
+                                    "qtd_saida": "Qtd. Vendida",
+                                    "preco_praticado": "Preço Vendido (R$)",
+                                    "fat_bruto": "Faturamento (R$)",
+                                    "custo_atual_ref": "Custo C1 Atual (R$)",
+                                    "motivo_temporal": "Diagnóstico Temporal",
+                                }
+                            )
+                            st.dataframe(
+                                estilizar_tabela_br(
+                                    df_pr_tab,
+                                    formatadores={
+                                        "Qtd. Vendida": formatar_qtd_br,
+                                        "Preço Vendido (R$)": formatar_moeda_br,
+                                        "Faturamento (R$)": formatar_moeda_br,
+                                        "Custo C1 Atual (R$)": formatar_moeda_br,
+                                    },
+                                    colunas_esquerda=["Descrição", "Diagnóstico Temporal"],
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
 
 # ------------------------------------------------------------------------------
 # ABA 1: CENTRAL DE IMPORTAÇÃO SEGURA E DOWNLOAD DO BANCO DE DADOS
@@ -7531,10 +7755,15 @@ with aba1:
                                 teve_alerta = True
                                 mensagens_auditoria_upload.append(info_sai["aviso_sem_data"])
                             df_custos_ref_desc = novos_custos if (arq_custos is not None and "novos_custos" in locals() and novos_custos is not None) else df_custos
+                            frames_ent_desc_up = [df_entradas_bruto] if not df_entradas_bruto.empty else []
+                            if novas_entradas is not None and not novas_entradas.empty:
+                                frames_ent_desc_up.append(novas_entradas)
+                            df_ent_ref_desc_up = pd.concat(frames_ent_desc_up, ignore_index=True) if frames_ent_desc_up else pd.DataFrame()
                             df_aud_desc_upload = auditar_descontos_saidas_df(
                                 df_saidas_ref=novas_saidas,
                                 df_custos_ref=df_custos_ref_desc,
                                 limite_desconto_pct=5.0,
+                                df_entradas_ref=df_ent_ref_desc_up,
                             )
                             if not df_aud_desc_upload.empty:
                                 teve_alerta = True
@@ -7800,6 +8029,7 @@ with aba1:
                                                 df_saidas_ref=df_sai_dia_t1,
                                                 df_custos_ref=novos_custos,
                                                 limite_desconto_pct=5.0,
+                                                df_entradas_ref=df_ent_rec_aud,
                                             )
                                             if not df_aud_desc_pos_t1.empty:
                                                 teve_alerta = True
@@ -10108,8 +10338,8 @@ with aba5:
     st.markdown("---")
     st.markdown("#### 5. Auditoria Permanente de Descontos nas Vendas (Saídas × Tabela T1)")
     st.caption(
-        "Recalculada diretamente das tabelas `saidas_diarias` e `custos` gravadas no Supabase (não some ao atualizar a página). "
-        "O padrão normal do balcão é até **2,1%**; abaixo são listadas as vendas realizadas com desconto superior ao limite configurado."
+        "Recalculada diretamente das tabelas `saidas_diarias` e `custos` gravadas no Supabase (não some ao atualizar a página) "
+        "e protegida contra vendas anteriores a reajustes de preço. O padrão normal do balcão é até **2,1%**."
     )
     if df_saidas.empty:
         st.info("Importe planilhas de Saídas / Vendas na Aba 6 para ativar a auditoria permanente de descontos.")
@@ -10148,6 +10378,7 @@ with aba5:
             df_saidas_ref=df_sai_win5,
             df_custos_ref=df_custos_rel,
             limite_desconto_pct=float(limite_desc_aud5),
+            df_entradas_ref=df_entradas,
         )
         if not df_desc_perm5.empty:
             df_desc_perm5["departamento"] = df_desc_perm5["codigo"].map(
