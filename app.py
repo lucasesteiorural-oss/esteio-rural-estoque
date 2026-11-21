@@ -3575,12 +3575,13 @@ def atualizar_custos_via_entradas_df(
     data_entrada_iso: str = "",
     df_entradas_historico: pd.DataFrame = None,
     limite_alerta_variacao_pct: float = 20.0,
+    tolerancia_frete_pct: float = 1.5,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Faz o Upsert seletivo na tabela de custos a partir dos custos unitários apurados na Entrada:
     1) Só atualiza o custo se a data da entrada for >= à última entrada daquele SKU (proteção contra NF antiga sobrescrever custo mais novo).
-    2) Detecta alertas de variação brusca de custo (>= 20%) e alertas de custo inalterado (0,0% — possível esquecimento fiscal).
-    3) Retorna os registros detalhados para auditoria fiscal.
+    2) Detecta alertas de variação brusca de custo (>= 20%), altas acima da tolerância de frete/imposto e alertas de custo inalterado (0,0% — possível esquecimento fiscal).
+    3) Retorna os registros detalhados para auditoria fiscal mesmo quando a atualização automática do C1 está desmarcada.
     """
     info_vazio = {
         "qtd_atualizados": 0,
@@ -3589,6 +3590,8 @@ def atualizar_custos_via_entradas_df(
         "exemplos_ignorados_data": [],
         "qtd_alertas_variacao": 0,
         "exemplos_variacao": [],
+        "qtd_altas_acima_tolerancia": 0,
+        "exemplos_altas_tolerancia": [],
         "qtd_inalterados": 0,
         "exemplos_inalterados": [],
         "registros_auditoria": [],
@@ -3631,9 +3634,11 @@ def atualizar_custos_via_entradas_df(
                 mapa_ult_data_ent = df_e_hist.groupby("codigo")["_dt_iso"].max().to_dict()
 
     dt_ent_iso_str = str(data_entrada_iso).strip()
+    tol_pct = max(float(tolerancia_frete_pct), 0.0)
     linhas_validas = []
     ignorados_data = []
     alertas_var = []
+    altas_tol_list = []
     inalterados_custo = []
     registros_auditoria = []
 
@@ -3664,7 +3669,8 @@ def atualizar_custos_via_entradas_df(
         var_pct = 0.0
         if custo_antigo > 0.0:
             var_pct = ((custo_novo - custo_antigo) / custo_antigo) * 100.0
-            if abs(custo_novo - custo_antigo) < 0.005 or abs(var_pct) < 0.05:
+            diff_abs = abs(custo_novo - custo_antigo)
+            if diff_abs < 0.005 or abs(var_pct) < 0.05:
                 inalterados_custo.append(f"SKU {cod} ({formatar_moeda_br(custo_novo)})")
                 status_aud = "🔎 Custo Inalterado (0,0% — Conferir Fiscal)"
             elif abs(var_pct) >= float(limite_alerta_variacao_pct):
@@ -3675,8 +3681,18 @@ def atualizar_custos_via_entradas_df(
                     )
                 )
                 status_aud = f"⚠️ Variação Brusca ({formatar_pct_br(var_pct, 1, com_sinal=True)})"
+            elif var_pct > tol_pct and diff_abs >= 0.02:
+                altas_tol_list.append(
+                    (
+                        var_pct,
+                        f"SKU {cod} ({formatar_moeda_br(custo_antigo)} ➔ {formatar_moeda_br(custo_novo)} | {formatar_pct_br(var_pct, 1, com_sinal=True)})",
+                    )
+                )
+                status_aud = f"📈 Alta na NF ({formatar_pct_br(var_pct, 1, com_sinal=True)} — Conferir C1)"
+            elif abs(var_pct) <= tol_pct or diff_abs < 0.02:
+                status_aud = f"✔️ Dentro da Tolerância ({formatar_pct_br(var_pct, 1, com_sinal=True)})"
             else:
-                status_aud = f"✅ Atualizado ({formatar_pct_br(var_pct, 1, com_sinal=True)})"
+                status_aud = f"📉 Redução na NF ({formatar_pct_br(var_pct, 1, com_sinal=True)})"
         else:
             status_aud = "🆕 Novo Custo Cadastrado"
 
@@ -3700,6 +3716,8 @@ def atualizar_custos_via_entradas_df(
             "exemplos_ignorados_data": ignorados_data[:6],
             "qtd_alertas_variacao": 0,
             "exemplos_variacao": [],
+            "qtd_altas_acima_tolerancia": 0,
+            "exemplos_altas_tolerancia": [],
             "qtd_inalterados": 0,
             "exemplos_inalterados": [],
             "registros_auditoria": registros_auditoria,
@@ -3716,6 +3734,7 @@ def atualizar_custos_via_entradas_df(
     qtd_atualizados = len(cods_aplicados & cods_existentes)
     qtd_inseridos = len(cods_aplicados - cods_existentes)
     alertas_var.sort(key=lambda x: x[0], reverse=True)
+    altas_tol_list.sort(key=lambda x: x[0], reverse=True)
 
     df_combinado = pd.concat([df_base_c, df_novos_validos], ignore_index=True)
     df_final_c = padronizar_dataframe(df_combinado, "custos")
@@ -3726,6 +3745,8 @@ def atualizar_custos_via_entradas_df(
         "exemplos_ignorados_data": ignorados_data[:6],
         "qtd_alertas_variacao": len(alertas_var),
         "exemplos_variacao": [x[1] for x in alertas_var[:8]],
+        "qtd_altas_acima_tolerancia": len(altas_tol_list),
+        "exemplos_altas_tolerancia": [x[1] for x in altas_tol_list[:8]],
         "qtd_inalterados": len(inalterados_custo),
         "exemplos_inalterados": inalterados_custo[:10],
         "registros_auditoria": registros_auditoria,
@@ -3792,17 +3813,60 @@ def auditar_descontos_saidas_df(
     return df_alerta.sort_values(["desconto_total_rs", "desconto_pct"], ascending=[False, False]).reset_index(drop=True)
 
 
+def _classificar_divergencia_nf_vs_c1(
+    custo_nf: float,
+    c1_ref: float,
+    t1_ref: float = 0.0,
+    tolerancia_frete_pct: float = 1.5,
+) -> tuple[str, int, str]:
+    """
+    Classifica a relação entre o Custo Unitário da NF de Entrada e o Custo C1 do ERP:
+    - Retorna (categoria_curta, prioridade_ordenacao, descricao_status)
+    """
+    if custo_nf <= 0.0 or c1_ref <= 0.0:
+        return "sem_comparacao", 9, ""
+    var_pct = ((custo_nf - c1_ref) / c1_ref) * 100.0
+    diff_abs = abs(custo_nf - c1_ref)
+    tol = max(float(tolerancia_frete_pct), 0.0)
+    if diff_abs < 0.02 or abs(var_pct) <= tol:
+        return "alinhado", 5, f"✔️ Alinhado c/ NF ({formatar_pct_br(var_pct, 1, com_sinal=True)})"
+    if var_pct > tol:
+        alerta_t1 = ""
+        if t1_ref > 0.0 and custo_nf >= t1_ref:
+            alerta_t1 = " | ⚠️ Custo NF ≥ Tabela T1!"
+        return (
+            "esquecimento_fiscal",
+            0,
+            f"🚨 NF Acima do C1 ({formatar_pct_br(var_pct, 1, com_sinal=True)} | NF {formatar_moeda_br(custo_nf)} vs C1 {formatar_moeda_br(c1_ref)}) — Fiscal não atualizou C1{alerta_t1}",
+        )
+    if var_pct <= -30.0:
+        return (
+            "bonificacao",
+            2,
+            f"🎁 Bonificação / Desconto Promocional NF ({formatar_pct_br(var_pct, 1, com_sinal=True)} | NF {formatar_moeda_br(custo_nf)} ➔ C1 mantido)",
+        )
+    return (
+        "reducao_nf",
+        2,
+        f"📉 Custo NF Menor que C1 ({formatar_pct_br(var_pct, 1, com_sinal=True)} | NF {formatar_moeda_br(custo_nf)} vs C1 {formatar_moeda_br(c1_ref)}) — Conferir Redução",
+    )
+
+
 def auditar_ajustes_c1_t1_df(
     df_custos_antes: pd.DataFrame,
     df_custos_novos: pd.DataFrame,
     df_entradas_recentes: pd.DataFrame = None,
     registros_auditoria_nf: list = None,
     limite_alerta_c1_sem_t1_pct: float = 2.0,
+    tolerancia_frete_pct: float = 1.5,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Audita a carga diária da planilha Custos (C1) & Tabela (T1):
     1) Detecta todo item com alteração > 0,01% em C1 ou T1, além de novos cadastros.
-    2) Cruza com a última NF de Entrada para identificar notas de bonificação em que C1 foi mantido sem reajuste.
+    2) Cruza com a última NF de Entrada (janela padrão de 7 dias) e separa:
+       - 🚨 NF Acima do C1 (suspeita de esquecimento fiscal acima da tolerância de frete/imposto)
+       - 🎁 Bonificação / Desconto Promocional NF (queda >= 30%)
+       - 📉 Custo NF Menor que C1 (queda moderada entre tolerância e 30%)
     3) Dispara alerta de defasagem quando C1 sobe (>= 2%) mas T1 fica parado (0,0%).
     """
     resumo_vazio = {
@@ -3810,9 +3874,12 @@ def auditar_ajustes_c1_t1_df(
         "qtd_c1_alterado": 0,
         "qtd_t1_alterado": 0,
         "qtd_defasagem_t1": 0,
+        "qtd_esquecimento_fiscal": 0,
+        "qtd_reducao_nf": 0,
         "qtd_bonificacao_mantida": 0,
         "qtd_novos": 0,
         "exemplos_defasagem_t1": [],
+        "exemplos_esquecimento_fiscal": [],
     }
     if df_custos_novos is None or df_custos_novos.empty:
         return pd.DataFrame(), resumo_vazio
@@ -3827,6 +3894,7 @@ def auditar_ajustes_c1_t1_df(
         mapa_desc_db = dict(zip(df_custos_antes["codigo"], df_custos_antes["descricao"].fillna("")))
 
     mapa_custo_nf = {}
+    mapa_data_nf = {}
     mapa_c1_pre_nf = {}
     if (
         df_entradas_recentes is not None
@@ -3840,10 +3908,23 @@ def auditar_ajustes_c1_t1_df(
         if not df_e_rec.empty:
             if "data" in df_e_rec.columns:
                 df_e_rec = df_e_rec.sort_values("data")
-            for _, r_e in df_e_rec.iterrows():
-                cod_e = str(r_e["codigo"]).strip()
-                if cod_e:
-                    mapa_custo_nf[cod_e] = round(float(r_e["valor_entrada"]) / float(r_e["qtd_entrada"]), 4)
+                grp_e_dt = (
+                    df_e_rec.groupby(["codigo", "data"], as_index=False)
+                    .agg(qtd_entrada=("qtd_entrada", "sum"), valor_entrada=("valor_entrada", "sum"))
+                    .sort_values("data")
+                )
+                for _, r_e in grp_e_dt.iterrows():
+                    cod_e = str(r_e["codigo"]).strip()
+                    if cod_e:
+                        mapa_custo_nf[cod_e] = round(float(r_e["valor_entrada"]) / float(r_e["qtd_entrada"]), 4)
+                        dt_s_e = str(r_e["data"]).strip()
+                        dt_p_e = pd.to_datetime(dt_s_e, format="%Y-%m-%d", errors="coerce")
+                        mapa_data_nf[cod_e] = dt_p_e.strftime("%d/%m/%Y") if pd.notna(dt_p_e) else dt_s_e
+            else:
+                for _, r_e in df_e_rec.iterrows():
+                    cod_e = str(r_e["codigo"]).strip()
+                    if cod_e:
+                        mapa_custo_nf[cod_e] = round(float(r_e["valor_entrada"]) / float(r_e["qtd_entrada"]), 4)
 
     if registros_auditoria_nf:
         for reg_nf in registros_auditoria_nf:
@@ -3864,9 +3945,12 @@ def auditar_ajustes_c1_t1_df(
     qtd_c1_alt = 0
     qtd_t1_alt = 0
     qtd_def_t1 = 0
+    qtd_esq_fiscal = 0
+    qtd_red_nf = 0
     qtd_bonif = 0
     qtd_novos = 0
     exemplos_def = []
+    exemplos_esq = []
 
     for _, r_n in df_custos_novos.iterrows():
         cod = str(r_n["codigo"]).strip()
@@ -3878,6 +3962,7 @@ def auditar_ajustes_c1_t1_df(
         c1_db = float(mapa_c1_db.get(cod, 0.0))
         t1_ant = float(mapa_t1_db.get(cod, 0.0))
         custo_nf = float(mapa_custo_nf.get(cod, 0.0))
+        dt_nf_txt = str(mapa_data_nf.get(cod, "-")).strip() or "-"
         c1_pre_nf = float(mapa_c1_pre_nf.get(cod, 0.0))
 
         # Se uma NF recente sobrescreveu temporariamente o C1 no banco, recupera o C1 original pré-NF como base
@@ -3894,13 +3979,14 @@ def auditar_ajustes_c1_t1_df(
         eh_novo = (c1_ant <= 0.0) and (c1_novo > 0.0)
         c1_mudou = (not eh_novo) and (c1_ant > 0.0) and (abs(var_c1_pct) > 0.01) and (abs(c1_novo - c1_ant) >= 0.005)
         t1_mudou = (t1_ant > 0.0) and (t1_novo > 0.0) and (abs(var_t1_pct) > 0.01) and (abs(t1_novo - t1_ant) >= 0.005)
-        bonif_mantida = (
-            (not eh_novo)
-            and (not c1_mudou)
-            and (custo_nf > 0.0)
-            and (abs(custo_nf - c1_novo) >= 0.01)
-            and (abs((custo_nf - c1_novo) / max(c1_novo, 0.01) * 100.0) > 0.5)
+
+        cat_nf, prio_nf, status_nf_detalhe = _classificar_divergencia_nf_vs_c1(
+            custo_nf=custo_nf,
+            c1_ref=c1_novo,
+            t1_ref=t1_novo,
+            tolerancia_frete_pct=tolerancia_frete_pct,
         )
+        tem_divergencia_nf_c1 = (not eh_novo) and (cat_nf in ("esquecimento_fiscal", "bonificacao", "reducao_nf"))
         defasagem_t1 = (
             c1_mudou
             and (var_c1_pct >= float(limite_alerta_c1_sem_t1_pct))
@@ -3908,19 +3994,28 @@ def auditar_ajustes_c1_t1_df(
             and (t1_novo > 0.0)
             and (not t1_mudou)
         )
-        nf_confirmada = c1_mudou and (custo_nf > 0.0) and (abs(c1_novo - custo_nf) < 0.01)
+        nf_confirmada = c1_mudou and (cat_nf == "alinhado")
 
-        if not (eh_novo or c1_mudou or t1_mudou or bonif_mantida):
+        if not (eh_novo or c1_mudou or t1_mudou or tem_divergencia_nf_c1):
             continue
+
+        var_nf_abs_pct = abs(((custo_nf - c1_novo) / c1_novo * 100.0)) if (custo_nf > 0.0 and c1_novo > 0.0) else 0.0
 
         if eh_novo:
             qtd_novos += 1
             status_txt = "🆕 Novo Produto Cadastrado"
             prioridade = 3
-        elif bonif_mantida:
-            qtd_bonif += 1
-            status_txt = f"🎁 Bonificação / Sem Reajuste (NF {formatar_moeda_br(custo_nf)} ➔ C1 mantido)"
-            prioridade = 1
+        elif cat_nf == "esquecimento_fiscal":
+            qtd_esq_fiscal += 1
+            if c1_mudou:
+                qtd_c1_alt += 1
+            if t1_mudou:
+                qtd_t1_alt += 1
+            status_txt = status_nf_detalhe
+            exemplos_esq.append(
+                f"SKU {cod} (NF {formatar_moeda_br(custo_nf)} vs C1 {formatar_moeda_br(c1_novo)})"
+            )
+            prioridade = 0
         elif defasagem_t1:
             qtd_def_t1 += 1
             qtd_c1_alt += 1
@@ -3932,7 +4027,23 @@ def auditar_ajustes_c1_t1_df(
             exemplos_def.append(
                 f"SKU {cod} (C1 {formatar_moeda_br(c1_ant)} ➔ {formatar_moeda_br(c1_novo)} | T1 parado em {formatar_moeda_br(t1_novo)})"
             )
-            prioridade = 0
+            prioridade = 1
+        elif cat_nf == "bonificacao":
+            qtd_bonif += 1
+            if c1_mudou:
+                qtd_c1_alt += 1
+            if t1_mudou:
+                qtd_t1_alt += 1
+            status_txt = status_nf_detalhe
+            prioridade = 2
+        elif cat_nf == "reducao_nf":
+            qtd_red_nf += 1
+            if c1_mudou:
+                qtd_c1_alt += 1
+            if t1_mudou:
+                qtd_t1_alt += 1
+            status_txt = status_nf_detalhe
+            prioridade = 2
         elif c1_mudou and t1_mudou:
             qtd_c1_alt += 1
             qtd_t1_alt += 1
@@ -3941,23 +4052,24 @@ def auditar_ajustes_c1_t1_df(
                 f"🔄 Ajuste C1 ({formatar_pct_br(var_c1_pct, 1, com_sinal=True)}) & "
                 f"T1 ({formatar_pct_br(var_t1_pct, 1, com_sinal=True)}){tag_nf}"
             )
-            prioridade = 2
+            prioridade = 3
         elif c1_mudou:
             qtd_c1_alt += 1
             tag_nf = " (Confirmado pela NF)" if nf_confirmada else ""
             status_txt = f"💰 Ajuste Custo C1 ({formatar_pct_br(var_c1_pct, 1, com_sinal=True)}){tag_nf}"
-            prioridade = 2
+            prioridade = 3
         else:
             qtd_t1_alt += 1
             status_txt = f"🏷️ Ajuste Tabela T1 ({formatar_pct_br(var_t1_pct, 1, com_sinal=True)})"
-            prioridade = 3
+            prioridade = 4
 
         linhas_aud.append(
             {
                 "_prio": prioridade,
-                "_abs_var": max(abs(var_c1_pct), abs(var_t1_pct)),
+                "_abs_var": max(abs(var_c1_pct), abs(var_t1_pct), var_nf_abs_pct),
                 "Código": cod,
                 "Descrição": desc,
+                "Data NF": dt_nf_txt,
                 "C1 Anterior (R$)": c1_ant,
                 "C1 Novo (R$)": c1_novo,
                 "Var. C1 (%)": round(var_c1_pct, 2),
@@ -3984,11 +4096,194 @@ def auditar_ajustes_c1_t1_df(
         "qtd_c1_alterado": qtd_c1_alt,
         "qtd_t1_alterado": qtd_t1_alt,
         "qtd_defasagem_t1": qtd_def_t1,
+        "qtd_esquecimento_fiscal": qtd_esq_fiscal,
+        "qtd_reducao_nf": qtd_red_nf,
         "qtd_bonificacao_mantida": qtd_bonif,
         "qtd_novos": qtd_novos,
         "exemplos_defasagem_t1": exemplos_def[:6],
+        "exemplos_esquecimento_fiscal": exemplos_esq[:6],
     }
     return df_res, resumo
+
+
+def auditar_fiscal_permanente_nf_c1_t1(
+    df_entradas_ref: pd.DataFrame,
+    df_custos_ref: pd.DataFrame,
+    df_estoque_ref: pd.DataFrame = None,
+    janela_dias_nf: int = 7,
+    tolerancia_frete_pct: float = 1.5,
+    margem_minima_t1_pct: float = 5.0,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Auditoria Fiscal Permanente (Aba 5):
+    Recalcula diretamente das tabelas `entradas_diarias` e `custos` gravadas no Supabase (nunca some ao dar F5)
+    todas as entradas com valor nos últimos `janela_dias_nf` dias (padrão 7 dias), identificando:
+    1) 🚨 Esquecimento Fiscal: Custo da última NF acima do C1 atual (+tolerância de frete/imposto).
+    2) ⚠️ Margem Comprimida / Prejuízo na Tabela T1: Custo da NF deixa margem vs. T1 abaixo do mínimo (ou Custo NF ≥ T1).
+    3) ⚪ Sem Custo C1 Cadastrado: Item entrou com valor na NF mas continua com C1 = R$ 0,00.
+    4) 🎁 Bonificação / Desconto Promocional NF (queda >= 30%) e 📉 Redução na NF (queda moderada).
+    5) ✔️ Itens Alinhados (NF ≈ C1 dentro da tolerância).
+    """
+    resumo_vazio = {
+        "total_itens_nf": 0,
+        "qtd_esquecimento_fiscal": 0,
+        "qtd_margem_t1_baixa": 0,
+        "qtd_sem_c1": 0,
+        "qtd_bonificacao": 0,
+        "qtd_reducao_nf": 0,
+        "qtd_alinhados": 0,
+        "data_corte_br": "-",
+    }
+    if (
+        df_entradas_ref is None
+        or df_entradas_ref.empty
+        or "qtd_entrada" not in df_entradas_ref.columns
+        or "valor_entrada" not in df_entradas_ref.columns
+    ):
+        return pd.DataFrame(), resumo_vazio
+
+    df_e_val = df_entradas_ref[
+        (df_entradas_ref["qtd_entrada"] > 0) & (df_entradas_ref["valor_entrada"] > 0)
+    ].copy()
+    if df_e_val.empty:
+        return pd.DataFrame(), resumo_vazio
+
+    dt_s = converter_datas_deterministico(df_e_val["data"])
+    df_e_val["_dt_ts"] = dt_s
+    df_e_val = df_e_val[df_e_val["_dt_ts"].notna()].copy()
+    if df_e_val.empty:
+        return pd.DataFrame(), resumo_vazio
+
+    dt_max_base = max(pd.Timestamp(hoje_br()), df_e_val["_dt_ts"].max())
+    dt_corte_ts = dt_max_base - pd.Timedelta(days=int(janela_dias_nf))
+    df_e_win = df_e_val[df_e_val["_dt_ts"] >= dt_corte_ts].copy()
+    if df_e_win.empty:
+        resumo_vazio["data_corte_br"] = dt_corte_ts.strftime("%d/%m/%Y")
+        return pd.DataFrame(), resumo_vazio
+
+    df_e_win["_dt_iso"] = df_e_win["_dt_ts"].dt.strftime("%Y-%m-%d")
+    grp_dia = (
+        df_e_win.groupby(["codigo", "_dt_iso"], as_index=False)
+        .agg(
+            descricao=("descricao", "last"),
+            qtd_entrada=("qtd_entrada", "sum"),
+            valor_entrada=("valor_entrada", "sum"),
+        )
+        .sort_values(["codigo", "_dt_iso"])
+    )
+    ult_por_sku = grp_dia.drop_duplicates(subset=["codigo"], keep="last").reset_index(drop=True)
+
+    mapa_c1 = {}
+    mapa_t1 = {}
+    mapa_desc_c = {}
+    if df_custos_ref is not None and not df_custos_ref.empty:
+        mapa_c1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["custo_unitario"].fillna(0.0)))
+        if "preco_tabela" in df_custos_ref.columns:
+            mapa_t1 = dict(zip(df_custos_ref["codigo"], df_custos_ref["preco_tabela"].fillna(0.0)))
+        mapa_desc_c = dict(zip(df_custos_ref["codigo"], df_custos_ref["descricao"].fillna("")))
+
+    mapa_saldo = {}
+    if df_estoque_ref is not None and not df_estoque_ref.empty and "saldo_geral" in df_estoque_ref.columns:
+        mapa_saldo = df_estoque_ref.groupby("codigo")["saldo_geral"].first().to_dict()
+
+    linhas = []
+    q_esq = 0
+    q_mg_t1 = 0
+    q_sem_c1 = 0
+    q_bonif = 0
+    q_red = 0
+    q_alin = 0
+
+    for _, r in ult_por_sku.iterrows():
+        cod = str(r["codigo"]).strip()
+        if not cod:
+            continue
+        desc = str(r.get("descricao", "")).strip() or str(mapa_desc_c.get(cod, "")).strip()
+        qtd_nf = float(r["qtd_entrada"])
+        vlr_nf = float(r["valor_entrada"])
+        custo_nf = round(vlr_nf / qtd_nf, 4) if qtd_nf > 0 else 0.0
+        dt_iso = str(r["_dt_iso"]).strip()
+        dt_fmt = pd.to_datetime(dt_iso, format="%Y-%m-%d", errors="coerce")
+        dt_br = dt_fmt.strftime("%d/%m/%Y") if pd.notna(dt_fmt) else dt_iso
+
+        c1_at = float(mapa_c1.get(cod, 0.0))
+        t1_at = float(mapa_t1.get(cod, 0.0))
+        saldo_at = float(mapa_saldo.get(cod, 0.0))
+
+        var_nf_c1 = ((custo_nf - c1_at) / c1_at * 100.0) if c1_at > 0.0 else 0.0
+        mg_t1_nf = ((t1_at - custo_nf) / t1_at * 100.0) if (t1_at > 0.0 and custo_nf > 0.0) else 0.0
+        mg_t1_c1 = ((t1_at - c1_at) / t1_at * 100.0) if (t1_at > 0.0 and c1_at > 0.0) else 0.0
+
+        t1_comprimido = (t1_at > 0.0) and (custo_nf > 0.0) and (mg_t1_nf < float(margem_minima_t1_pct))
+        if t1_comprimido:
+            q_mg_t1 += 1
+
+        if c1_at <= 0.0:
+            q_sem_c1 += 1
+            prio = 1
+            cat_filtro = "sem_c1"
+            status_txt = f"⚪ Sem C1 no Cadastro (NF entrou a {formatar_moeda_br(custo_nf)})"
+        else:
+            cat_nf, prio_nf, status_base = _classificar_divergencia_nf_vs_c1(
+                custo_nf=custo_nf,
+                c1_ref=c1_at,
+                t1_ref=t1_at,
+                tolerancia_frete_pct=tolerancia_frete_pct,
+            )
+            cat_filtro = cat_nf
+            prio = prio_nf
+            status_txt = status_base
+            if cat_nf == "esquecimento_fiscal":
+                q_esq += 1
+            elif cat_nf == "bonificacao":
+                q_bonif += 1
+            elif cat_nf == "reducao_nf":
+                q_red += 1
+            else:
+                q_alin += 1
+                if t1_comprimido:
+                    prio = 1
+                    cat_filtro = "margem_t1"
+                    status_txt = (
+                        f"⚠️ C1 Alinhado, mas Tabela T1 Comprimida (Margem {formatar_pct_br(mg_t1_nf, 1)} < {formatar_num_br(margem_minima_t1_pct, 0)}%)"
+                    )
+
+        linhas.append(
+            {
+                "_prio": prio,
+                "_abs_var": abs(var_nf_c1),
+                "_cat": cat_filtro,
+                "_t1_comp": t1_comprimido,
+                "Código": cod,
+                "Descrição": desc,
+                "Última NF": dt_br,
+                "Qtd. NF": qtd_nf,
+                "Custo Unit. NF (R$)": custo_nf,
+                "Custo C1 Atual (R$)": c1_at,
+                "Var. NF vs C1 (%)": round(var_nf_c1, 2),
+                "Tabela T1 Atual (R$)": t1_at,
+                "Margem T1 s/ NF (%)": round(mg_t1_nf, 1),
+                "Saldo Estoque": saldo_at,
+                "Diagnóstico Fiscal": status_txt,
+            }
+        )
+
+    df_out = (
+        pd.DataFrame(linhas)
+        .sort_values(["_prio", "_abs_var", "Código"], ascending=[True, False, True])
+        .reset_index(drop=True)
+    )
+    resumo = {
+        "total_itens_nf": len(df_out),
+        "qtd_esquecimento_fiscal": q_esq,
+        "qtd_margem_t1_baixa": q_mg_t1,
+        "qtd_sem_c1": q_sem_c1,
+        "qtd_bonificacao": q_bonif,
+        "qtd_reducao_nf": q_red,
+        "qtd_alinhados": q_alin,
+        "data_corte_br": dt_corte_ts.strftime("%d/%m/%Y"),
+    }
+    return df_out, resumo
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -6427,18 +6722,22 @@ with aba1:
             dt_aj_c1_str = st.session_state.get("data_auditoria_ajustes_c1_t1", "")
             res_aj_c1 = st.session_state.get("resumo_auditoria_ajustes_c1_t1", {})
             df_aj_c1 = pd.DataFrame(regs_aj_c1)
+            q_esq_f = int(res_aj_c1.get("qtd_esquecimento_fiscal", 0))
             q_def_t1 = int(res_aj_c1.get("qtd_defasagem_t1", 0))
+            q_red_nf = int(res_aj_c1.get("qtd_reducao_nf", 0))
             q_bonif_m = int(res_aj_c1.get("qtd_bonificacao_mantida", 0))
             q_c1_alt = int(res_aj_c1.get("qtd_c1_alterado", 0))
             q_t1_alt = int(res_aj_c1.get("qtd_t1_alterado", 0))
             q_novos_c = int(res_aj_c1.get("qtd_novos", 0))
             with st.expander(
                 f"📊 Conferência de Ajustes (C1 & T1) ({dt_aj_c1_str}) — "
-                f"{formatar_num_br(len(df_aj_c1))} Ajuste(s) | ⚠️ Defasagem T1: {formatar_num_br(q_def_t1)} | 🎁 Bonificação Mantida: {formatar_num_br(q_bonif_m)}",
+                f"{formatar_num_br(len(df_aj_c1))} Ajuste(s) | 🚨 NF Acima do C1 (Fiscal): {formatar_num_br(q_esq_f)} | "
+                f"⚠️ Defasagem T1: {formatar_num_br(q_def_t1)} | 🎁 Bonificação: {formatar_num_br(q_bonif_m)}",
                 expanded=True,
             ):
                 st.caption(
-                    "Comparativo automático entre a carga atual de **C1 & T1**, os valores anteriores do banco e a última **NF de Entrada**."
+                    "Comparativo automático entre a carga atual de **C1 & T1**, os valores anteriores do banco e as **NFs de Entrada** "
+                    "(separando suspeita de esquecimento fiscal acima da tolerância de frete/imposto de bonificações e reduções)."
                 )
                 fc1, fc2 = st.columns([2.1, 1.0])
                 with fc1:
@@ -6446,8 +6745,10 @@ with aba1:
                         "Filtrar movimentações de C1 & T1:",
                         options=[
                             f"📋 Todos os Ajustes & Eventos ({len(df_aj_c1)})",
+                            f"🚨 NF Acima do C1 — Conferir Fiscal ({q_esq_f})",
                             f"⚠️ Defasagem: C1 Subiu s/ Reajuste no T1 ({q_def_t1})",
-                            f"🎁 Bonificação / C1 Mantido vs. NF ({q_bonif_m})",
+                            f"📉 Custo NF Menor que C1 ({q_red_nf})",
+                            f"🎁 Bonificação / Desconto Promocional NF ({q_bonif_m})",
                             f"💰 Apenas Custo C1 Alterado ({q_c1_alt})",
                             f"🏷️ Apenas Tabela T1 Alterada ({q_t1_alt})",
                             f"🆕 Novos Produtos Cadastrados ({q_novos_c})",
@@ -6456,9 +6757,17 @@ with aba1:
                         key="sel_filtro_aud_c1_t1_aba6",
                     )
                 df_aj_view = df_aj_c1.copy()
-                if filtro_aj_c1.startswith("⚠️ Defasagem"):
+                if filtro_aj_c1.startswith("🚨 NF Acima"):
+                    df_aj_view = df_aj_view[
+                        df_aj_view["Status Auditoria C1 & T1"].str.contains("NF Acima do C1", na=False)
+                    ].copy()
+                elif filtro_aj_c1.startswith("⚠️ Defasagem"):
                     df_aj_view = df_aj_view[
                         df_aj_view["Status Auditoria C1 & T1"].str.contains("s/ Reajuste no T1", na=False)
+                    ].copy()
+                elif filtro_aj_c1.startswith("📉 Custo NF"):
+                    df_aj_view = df_aj_view[
+                        df_aj_view["Status Auditoria C1 & T1"].str.contains("Custo NF Menor que C1", na=False)
                     ].copy()
                 elif filtro_aj_c1.startswith("🎁 Bonificação"):
                     df_aj_view = df_aj_view[
@@ -6742,7 +7051,32 @@ with aba1:
                     type=["xlsx", "xls", "csv"],
                     key="up_base",
                 )
-        with st.expander("⚙️ Opções Avançadas de Exceção de Travas (Desmarcado por Padrão — Use Apenas se Necessário)", expanded=False):
+        with st.expander("⚙️ Opções Avançadas de Auditoria Fiscal & Exceção de Travas", expanded=False):
+            ca_f1, ca_f2, ca_f3 = st.columns([1.2, 1.2, 1.6])
+            with ca_f1:
+                janela_cruzamento_nf_c1_dias = st.number_input(
+                    "📅 Janela Cruzamento NF × C1 (dias):",
+                    min_value=1,
+                    max_value=60,
+                    value=7,
+                    step=1,
+                    key="num_janela_nf_c1_aba6",
+                    help="Padrão de 7 dias: ao importar Custos C1 & T1, cruza com todas as NFs de Entrada lançadas nos últimos 7 dias para detectar esquecimentos fiscais.",
+                )
+            with ca_f2:
+                tolerancia_frete_nf_c1_pct = st.number_input(
+                    "⚖️ Tolerância Frete/Imposto NF × C1 (%):",
+                    min_value=0.0,
+                    max_value=10.0,
+                    value=1.5,
+                    step=0.5,
+                    key="num_tol_frete_nf_c1_aba6",
+                    help="Padrão de 1,5%: diferenças pequenas entre o valor líquido da NF (Fatu416) e o C1 do Siagri dentro desta margem não disparam alerta de esquecimento fiscal.",
+                )
+            with ca_f3:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                st.caption("🛡️ A auditoria fiscal roda automaticamente mesmo se 'Atualizar custo pela NF' estiver desmarcado.")
+            st.markdown("---")
             ct1, ct2, ct3, ct4 = st.columns(4)
             with ct1:
                 ignorar_trava_catalogo = st.checkbox(
@@ -7102,14 +7436,16 @@ with aba1:
                             else:
                                 if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
                                     rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
+                                    df_custos_sim_ent, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
+                                        df_custos_atual=df_custos,
+                                        df_custos_novos_entrada=df_ext_c,
+                                        data_entrada_iso=dt_ent_iso,
+                                        df_entradas_historico=df_entradas_bruto,
+                                        limite_alerta_variacao_pct=20.0,
+                                        tolerancia_frete_pct=float(tolerancia_frete_nf_c1_pct),
+                                    )
                                     if atualizar_custo_pela_entrada:
-                                        df_custos_via_entrada, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
-                                            df_custos_atual=df_custos,
-                                            df_custos_novos_entrada=df_ext_c,
-                                            data_entrada_iso=dt_ent_iso,
-                                            df_entradas_historico=df_entradas_bruto,
-                                            limite_alerta_variacao_pct=20.0,
-                                        )
+                                        df_custos_via_entrada = df_custos_sim_ent
                                         tot_c_aplicados = info_upsert_custo_ent["qtd_atualizados"] + info_upsert_custo_ent["qtd_inseridos"]
                                         str_val_ent = (
                                             f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
@@ -7118,7 +7454,7 @@ with aba1:
                                     else:
                                         str_val_ent = (
                                             f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
-                                            f"(Custos C1 mantidos s/ alteração conforme opção)"
+                                            f"(Custos C1 mantidos s/ alteração — 🔎 auditoria fiscal gerada)"
                                         )
                                 else:
                                     str_val_ent = ""
@@ -7402,8 +7738,9 @@ with aba1:
                                         mensagens_auditoria_upload.append(
                                             "🛡️ **Prioridade C1 & T1 Mantida:** O Custo C1 prevaleceu sobre o custo da NF (incluindo bonificações) e o Preço Tabela T1 foi atualizado."
                                         )
-                                    # Audita todos os ajustes de C1 & T1, cruzando com a NF recente e detectando defasagem de T1
-                                    limite_nf_rec_iso = (hoje_br() - timedelta(days=2)).strftime("%Y-%m-%d")
+                                    # Audita todos os ajustes de C1 & T1, cruzando com NFs na janela configurada (padrão 7 dias)
+                                    dt_ref_cruz_nf = max(hoje_br(), data_custos)
+                                    limite_nf_rec_iso = (dt_ref_cruz_nf - timedelta(days=int(janela_cruzamento_nf_c1_dias))).strftime("%Y-%m-%d")
                                     frames_ent_rec = []
                                     if not df_entradas_bruto.empty and "data" in df_entradas_bruto.columns:
                                         frames_ent_rec.append(df_entradas_bruto[df_entradas_bruto["data"] >= limite_nf_rec_iso])
@@ -7421,6 +7758,7 @@ with aba1:
                                         df_entradas_recentes=df_ent_rec_aud,
                                         registros_auditoria_nf=regs_nf_ref,
                                         limite_alerta_c1_sem_t1_pct=2.0,
+                                        tolerancia_frete_pct=float(tolerancia_frete_nf_c1_pct),
                                     )
                                     if not df_aj_c1_t1.empty:
                                         teve_alerta = True
@@ -7430,6 +7768,11 @@ with aba1:
                                         partes_aj = [
                                             f"📊 **Ajustes C1 & T1 ({data_custos.strftime('%d/%m')}):** {formatar_num_br(resumo_aj_c1_t1['total_ajustes'])} item(ns) com movimentação"
                                         ]
+                                        if resumo_aj_c1_t1.get("qtd_esquecimento_fiscal", 0) > 0:
+                                            ex_esq_str = ", ".join(resumo_aj_c1_t1["exemplos_esquecimento_fiscal"][:4])
+                                            partes_aj.append(
+                                                f"🚨 **{formatar_num_br(resumo_aj_c1_t1['qtd_esquecimento_fiscal'])} item(ns) com NF acima do C1 (Conferir Fiscal)** ({ex_esq_str})"
+                                            )
                                         if resumo_aj_c1_t1["qtd_defasagem_t1"] > 0:
                                             ex_def_str = ", ".join(resumo_aj_c1_t1["exemplos_defasagem_t1"][:4])
                                             partes_aj.append(
@@ -9598,6 +9941,169 @@ with aba5:
                 use_container_width=True,
                 hide_index=True,
             )
+
+    st.markdown("---")
+    st.markdown("#### 4. Auditoria Fiscal Permanente (Última NF × Custo C1 × Tabela T1)")
+    st.caption(
+        "Recalculada diretamente a partir das tabelas gravadas no Supabase (não some ao atualizar a página). "
+        "Compara o custo unitário da última NF de Entrada (`Fatu416`) com o **C1 Atual** e a **Tabela T1** para apontar "
+        "esquecimentos fiscais de atualização de custo, margens comprimidas e bonificações."
+    )
+    if df_entradas.empty:
+        st.info("Importe planilhas de Entradas (NF) na Aba 6 para ativar a auditoria fiscal permanente.")
+    else:
+        af1, af2, af3, af4 = st.columns([1.0, 1.0, 1.0, 1.6])
+        with af1:
+            janela_aud5_dias = st.number_input(
+                "📅 Janela NFs (dias):",
+                min_value=1,
+                max_value=120,
+                value=7,
+                step=1,
+                key="aud5_janela_nf_dias",
+                help="Padrão de 7 dias: analisa a entrada mais recente de cada SKU nos últimos 7 dias.",
+            )
+        with af2:
+            tol_aud5_pct = st.number_input(
+                "⚖️ Tolerância Frete/Imp. (%):",
+                min_value=0.0,
+                max_value=10.0,
+                value=1.5,
+                step=0.5,
+                key="aud5_tol_frete_pct",
+                help="Padrão de 1,5%: variações dentro dessa margem entre NF líquida e C1 são consideradas alinhadas.",
+            )
+        with af3:
+            margem_min_aud5 = st.number_input(
+                "🏷️ Margem T1 Mínima (%):",
+                min_value=0.0,
+                max_value=40.0,
+                value=5.0,
+                step=1.0,
+                key="aud5_margem_min_t1",
+                help="Alerta quando o custo da NF deixa a margem da Tabela T1 abaixo deste percentual.",
+            )
+        with af4:
+            busca_aud5_txt = st.text_input(
+                "🔍 Buscar produto na auditoria fiscal:",
+                placeholder="Digite código ou nome...",
+                key="aud5_busca_fiscal_txt",
+            )
+
+        df_aud5_full, res_aud5 = auditar_fiscal_permanente_nf_c1_t1(
+            df_entradas_ref=df_entradas,
+            df_custos_ref=df_custos_rel,
+            df_estoque_ref=df_estoque,
+            janela_dias_nf=int(janela_aud5_dias),
+            tolerancia_frete_pct=float(tol_aud5_pct),
+            margem_minima_t1_pct=float(margem_min_aud5),
+        )
+        if df_aud5_full.empty:
+            st.info(
+                f"Nenhuma entrada com valor financeiro (> R$ 0,00) encontrada nos últimos {int(janela_aud5_dias)} dia(s) "
+                f"(a partir de {res_aud5.get('data_corte_br', '-')})."
+            )
+        else:
+            q5_esq = int(res_aud5["qtd_esquecimento_fiscal"])
+            q5_mgt1 = int(res_aud5["qtd_margem_t1_baixa"])
+            q5_semc1 = int(res_aud5["qtd_sem_c1"])
+            q5_bonif = int(res_aud5["qtd_bonificacao"])
+            q5_red = int(res_aud5["qtd_reducao_nf"])
+            q5_alin = int(res_aud5["qtd_alinhados"])
+            qtd_pend_fiscal = len(df_aud5_full[df_aud5_full["_cat"] != "alinhado"])
+
+            fm1, fm2, fm3, fm4 = st.columns(4)
+            fm1.metric(
+                "🚨 NF Acima do C1 (Fiscal)",
+                formatar_num_br(q5_esq),
+                "Possível C1 desatualizado" if q5_esq > 0 else "Tudo atualizado",
+                delta_color="inverse" if q5_esq > 0 else "normal",
+            )
+            fm2.metric(
+                "⚠️ T1 Comprimido / Sem C1",
+                f"{formatar_num_br(q5_mgt1)} / {formatar_num_br(q5_semc1)}",
+                f"Margem < {formatar_num_br(margem_min_aud5, 0)}% / C1=0",
+            )
+            fm3.metric(
+                "📉 NF < C1 / 🎁 Bonificação",
+                f"{formatar_num_br(q5_red)} / {formatar_num_br(q5_bonif)}",
+                "Queda <30% / Queda ≥30%",
+            )
+            fm4.metric(
+                "✔️ Alinhados (NF ≈ C1)",
+                formatar_num_br(q5_alin),
+                f"De {formatar_num_br(res_aud5['total_itens_nf'])} SKUs (desde {res_aud5['data_corte_br']})",
+            )
+
+            fa5_1, fa5_2 = st.columns([2.2, 1.0])
+            with fa5_1:
+                filtro_cat_aud5 = st.selectbox(
+                    "Filtrar diagnóstico fiscal:",
+                    options=[
+                        f"🔎 Todas as Divergências & Alertas ({qtd_pend_fiscal})",
+                        f"🚨 Apenas NF Acima do C1 — Esquecimento Fiscal ({q5_esq})",
+                        f"⚠️ Apenas Tabela T1 Comprimida (< {formatar_num_br(margem_min_aud5, 0)}%) ({q5_mgt1})",
+                        f"⚪ Apenas Sem C1 Cadastrado ({q5_semc1})",
+                        f"📉 Apenas Custo NF Menor que C1 ({q5_red})",
+                        f"🎁 Apenas Bonificação / Queda ≥ 30% ({q5_bonif})",
+                        f"📋 Todos os Itens com NF no Período ({res_aud5['total_itens_nf']})",
+                    ],
+                    index=0 if qtd_pend_fiscal > 0 else 6,
+                    key="sel_filtro_cat_aud5",
+                )
+            df_aud5_view = df_aud5_full.copy()
+            if filtro_cat_aud5.startswith("🔎 Todas as Divergências"):
+                df_aud5_view = df_aud5_view[df_aud5_view["_cat"] != "alinhado"].copy()
+            elif filtro_cat_aud5.startswith("🚨 Apenas NF Acima"):
+                df_aud5_view = df_aud5_view[df_aud5_view["_cat"] == "esquecimento_fiscal"].copy()
+            elif filtro_cat_aud5.startswith("⚠️ Apenas Tabela T1"):
+                df_aud5_view = df_aud5_view[df_aud5_view["_t1_comp"] == True].copy()
+            elif filtro_cat_aud5.startswith("⚪ Apenas Sem C1"):
+                df_aud5_view = df_aud5_view[df_aud5_view["_cat"] == "sem_c1"].copy()
+            elif filtro_cat_aud5.startswith("📉 Apenas Custo NF"):
+                df_aud5_view = df_aud5_view[df_aud5_view["_cat"] == "reducao_nf"].copy()
+            elif filtro_cat_aud5.startswith("🎁 Apenas Bonificação"):
+                df_aud5_view = df_aud5_view[df_aud5_view["_cat"] == "bonificacao"].copy()
+
+            if busca_aud5_txt and busca_aud5_txt.strip():
+                t_a5 = busca_aud5_txt.lower().strip()
+                df_aud5_view = df_aud5_view[
+                    df_aud5_view["Código"].str.lower().str.contains(t_a5, na=False, regex=False)
+                    | df_aud5_view["Descrição"].str.lower().str.contains(t_a5, na=False, regex=False)
+                ].copy()
+
+            df_aud5_exib = df_aud5_view.drop(columns=["_prio", "_abs_var", "_cat", "_t1_comp"]).reset_index(drop=True)
+            with fa5_2:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                st.download_button(
+                    label="📥 Baixar Auditoria Fiscal (.xlsx)",
+                    data=gerar_excel_relatorio(df_aud5_exib, "Auditoria_Fiscal_NF_C1_T1"),
+                    file_name=f"Auditoria_Fiscal_NF_C1_T1_{hoje_br().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_auditoria_fiscal_perm_aba5",
+                )
+            if df_aud5_exib.empty:
+                st.success("✅ Nenhuma inconsistência fiscal encontrada para o filtro selecionado!")
+            else:
+                st.dataframe(
+                    estilizar_tabela_br(
+                        df_aud5_exib,
+                        formatadores={
+                            "Qtd. NF": formatar_qtd_br,
+                            "Custo Unit. NF (R$)": formatar_moeda_br,
+                            "Custo C1 Atual (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "Var. NF vs C1 (%)": lambda x: "0,0%" if (pd.isna(x) or abs(float(x)) < 0.05) else formatar_pct_br(x, 1, com_sinal=True),
+                            "Tabela T1 Atual (R$)": lambda x: "-" if (pd.isna(x) or float(x) <= 0.0) else formatar_moeda_br(x),
+                            "Margem T1 s/ NF (%)": lambda x: "-" if (pd.isna(x) or float(x) == 0.0) else formatar_pct_br(x, 1),
+                            "Saldo Estoque": formatar_qtd_br,
+                        },
+                        colunas_esquerda=["Descrição", "Diagnóstico Fiscal"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=340,
+                )
 
 # ------------------------------------------------------------------------------
 # ABA 6: GERENCIADOR DE PRODUTOS OCULTOS (100% NUVEM)
