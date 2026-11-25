@@ -79,6 +79,40 @@ from analytics import (
 
 
 # ==============================================================================
+# 0. AUXILIARES DE RESET DINÂMICO DE UPLOADERS & LOTE "TUDO OU NADA"
+# ==============================================================================
+def _obter_chave_uploader(nome_base: str) -> str:
+    """Gera chave dinâmica versionada na sessão para limpar a caixa somente após sucesso total."""
+    versao = int(st.session_state.get(f"_ver_uploader_{nome_base}", 0))
+    return f"{nome_base}_v{versao}"
+
+
+def _limpar_uploaders(*nomes_base: str) -> None:
+    """Renova a chave dinâmica das caixas informadas para zerar os arquivos no próximo rerun."""
+    for nome_b in nomes_base:
+        chave_ver = f"_ver_uploader_{nome_b}"
+        st.session_state[chave_ver] = int(st.session_state.get(chave_ver, 0)) + 1
+
+
+def _normalizar_lista_uploaders(arquivos) -> list:
+    """Normaliza retorno de st.file_uploader (None, arquivo único ou lista) em lista limpa."""
+    if arquivos is None:
+        return []
+    if isinstance(arquivos, list):
+        return [a for a in arquivos if a is not None]
+    return [arquivos]
+
+
+def _formatar_data_iso_br(data_iso: str) -> str:
+    """Converte YYYY-MM-DD (ou timestamp) para DD/MM/AAAA de forma segura."""
+    txt = str(data_iso or "").strip()
+    if not txt:
+        return ""
+    dt_p = pd.to_datetime(txt[:10], format="%Y-%m-%d", errors="coerce")
+    return dt_p.strftime("%d/%m/%Y") if pd.notna(dt_p) else txt
+
+
+# ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA E VISUAL SAAS DARK NEON BENTO UI (ALTO CONTRASTE)
 # ==============================================================================
 st.set_page_config(
@@ -585,6 +619,21 @@ ultima_data_custos_t1 = str(estado.get("ultima_data_custos_t1", "")).strip()
 st.session_state["ultima_data_custos_t1_sessao"] = ultima_data_custos_t1
 ultimo_backup_semanal = str(estado.get("ultimo_backup_semanal", "")).strip()
 st.session_state["ultimo_backup_semanal_sessao"] = ultimo_backup_semanal
+
+# Carrega horários individuais da última importação bem-sucedida por caixa (do banco/meta)
+ultimas_att_caixas = dict(estado.get("ultimas_atualizacoes_caixas", {}))
+df_meta_ref_caixas = estado.get("df_meta_bruto", pd.DataFrame())
+if (
+    df_meta_ref_caixas is not None
+    and not df_meta_ref_caixas.empty
+    and "chave" in df_meta_ref_caixas.columns
+    and "valor" in df_meta_ref_caixas.columns
+):
+    mapa_meta_caixas = dict(zip(df_meta_ref_caixas["chave"].astype(str), df_meta_ref_caixas["valor"].astype(str)))
+    for nome_cx in ("estoque", "entradas", "saidas", "custos", "base"):
+        val_cx = str(mapa_meta_caixas.get(f"ult_att_{nome_cx}", "")).strip()
+        if val_cx and not ultimas_att_caixas.get(nome_cx):
+            ultimas_att_caixas[nome_cx] = val_cx
 
 
 def _on_download_backup_confirmado():
@@ -2496,7 +2545,7 @@ with aba1:
                 arq_migracao_banco = st.file_uploader(
                     "Selecionar arquivo de backup completo (.xlsx ou .zip):",
                     type=["xlsx", "zip"],
-                    key="up_migracao_completa_supabase",
+                    key=_obter_chave_uploader("up_migracao_completa_supabase"),
                 )
             with cmig2:
                 st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
@@ -2513,6 +2562,7 @@ with aba1:
                         resumo_mig = migrar_arquivo_banco_para_supabase(db_supabase, arq_migracao_banco)
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
+                        _limpar_uploaders("up_migracao_completa_supabase")
                         carregar_estado_completo.clear()
                         calcular_motor_giro_sazonal.clear()
                         detalhes_mig = ", ".join(
@@ -2521,9 +2571,12 @@ with aba1:
                         st.session_state["msg_sucesso_sync"] = (
                             f"✅ Banco de dados migrado com sucesso para o Supabase PostgreSQL! Tabelas importadas: {detalhes_mig}."
                         )
+                        st.session_state["toast_sucesso_sync"] = "Backup completo restaurado no Supabase com sucesso!"
                         st.rerun()
                     except Exception as erro_mig:
-                        st.error(f"❌ Erro ao migrar banco para o Supabase: {erro_mig}")
+                        st.error(f"❌ Erro ao migrar banco para o Supabase (arquivo mantido para revisão): {erro_mig}")
+        if "toast_sucesso_sync" in st.session_state:
+            st.toast(st.session_state.pop("toast_sucesso_sync"), icon="✅")
         if "msg_sucesso_sync" in st.session_state:
             st.success(st.session_state.pop("msg_sucesso_sync"))
         if "aviso_duplicatas_sync" in st.session_state:
@@ -2642,7 +2695,7 @@ with aba1:
                 st.caption(
                     "Comparação entre o **Preço Tabela Oficial (T1)** e o **Preço Vendido no Balcão** (sem sobrescrever nenhum dos dois). "
                     "O padrão normal do sistema é até 2,1%; abaixo estão os itens vendidos com desconto superior a **5,0%** "
-                    "(o histórico permanente também fica sempre disponível na **Aba 5 — Seção 5** e na **Aba 1 — Seção 5**)."
+                    "(o histórico permanente também fica sempre disponível na **Aba 5 — Seção 5** e na **Aba 6 — Seção 5**)."
                 )
                 st.download_button(
                     label="📥 Baixar Conferência de Descontos > 5% (.xlsx)",
@@ -2734,6 +2787,33 @@ with aba1:
                     hide_index=True,
                     height=260,
                 )
+        # Monta textos discretos de "Última atualização" por caixa a partir do banco
+        ult_est_txt = ultimas_att_caixas.get("estoque", "")
+        if not ult_est_txt and not df_estoque_bruto.empty and "data" in df_estoque_bruto.columns:
+            dts_e = sorted([str(d).strip() for d in df_estoque_bruto["data"].unique() if str(d).strip()])
+            if dts_e:
+                ult_est_txt = f"Posição de {_formatar_data_iso_br(dts_e[-1])}"
+
+        ult_ent_txt = ultimas_att_caixas.get("entradas", "")
+        if not ult_ent_txt and not df_entradas_bruto.empty and "data" in df_entradas_bruto.columns:
+            dts_n = sorted([str(d).strip() for d in df_entradas_bruto["data"].unique() if str(d).strip()])
+            if dts_n:
+                ult_ent_txt = f"Última NF em {_formatar_data_iso_br(dts_n[-1])}"
+
+        ult_sai_txt = ultimas_att_caixas.get("saidas", "")
+        if not ult_sai_txt and not df_saidas_bruto.empty and "data" in df_saidas_bruto.columns:
+            dts_s = sorted([str(d).strip() for d in df_saidas_bruto["data"].unique() if str(d).strip()])
+            if dts_s:
+                ult_sai_txt = f"Última saída em {_formatar_data_iso_br(dts_s[-1])}"
+
+        ult_cus_txt = ultimas_att_caixas.get("custos", "")
+        if not ult_cus_txt and ultima_data_custos_t1:
+            ult_cus_txt = f"Tabela de {_formatar_data_iso_br(ultima_data_custos_t1)}"
+
+        ult_base_txt = ultimas_att_caixas.get("base", "")
+        if not ult_base_txt and not df_base_vendas.empty:
+            ult_base_txt = f"{formatar_num_br(len(df_base_vendas))} SKUs carregados"
+
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown(
@@ -2751,10 +2831,16 @@ with aba1:
                 unsafe_allow_html=True,
             )
             data_posicao = st.date_input("Data desta posição de estoque:", value=hoje_br())
-            arq_estoque = st.file_uploader(
+            arq_estoque_raw = st.file_uploader(
                 "Selecionar Estoque (.xlsx, .xls ou .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="up_estoque",
+                accept_multiple_files=True,
+                key=_obter_chave_uploader("up_estoque"),
+            )
+            st.caption(
+                f"🕒 Última atualização: **{ult_est_txt}**"
+                if ult_est_txt
+                else "🕒 Última atualização: Nenhuma importação registrada ainda."
             )
         with c2:
             st.markdown(
@@ -2774,10 +2860,16 @@ with aba1:
                 value=hoje_br() - timedelta(days=1),
                 key="dt_entrada_aba1",
             )
-            arq_entradas = st.file_uploader(
+            arq_entradas_raw = st.file_uploader(
                 "Selecionar Entradas (.xlsx, .xls ou .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="up_entradas",
+                accept_multiple_files=True,
+                key=_obter_chave_uploader("up_entradas"),
+            )
+            st.caption(
+                f"🕒 Última atualização: **{ult_ent_txt}**"
+                if ult_ent_txt
+                else "🕒 Última atualização: Nenhuma importação registrada ainda."
             )
             somar_entradas_mesmo_dia = st.checkbox(
                 "➕ Somar ao dia se já houver entrada nesta data",
@@ -2809,10 +2901,16 @@ with aba1:
                 value=hoje_br() - timedelta(days=1),
                 key="dt_saida_aba1",
             )
-            arq_saidas = st.file_uploader(
+            arq_saidas_raw = st.file_uploader(
                 "Selecionar Saídas (.xlsx, .xls ou .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="up_saidas",
+                accept_multiple_files=True,
+                key=_obter_chave_uploader("up_saidas"),
+            )
+            st.caption(
+                f"🕒 Última atualização: **{ult_sai_txt}**"
+                if ult_sai_txt
+                else "🕒 Última atualização: Nenhuma importação registrada ainda."
             )
             somar_saidas_mesmo_dia = st.checkbox(
                 "➕ Somar ao dia se já houver saída nesta data",
@@ -2838,18 +2936,17 @@ with aba1:
                 value=hoje_br(),
                 key="dt_custos_aba1",
             )
-            arq_custos = st.file_uploader(
+            arq_custos_raw = st.file_uploader(
                 "Selecionar Custo Preço (.xlsx, .xls ou .csv)",
                 type=["xlsx", "xls", "csv"],
-                key="up_custos",
+                accept_multiple_files=True,
+                key=_obter_chave_uploader("up_custos"),
             )
-            if ultima_data_custos_t1:
-                dt_c1_disp = pd.to_datetime(ultima_data_custos_t1, format="%Y-%m-%d", errors="coerce")
-                str_c1_disp = dt_c1_disp.strftime("%d/%m/%Y") if pd.notna(dt_c1_disp) else ultima_data_custos_t1
-                st.caption(f"📅 Última carga C1/T1 no banco: **{str_c1_disp}** | C1 sobrescreve NF.")
+            if ult_cus_txt:
+                st.caption(f"🕒 Última atualização: **{ult_cus_txt}** | C1 sobrescreve NF.")
             else:
                 st.caption(
-                    "🛡️ C1 sobrescreve o custo da NF (neutraliza bonificação) e T1 audita descontos > 5%."
+                    "🕒 Última atualização: Nenhuma carga C1/T1 registrada ainda."
                 )
         with st.expander("📦 Base Inicial Histórica de Vendas (Apoio Opcional)", expanded=False):
             cb1, cb2 = st.columns([0.8, 1.8])
@@ -2862,10 +2959,16 @@ with aba1:
                     step=1,
                 )
             with cb2:
-                arq_base = st.file_uploader(
+                arq_base_raw = st.file_uploader(
                     "Base Inicial de Vendas (Código, Descrição, Qtd. Vendida):",
                     type=["xlsx", "xls", "csv"],
-                    key="up_base",
+                    accept_multiple_files=True,
+                    key=_obter_chave_uploader("up_base"),
+                )
+                st.caption(
+                    f"🕒 Última atualização: **{ult_base_txt}**"
+                    if ult_base_txt
+                    else "🕒 Última atualização: Nenhuma base inicial importada ainda."
                 )
         with st.expander("⚙️ Opções Avançadas de Auditoria Fiscal & Exceção de Travas", expanded=False):
             ca_f1, ca_f2, ca_f3 = st.columns([1.2, 1.2, 1.6])
@@ -3024,6 +3127,7 @@ with aba1:
                         st.session_state["msg_sucesso_sync"] = (
                             f"✅ Versão anterior de `{aba_alvo_rest}` restaurada com sucesso ({formatar_num_br(qtd_rest)} registros)!"
                         )
+                        st.session_state["toast_sucesso_sync"] = f"Base {aba_alvo_rest} restaurada!"
                         st.rerun()
                     except Exception as erro_rest:
                         st.error(f"❌ Não foi possível restaurar `{aba_alvo_rest}`: {erro_rest}")
@@ -3077,27 +3181,40 @@ with aba1:
                         st.session_state["msg_sucesso_sync"] = (
                             f"✅ {formatar_num_br(qtd_apagadas)} linha(s) da data {data_del_escolhida} removida(s) de `{aba_del_escolhida}`!"
                         )
+                        st.session_state["toast_sucesso_sync"] = f"Data {data_del_escolhida} excluída!"
                         st.rerun()
                     except Exception as erro_del_dt:
                         st.error(f"❌ Erro ao excluir data: {erro_del_dt}")
         if btn_sincronizar:
+            arqs_estoque = _normalizar_lista_uploaders(arq_estoque_raw)
+            arqs_entradas = _normalizar_lista_uploaders(arq_entradas_raw)
+            arqs_saidas = _normalizar_lista_uploaders(arq_saidas_raw)
+            arqs_custos = _normalizar_lista_uploaders(arq_custos_raw)
+            arqs_base = _normalizar_lista_uploaders(arq_base_raw)
+
             if (
-                not any([arq_estoque, arq_entradas, arq_saidas, arq_custos, arq_base])
+                not any([arqs_estoque, arqs_entradas, arqs_saidas, arqs_custos, arqs_base])
                 and int(dias_base_input) == int(dias_base_atual)
             ):
                 st.warning("⚠️ Selecione pelo menos uma planilha para importar ou altere o período da base.")
             else:
                 abas_ja_gravadas = []
-                with st.spinner("Validando colunas, códigos e saldos antes de sincronizar com o Supabase..."):
+                caixas_para_limpar = []
+                resumo_toast_partes = []
+                hashes_snapshot = {
+                    k_snap: list(v_snap)
+                    for k_snap, v_snap in st.session_state.get("hashes_soma_por_data", {}).items()
+                }
+                with st.spinner("Validando todos os arquivos do lote (regra Tudo ou Nada) antes de gravar no Supabase..."):
                     try:
-                        if arq_estoque is not None and not ignorar_trava_data:
-                            if arq_entradas is not None and data_entrada >= data_posicao:
+                        if arqs_estoque and not ignorar_trava_data:
+                            if arqs_entradas and data_entrada >= data_posicao:
                                 raise ValueError(
                                     f"Trava de Coerência Temporal: A data das **Entradas ({data_entrada.strftime('%d/%m/%Y')})** "
                                     f"não pode ser igual ou posterior à **Posição de Estoque Inicial ({data_posicao.strftime('%d/%m/%Y')})** "
                                     f"enviada no mesmo lote. Se as entradas são do dia anterior, selecione **{(data_posicao - timedelta(days=1)).strftime('%d/%m/%Y')}**."
                                 )
-                            if arq_saidas is not None and data_saida >= data_posicao:
+                            if arqs_saidas and data_saida >= data_posicao:
                                 raise ValueError(
                                     f"Trava de Coerência Temporal: A data das **Saídas ({data_saida.strftime('%d/%m/%Y')})** "
                                     f"não pode ser igual ou posterior à **Posição de Estoque Inicial ({data_posicao.strftime('%d/%m/%Y')})** "
@@ -3120,13 +3237,53 @@ with aba1:
                         novos_custos = None
                         nova_base = None
                         atualizar_aba_estoque_atual = True
-                        if arq_estoque is not None:
-                            novo_estoque, info_dup_est = processar_planilha_estoque(
-                                arq_estoque,
-                                data_posicao,
-                                codigos_ref=codigos_ref_estoque,
-                                ignorar_trava_catalogo=ignorar_trava_catalogo,
-                                ignorar_trava_data=ignorar_trava_data,
+
+                        # ------------------------------------------------------
+                        # CAIXA 1: ESTOQUE (Validação Tudo ou Nada para 1..N arquivos)
+                        # ------------------------------------------------------
+                        if arqs_estoque:
+                            frames_est_lote = []
+                            tot_lidas_est = 0
+                            tot_dup_est = 0
+                            exemplos_dup_est = []
+                            avisos_sem_dt_est = []
+                            for idx_e, arq_e_item in enumerate(arqs_estoque, 1):
+                                try:
+                                    df_e_i, info_e_i = processar_planilha_estoque(
+                                        arq_e_item,
+                                        data_posicao,
+                                        codigos_ref=codigos_ref_estoque,
+                                        ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                        ignorar_trava_data=ignorar_trava_data,
+                                    )
+                                except Exception as erro_item_e:
+                                    prefixo_lote = (
+                                        f"[Caixa Estoque — Arquivo {idx_e}/{len(arqs_estoque)}: '{arq_e_item.name}'] "
+                                        if len(arqs_estoque) > 1
+                                        else f"[Caixa Estoque: '{arq_e_item.name}'] "
+                                    )
+                                    raise ValueError(
+                                        f"{prefixo_lote}{erro_item_e} (Nenhum arquivo do lote foi gravado — corrija e tente novamente)."
+                                    ) from erro_item_e
+                                frames_est_lote.append(df_e_i)
+                                tot_lidas_est += int(info_e_i["linhas_lidas"])
+                                tot_dup_est += int(info_e_i["qtd_duplicadas"])
+                                exemplos_dup_est.extend(info_e_i.get("exemplos", []))
+                                if info_e_i.get("aviso_sem_data"):
+                                    avisos_sem_dt_est.append(info_e_i["aviso_sem_data"])
+
+                            novo_estoque = pd.concat(frames_est_lote, ignore_index=True)
+                            if len(arqs_estoque) > 1:
+                                dup_inter_est = int(novo_estoque.duplicated(subset=["codigo", "lote"], keep="last").sum())
+                                tot_dup_est += dup_inter_est
+                                novo_estoque = (
+                                    novo_estoque.drop_duplicates(subset=["codigo", "lote"], keep="last")
+                                    .reset_index(drop=True)
+                                )
+                            taxa_coinc_est = (
+                                (len(set(novo_estoque["codigo"].unique()) & codigos_ref_estoque) / max(len(novo_estoque["codigo"].unique()), 1)) * 100.0
+                                if codigos_ref_estoque
+                                else 100.0
                             )
                             codigos_ref_geral = codigos_ref_geral | set(novo_estoque["codigo"].unique())
                             datas_est_existentes = (
@@ -3145,40 +3302,37 @@ with aba1:
                                     f"é anterior à Posição Atual do sistema (**{str_dt_at}**). Ele foi gravado apenas no **Histórico** "
                                     f"para compor o giro, mantendo o `estoque_atual` intacto em **{str_dt_at}**!"
                                 )
-                            if info_dup_est["qtd_duplicadas"] > 0:
+                            tag_arqs_est = f" ({len(arqs_estoque)} arqs)" if len(arqs_estoque) > 1 else ""
+                            if tot_dup_est > 0:
                                 teve_alerta = True
-                                amostra_txt = ", ".join(info_dup_est["exemplos"])
+                                amostra_txt = ", ".join(exemplos_dup_est[:5])
                                 mensagens_auditoria_upload.append(
-                                    f"⚠️ **Estoque:** {formatar_num_br(info_dup_est['qtd_duplicadas'])} linha(s) duplicada(s) de mesmo "
+                                    f"⚠️ **Estoque{tag_arqs_est}:** {formatar_num_br(tot_dup_est)} linha(s) duplicada(s) de mesmo "
                                     f"(Código + Lote) foram mescladas mantendo a última ocorrência "
-                                    f"({formatar_num_br(info_dup_est['linhas_lidas'])} lidas → {formatar_num_br(info_dup_est['linhas_finais'])} únicas | "
-                                    f"Coincidência: {formatar_pct_br(info_dup_est['taxa_coincidencia'])}). "
+                                    f"({formatar_num_br(tot_lidas_est)} lidas → {formatar_num_br(len(novo_estoque))} únicas | "
+                                    f"Coincidência: {formatar_pct_br(taxa_coinc_est)}). "
                                     f"Exemplos: {amostra_txt}"
                                 )
                             else:
                                 mensagens_auditoria_upload.append(
-                                    f"✔️ **Estoque ({data_posicao.strftime('%d/%m')}):** {formatar_num_br(info_dup_est['linhas_finais'])} linhas verificadas "
-                                    f"(0 duplicatas | {formatar_pct_br(info_dup_est['taxa_coincidencia'])} de códigos coincidentes)."
+                                    f"✔️ **Estoque ({data_posicao.strftime('%d/%m')}{tag_arqs_est}):** {formatar_num_br(len(novo_estoque))} linhas verificadas "
+                                    f"(0 duplicatas | {formatar_pct_br(taxa_coinc_est)} de códigos coincidentes)."
                                 )
-                            if info_dup_est.get("aviso_sem_data"):
+                            for av_e in dict.fromkeys(avisos_sem_dt_est):
                                 teve_alerta = True
-                                mensagens_auditoria_upload.append(info_dup_est["aviso_sem_data"])
+                                mensagens_auditoria_upload.append(av_e)
+                            caixas_para_limpar.append("up_estoque")
+                            resumo_toast_partes.append(f"Estoque: {formatar_num_br(len(novo_estoque))} linhas")
+
+                        # ------------------------------------------------------
+                        # CAIXA 2: ENTRADAS NF (Validação Tudo ou Nada para 1..N arquivos)
+                        # ------------------------------------------------------
                         df_custos_via_entrada = pd.DataFrame()
                         info_upsert_custo_ent = {}
-                        hash_arq_ent = ""
+                        hashes_lote_ent = []
                         ent_ja_somada_antes = False
-                        if arq_entradas is not None:
-                            hash_arq_ent = hashlib.sha256(arq_entradas.getvalue()).hexdigest()[:16]
-                            novas_entradas, info_ent = processar_planilha_movimento_diario(
-                                arquivo=arq_entradas,
-                                data_mov=data_entrada,
-                                nome_aba="entradas_diarias",
-                                col_qtd="qtd_entrada",
-                                rotulo_amigavel="Entradas Diárias",
-                                codigos_ref=codigos_ref_geral,
-                                ignorar_trava_catalogo=ignorar_trava_catalogo,
-                                ignorar_trava_data=ignorar_trava_data,
-                            )
+                        somar_ent_efetivo = bool(somar_entradas_mesmo_dia)
+                        if arqs_entradas:
                             dt_ent_iso = data_entrada.strftime("%Y-%m-%d")
                             chave_op_ent = f"entradas_diarias::{dt_ent_iso}"
                             hashes_ent_ja_no_dia = list(
@@ -3186,6 +3340,69 @@ with aba1:
                                     chave_op_ent, hashes_soma_meta.get(chave_op_ent, [])
                                 )
                             )
+                            frames_ent_lote = []
+                            frames_ext_c_lote = []
+                            soma_val_ent_lote = 0.0
+                            cols_val_ent_lote = []
+                            qtd_rep_ent_lote = 0
+                            qtd_extras_ent_lote = 0
+                            exemplos_rep_ent_lote = []
+                            avisos_sem_dt_ent = []
+
+                            for idx_n, arq_n_item in enumerate(arqs_entradas, 1):
+                                try:
+                                    df_n_i, info_n_i = processar_planilha_movimento_diario(
+                                        arquivo=arq_n_item,
+                                        data_mov=data_entrada,
+                                        nome_aba="entradas_diarias",
+                                        col_qtd="qtd_entrada",
+                                        rotulo_amigavel="Entradas Diárias",
+                                        codigos_ref=codigos_ref_geral,
+                                        ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                        ignorar_trava_data=ignorar_trava_data,
+                                    )
+                                except Exception as erro_item_n:
+                                    prefixo_lote = (
+                                        f"[Caixa Entradas — Arquivo {idx_n}/{len(arqs_entradas)}: '{arq_n_item.name}'] "
+                                        if len(arqs_entradas) > 1
+                                        else f"[Caixa Entradas: '{arq_n_item.name}'] "
+                                    )
+                                    raise ValueError(
+                                        f"{prefixo_lote}{erro_item_n} (Nenhum arquivo do lote foi gravado — corrija e tente novamente)."
+                                    ) from erro_item_n
+
+                                h_n_i = hashlib.sha256(arq_n_item.getvalue()).hexdigest()[:16]
+                                if h_n_i in hashes_lote_ent:
+                                    raise ValueError(
+                                        f"[Caixa Entradas — Arquivo {idx_n}/{len(arqs_entradas)}: '{arq_n_item.name}'] "
+                                        f"Arquivo duplicado dentro do mesmo lote selecionado. Remova a cópia repetida e tente novamente."
+                                    )
+                                hashes_lote_ent.append(h_n_i)
+                                frames_ent_lote.append(df_n_i)
+                                soma_val_ent_lote += float(info_n_i.get("soma_valor_entrada", 0.0))
+                                if info_n_i.get("coluna_valor_entrada"):
+                                    cols_val_ent_lote.append(info_n_i["coluna_valor_entrada"])
+                                df_c_i = info_n_i.get("df_custos_extraidos", pd.DataFrame())
+                                if df_c_i is not None and not df_c_i.empty:
+                                    frames_ext_c_lote.append(df_c_i)
+                                qtd_rep_ent_lote += int(info_n_i.get("qtd_codigos_repetidos", 0))
+                                qtd_extras_ent_lote += int(info_n_i.get("qtd_linhas_extras", 0))
+                                exemplos_rep_ent_lote.extend(info_n_i.get("exemplos_repetidos", []))
+                                if info_n_i.get("aviso_sem_data"):
+                                    avisos_sem_dt_ent.append(info_n_i["aviso_sem_data"])
+
+                            # Consolida todos os arquivos do lote de Entradas somando por SKU
+                            novas_entradas = (
+                                pd.concat(frames_ent_lote, ignore_index=True)
+                                .groupby(["data", "codigo"], as_index=False)
+                                .agg(
+                                    descricao=("descricao", "last"),
+                                    qtd_entrada=("qtd_entrada", "sum"),
+                                    valor_entrada=("valor_entrada", "sum"),
+                                )
+                            )
+                            novas_entradas = padronizar_dataframe(novas_entradas, "entradas_diarias")
+
                             if (
                                 somar_entradas_mesmo_dia
                                 and not df_entradas_bruto.empty
@@ -3199,20 +3416,44 @@ with aba1:
                                             hashes_ent_ja_no_dia.append(h_ant_e)
                                         for _, r_ea in df_ent_dia_atual.iterrows():
                                             hashes_ent_ja_no_dia.append(f"sku:{r_ea['codigo']}:{float(r_ea['qtd_entrada']):.4f}")
-                                    ent_ja_somada_antes, _ = _verificar_sobreposicao_soma_mesmo_dia(
-                                        df_existente_dia=df_ent_dia_atual,
-                                        df_novo_dia=novas_entradas,
-                                        col_qtd="qtd_entrada",
-                                        hashes_ja_no_dia=hashes_ent_ja_no_dia,
-                                        hash_efetivo=hash_arq_ent,
-                                        permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
-                                        rotulo_aba="Entradas",
-                                        data_ref_str=dt_ent_iso,
-                                    )
+                                    if len(arqs_entradas) == 1:
+                                        ent_ja_somada_antes, _ = _verificar_sobreposicao_soma_mesmo_dia(
+                                            df_existente_dia=df_ent_dia_atual,
+                                            df_novo_dia=novas_entradas,
+                                            col_qtd="qtd_entrada",
+                                            hashes_ja_no_dia=hashes_ent_ja_no_dia,
+                                            hash_efetivo=hashes_lote_ent[0],
+                                            permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
+                                            rotulo_aba="Entradas",
+                                            data_ref_str=dt_ent_iso,
+                                        )
+                                    else:
+                                        for idx_hn, h_sub in enumerate(hashes_lote_ent, 1):
+                                            if h_sub in hashes_ent_ja_no_dia:
+                                                raise ValueError(
+                                                    f"[Caixa Entradas — Arquivo {idx_hn}/{len(arqs_entradas)}: '{arqs_entradas[idx_hn - 1].name}'] "
+                                                    f"Este arquivo exato já havia sido somado na data {data_entrada.strftime('%d/%m/%Y')}. "
+                                                    f"Nenhum arquivo do lote foi gravado."
+                                                )
 
-                            modo_ent_str = "somadas ao dia" if somar_entradas_mesmo_dia else "gravadas"
-                            col_val_ent_nome = info_ent.get("coluna_valor_entrada", "")
-                            df_ext_c = info_ent.get("df_custos_extraidos", pd.DataFrame()).copy()
+                            tag_arqs_ent = f" ({len(arqs_entradas)} arqs)" if len(arqs_entradas) > 1 else ""
+                            modo_ent_str = (
+                                f"somadas ao dia{tag_arqs_ent}"
+                                if somar_entradas_mesmo_dia
+                                else (f"consolidadas ({len(arqs_entradas)} arqs)" if len(arqs_entradas) > 1 else "gravadas")
+                            )
+                            col_val_ent_nome = cols_val_ent_lote[0] if cols_val_ent_lote else ""
+                            df_ext_c = pd.DataFrame()
+                            if soma_val_ent_lote > 0:
+                                df_pos_c = novas_entradas[
+                                    (novas_entradas["qtd_entrada"] > 0) & (novas_entradas["valor_entrada"] > 0)
+                                ][["codigo", "descricao", "qtd_entrada", "valor_entrada"]].copy()
+                                if not df_pos_c.empty:
+                                    df_pos_c["custo_unitario"] = (df_pos_c["valor_entrada"] / df_pos_c["qtd_entrada"]).round(4)
+                                    df_ext_c = df_pos_c[["codigo", "descricao", "custo_unitario"]].copy()
+                            elif frames_ext_c_lote:
+                                df_ext_c = pd.concat(frames_ext_c_lote, ignore_index=True).drop_duplicates(subset=["codigo"], keep="last")
+
                             if (
                                 somar_entradas_mesmo_dia
                                 and (not ent_ja_somada_antes)
@@ -3247,10 +3488,10 @@ with aba1:
                                 teve_alerta = True
                                 mensagens_auditoria_upload.append(
                                     f"🛡️ **Proteção contra Soma Duplicada (Entradas {data_entrada.strftime('%d/%m')}):** "
-                                    f"Este arquivo exato (`{arq_entradas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as quantidades!"
+                                    f"Este arquivo exato (`{arqs_entradas[0].name}`) já havia sido somado nesta data e foi ignorado para não dobrar as quantidades!"
                                 )
                             else:
-                                if info_ent.get("soma_valor_entrada", 0.0) > 0 and not df_ext_c.empty:
+                                if soma_val_ent_lote > 0 and not df_ext_c.empty:
                                     rot_col_e = f" (coluna '{col_val_ent_nome}')" if col_val_ent_nome else ""
                                     df_custos_sim_ent, info_upsert_custo_ent = atualizar_custos_via_entradas_df(
                                         df_custos_atual=df_custos,
@@ -3264,19 +3505,19 @@ with aba1:
                                         df_custos_via_entrada = df_custos_sim_ent
                                         tot_c_aplicados = info_upsert_custo_ent["qtd_atualizados"] + info_upsert_custo_ent["qtd_inseridos"]
                                         str_val_ent = (
-                                            f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                            f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(soma_val_ent_lote)} "
                                             f"➔ 💰 **{formatar_num_br(tot_c_aplicados)} custo(s) unitário(s) atualizado(s)**"
                                         )
                                     else:
                                         str_val_ent = (
-                                            f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(info_ent['soma_valor_entrada'])} "
+                                            f" | Valor Total NF{rot_col_e}: {formatar_moeda_br(soma_val_ent_lote)} "
                                             f"(Custos C1 mantidos s/ alteração — 🔎 auditoria fiscal gerada)"
                                         )
                                 else:
                                     str_val_ent = ""
                                 mensagens_auditoria_upload.append(
-                                    f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(info_ent['total_itens'])} SKUs {modo_ent_str} "
-                                    f"(Soma: {formatar_qtd_br(info_ent['soma_qtd'])} un.{str_val_ent})."
+                                    f"✔️ **Entradas ({data_entrada.strftime('%d/%m')}):** {formatar_num_br(len(novas_entradas))} SKUs {modo_ent_str} "
+                                    f"(Soma: {formatar_qtd_br(float(novas_entradas['qtd_entrada'].sum()))} un.{str_val_ent})."
                                 )
                             if info_upsert_custo_ent.get("qtd_ignorados_data_antiga", 0) > 0:
                                 teve_alerta = True
@@ -3302,51 +3543,223 @@ with aba1:
                                     f"⚠️ **Alerta de Variação de Custo (> 20%) na Entrada:** {formatar_num_br(info_upsert_custo_ent['qtd_alertas_variacao'])} produto(s) "
                                     f"tiveram alteração brusca em relação ao custo anterior: {ex_var_c}. Confira se a unidade da NF está correta!"
                                 )
-                            if info_ent.get("qtd_codigos_repetidos", 0) > 0 and not ent_ja_somada_antes:
+                            if qtd_rep_ent_lote > 0 and not ent_ja_somada_antes:
                                 teve_alerta = True
-                                ex_rep_ent = ", ".join(info_ent["exemplos_repetidos"])
+                                ex_rep_ent = ", ".join(exemplos_rep_ent_lote[:5])
                                 mensagens_auditoria_upload.append(
-                                    f"⚠️ **Entradas (Linhas Repetidas Somadas):** {formatar_num_br(info_ent['qtd_codigos_repetidos'])} produto(s) "
-                                    f"apareceram mais de uma vez na planilha ({formatar_num_br(info_ent['qtd_linhas_extras'])} linha(s) extra) e tiveram "
+                                    f"⚠️ **Entradas (Linhas Repetidas Somadas):** {formatar_num_br(qtd_rep_ent_lote)} produto(s) "
+                                    f"apareceram mais de uma vez na planilha ({formatar_num_br(qtd_extras_ent_lote)} linha(s) extra) e tiveram "
                                     f"suas quantidades somadas: {ex_rep_ent}."
                                 )
-                            if info_ent.get("aviso_sem_data"):
+                            for av_n in dict.fromkeys(avisos_sem_dt_ent):
                                 teve_alerta = True
-                                mensagens_auditoria_upload.append(info_ent["aviso_sem_data"])
-                        if arq_saidas is not None:
-                            novas_saidas, info_sai = processar_planilha_movimento_diario(
-                                arquivo=arq_saidas,
-                                data_mov=data_saida,
-                                nome_aba="saidas_diarias",
-                                col_qtd="qtd_saida",
-                                rotulo_amigavel="Saídas Diárias",
-                                codigos_ref=codigos_ref_geral,
-                                ignorar_trava_catalogo=ignorar_trava_catalogo,
-                                ignorar_trava_data=ignorar_trava_data,
+                                mensagens_auditoria_upload.append(av_n)
+                            caixas_para_limpar.append("up_entradas")
+                            resumo_toast_partes.append(f"Entradas: {formatar_num_br(len(novas_entradas))} SKUs")
+
+                        # ------------------------------------------------------
+                        # CAIXA 3: SAÍDAS / VENDAS (Validação Tudo ou Nada para 1..N arquivos)
+                        # ------------------------------------------------------
+                        hashes_lote_sai = []
+                        if arqs_saidas:
+                            dt_sai_iso_check = data_saida.strftime("%Y-%m-%d")
+                            chave_op_sai = f"saidas_diarias::{dt_sai_iso_check}"
+                            hashes_sai_ja_no_dia = list(
+                                st.session_state.get("hashes_soma_por_data", {}).get(
+                                    chave_op_sai, hashes_soma_meta.get(chave_op_sai, [])
+                                )
                             )
-                            modo_sai_str = "somadas ao dia" if somar_saidas_mesmo_dia else "gravadas"
-                            col_val_nome = info_sai.get("coluna_valor_venda", "")
-                            if info_sai.get("soma_valor_venda", 0.0) > 0:
+                            frames_sai_lote = []
+                            soma_val_sai_lote = 0.0
+                            cols_val_sai_lote = []
+                            qtd_rep_sai_lote = 0
+                            qtd_extras_sai_lote = 0
+                            exemplos_rep_sai_lote = []
+                            avisos_sem_dt_sai = []
+
+                            for idx_s, arq_s_item in enumerate(arqs_saidas, 1):
+                                try:
+                                    df_s_i, info_s_i = processar_planilha_movimento_diario(
+                                        arquivo=arq_s_item,
+                                        data_mov=data_saida,
+                                        nome_aba="saidas_diarias",
+                                        col_qtd="qtd_saida",
+                                        rotulo_amigavel="Saídas Diárias",
+                                        codigos_ref=codigos_ref_geral,
+                                        ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                        ignorar_trava_data=ignorar_trava_data,
+                                    )
+                                except Exception as erro_item_s:
+                                    prefixo_lote = (
+                                        f"[Caixa Saídas — Arquivo {idx_s}/{len(arqs_saidas)}: '{arq_s_item.name}'] "
+                                        if len(arqs_saidas) > 1
+                                        else f"[Caixa Saídas: '{arq_s_item.name}'] "
+                                    )
+                                    raise ValueError(
+                                        f"{prefixo_lote}{erro_item_s} (Nenhum arquivo do lote foi gravado — corrija e tente novamente)."
+                                    ) from erro_item_s
+
+                                h_s_i = hashlib.sha256(arq_s_item.getvalue()).hexdigest()[:16]
+                                if h_s_i in hashes_lote_sai:
+                                    raise ValueError(
+                                        f"[Caixa Saídas — Arquivo {idx_s}/{len(arqs_saidas)}: '{arq_s_item.name}'] "
+                                        f"Arquivo duplicado dentro do mesmo lote selecionado. Remova a cópia repetida e tente novamente."
+                                    )
+                                if somar_saidas_mesmo_dia and h_s_i in hashes_sai_ja_no_dia:
+                                    raise ValueError(
+                                        f"[Caixa Saídas — Arquivo {idx_s}/{len(arqs_saidas)}: '{arq_s_item.name}'] "
+                                        f"Este arquivo exato já havia sido somado na data {data_saida.strftime('%d/%m/%Y')}. "
+                                        f"Nenhum arquivo do lote foi gravado."
+                                    )
+                                hashes_lote_sai.append(h_s_i)
+                                frames_sai_lote.append(df_s_i)
+                                soma_val_sai_lote += float(info_s_i.get("soma_valor_venda", 0.0))
+                                if info_s_i.get("coluna_valor_venda"):
+                                    cols_val_sai_lote.append(info_s_i["coluna_valor_venda"])
+                                qtd_rep_sai_lote += int(info_s_i.get("qtd_codigos_repetidos", 0))
+                                qtd_extras_sai_lote += int(info_s_i.get("qtd_linhas_extras", 0))
+                                exemplos_rep_sai_lote.extend(info_s_i.get("exemplos_repetidos", []))
+                                if info_s_i.get("aviso_sem_data"):
+                                    avisos_sem_dt_sai.append(info_s_i["aviso_sem_data"])
+
+                            novas_saidas = (
+                                pd.concat(frames_sai_lote, ignore_index=True)
+                                .groupby(["data", "codigo"], as_index=False)
+                                .agg(
+                                    descricao=("descricao", "last"),
+                                    qtd_saida=("qtd_saida", "sum"),
+                                    valor_venda=("valor_venda", "sum"),
+                                )
+                            )
+                            novas_saidas = padronizar_dataframe(novas_saidas, "saidas_diarias")
+
+                            tag_arqs_sai = f" ({len(arqs_saidas)} arqs)" if len(arqs_saidas) > 1 else ""
+                            modo_sai_str = (
+                                f"somadas ao dia{tag_arqs_sai}"
+                                if somar_saidas_mesmo_dia
+                                else (f"consolidadas ({len(arqs_saidas)} arqs)" if len(arqs_saidas) > 1 else "gravadas")
+                            )
+                            col_val_nome = cols_val_sai_lote[0] if cols_val_sai_lote else ""
+                            if soma_val_sai_lote > 0:
                                 rot_col_fat = f" (coluna '{col_val_nome}')" if col_val_nome else ""
-                                str_fat_sai = f" | Faturamento Bruto{rot_col_fat}: {formatar_moeda_br(info_sai['soma_valor_venda'])}"
+                                str_fat_sai = f" | Faturamento Bruto{rot_col_fat}: {formatar_moeda_br(soma_val_sai_lote)}"
                             else:
                                 str_fat_sai = " | Sem coluna de faturamento"
                             mensagens_auditoria_upload.append(
-                                f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(info_sai['total_itens'])} SKUs {modo_sai_str} "
-                                f"(Soma: {formatar_qtd_br(info_sai['soma_qtd'])} un.{str_fat_sai})."
+                                f"✔️ **Saídas ({data_saida.strftime('%d/%m')}):** {formatar_num_br(len(novas_saidas))} SKUs {modo_sai_str} "
+                                f"(Soma: {formatar_qtd_br(float(novas_saidas['qtd_saida'].sum()))} un.{str_fat_sai})."
                             )
-                            if info_sai.get("qtd_codigos_repetidos", 0) > 0:
+                            if qtd_rep_sai_lote > 0:
                                 teve_alerta = True
-                                ex_rep_sai = ", ".join(info_sai["exemplos_repetidos"])
+                                ex_rep_sai = ", ".join(exemplos_rep_sai_lote[:5])
                                 mensagens_auditoria_upload.append(
-                                    f"⚠️ **Saídas (Linhas Repetidas Somadas):** {formatar_num_br(info_sai['qtd_codigos_repetidos'])} produto(s) "
-                                    f"apareceram mais de uma vez na planilha ({formatar_num_br(info_sai['qtd_linhas_extras'])} linha(s) extra) e tiveram "
+                                    f"⚠️ **Saídas (Linhas Repetidas Somadas):** {formatar_num_br(qtd_rep_sai_lote)} produto(s) "
+                                    f"apareceram mais de uma vez na planilha ({formatar_num_br(qtd_extras_sai_lote)} linha(s) extra) e tiveram "
                                     f"suas quantidades somadas: {ex_rep_sai}."
                                 )
-                            if info_sai.get("aviso_sem_data"):
+                            for av_s in dict.fromkeys(avisos_sem_dt_sai):
                                 teve_alerta = True
-                                mensagens_auditoria_upload.append(info_sai["aviso_sem_data"])
-                            df_custos_ref_desc = novos_custos if (arq_custos is not None and "novos_custos" in locals() and novos_custos is not None) else df_custos
+                                mensagens_auditoria_upload.append(av_s)
+                            caixas_para_limpar.append("up_saidas")
+                            resumo_toast_partes.append(f"Saídas: {formatar_num_br(len(novas_saidas))} SKUs")
+
+                        # ------------------------------------------------------
+                        # CAIXA 4: CUSTOS C1 & TABELA T1 (Validação Tudo ou Nada para 1..N arquivos)
+                        # ------------------------------------------------------
+                        nova_ultima_data_custos_t1 = ultima_data_custos_t1
+                        if arqs_custos:
+                            dt_custos_iso = data_custos.strftime("%Y-%m-%d")
+                            if ultima_data_custos_t1 and dt_custos_iso < ultima_data_custos_t1 and not ignorar_trava_data:
+                                dt_ult_c_fmt = pd.to_datetime(ultima_data_custos_t1, format="%Y-%m-%d", errors="coerce")
+                                str_ult_c = dt_ult_c_fmt.strftime("%d/%m/%Y") if pd.notna(dt_ult_c_fmt) else ultima_data_custos_t1
+                                raise ValueError(
+                                    f"Trava de Data Retroativa (Custos C1 & Tabela T1): A última carga de C1 & T1 gravada no sistema "
+                                    f"é de **{str_ult_c}**, e você selecionou **{data_custos.strftime('%d/%m/%Y')}**. "
+                                    f"Para evitar sobrescrever os custos e preços atuais com uma tabela antiga, o envio foi bloqueado. "
+                                    f"Se realmente precisar reimportar uma data anterior, marque '📅 Ignorar trava de data no nome' nas Opções Avançadas."
+                                )
+                            frames_cus_lote = []
+                            qtd_dup_cus_lote = 0
+                            tem_col_t1_lote = False
+                            avisos_sem_dt_cus = []
+                            for idx_c, arq_c_item in enumerate(arqs_custos, 1):
+                                try:
+                                    df_c_i, info_c_i = processar_planilha_custos(
+                                        arq_c_item,
+                                        codigos_ref=codigos_ref_geral,
+                                        ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                        data_custos=data_custos,
+                                        ignorar_trava_data=ignorar_trava_data,
+                                    )
+                                except Exception as erro_item_c:
+                                    prefixo_lote = (
+                                        f"[Caixa Custos C1 & T1 — Arquivo {idx_c}/{len(arqs_custos)}: '{arq_c_item.name}'] "
+                                        if len(arqs_custos) > 1
+                                        else f"[Caixa Custos C1 & T1: '{arq_c_item.name}'] "
+                                    )
+                                    raise ValueError(
+                                        f"{prefixo_lote}{erro_item_c} (Nenhum arquivo do lote foi gravado — corrija e tente novamente)."
+                                    ) from erro_item_c
+                                frames_cus_lote.append(df_c_i)
+                                qtd_dup_cus_lote += int(info_c_i.get("qtd_duplicadas", 0))
+                                if info_c_i.get("tem_coluna_t1", False):
+                                    tem_col_t1_lote = True
+                                if info_c_i.get("aviso_sem_data"):
+                                    avisos_sem_dt_cus.append(info_c_i["aviso_sem_data"])
+
+                            novos_custos = pd.concat(frames_cus_lote, ignore_index=True)
+                            if len(arqs_custos) > 1:
+                                qtd_dup_cus_lote += int(novos_custos.duplicated(subset=["codigo"], keep="last").sum())
+                                novos_custos = novos_custos.drop_duplicates(subset=["codigo"], keep="last").reset_index(drop=True)
+                            novos_custos = padronizar_dataframe(novos_custos, "custos")
+
+                            nova_ultima_data_custos_t1 = max(ultima_data_custos_t1, dt_custos_iso) if ultima_data_custos_t1 else dt_custos_iso
+                            if (not tem_col_t1_lote) and (not df_custos.empty) and ("preco_tabela" in df_custos.columns):
+                                mapa_t1_prev = dict(zip(df_custos["codigo"], df_custos["preco_tabela"].fillna(0.0)))
+                                novos_custos["preco_tabela"] = novos_custos["codigo"].map(mapa_t1_prev).fillna(0.0)
+
+                            qtd_pos_c1 = int((novos_custos["custo_unitario"] > 0).sum())
+                            qtd_zero_c1 = int((novos_custos["custo_unitario"] <= 0).sum())
+                            qtd_pos_t1 = int((novos_custos["preco_tabela"] > 0).sum()) if "preco_tabela" in novos_custos.columns else 0
+                            taxa_coinc_cus = (
+                                (len(set(novos_custos["codigo"].unique()) & codigos_ref_geral) / max(len(novos_custos["codigo"].unique()), 1)) * 100.0
+                                if codigos_ref_geral
+                                else 100.0
+                            )
+                            tag_arqs_cus = f" ({len(arqs_custos)} arqs)" if len(arqs_custos) > 1 else ""
+                            if qtd_dup_cus_lote > 0:
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(
+                                    f"⚠️ **Custos & Preços{tag_arqs_cus}:** {formatar_num_br(qtd_dup_cus_lote)} código(s) repetido(s) (mantido o último valor)."
+                                )
+                            str_t1_info = (
+                                f" | Preço Tabela T1: {formatar_num_br(qtd_pos_t1)} SKUs"
+                                if tem_col_t1_lote
+                                else ""
+                            )
+                            if qtd_zero_c1 > 0:
+                                pct_zero = (qtd_zero_c1 / max(len(novos_custos), 1)) * 100.0
+                                if pct_zero >= 30.0:
+                                    teve_alerta = True
+                                mensagens_auditoria_upload.append(
+                                    f"ℹ️ **Custos C1 & T1{tag_arqs_cus}:** {formatar_num_br(qtd_pos_c1)} C1 positivos e "
+                                    f"{formatar_num_br(qtd_zero_c1)} com C1 R$ 0,00 ({formatar_pct_br(pct_zero, 0)}{str_t1_info} | "
+                                    f"Coincidência: {formatar_pct_br(taxa_coinc_cus)})."
+                                )
+                            else:
+                                mensagens_auditoria_upload.append(
+                                    f"✔️ **Custos C1 & T1 ({data_custos.strftime('%d/%m')}{tag_arqs_cus}):** {formatar_num_br(len(novos_custos))} itens verificados "
+                                    f"(100% C1 > R$ 0{str_t1_info} | Coincidência: {formatar_pct_br(taxa_coinc_cus)})."
+                                )
+                            for av_c in dict.fromkeys(avisos_sem_dt_cus):
+                                teve_alerta = True
+                                mensagens_auditoria_upload.append(av_c)
+                            caixas_para_limpar.append("up_custos")
+                            resumo_toast_partes.append(f"Custos C1/T1: {formatar_num_br(len(novos_custos))} itens")
+
+                        # Auditoria de descontos > 5% das Saídas (usando novos_custos se enviados no mesmo lote)
+                        if novas_saidas is not None and not novas_saidas.empty:
+                            df_custos_ref_desc = novos_custos if (novos_custos is not None and not novos_custos.empty) else df_custos
                             frames_ent_desc_up = [df_entradas_bruto] if not df_entradas_bruto.empty else []
                             if novas_entradas is not None and not novas_entradas.empty:
                                 frames_ent_desc_up.append(novas_entradas)
@@ -3397,75 +3810,74 @@ with aba1:
                                 )
                                 st.session_state["auditoria_descontos_ultima_saida"] = df_tab_desc_sessao.to_dict("records")
                                 st.session_state["data_auditoria_descontos_sai"] = data_saida.strftime("%d/%m/%Y")
-                        nova_ultima_data_custos_t1 = ultima_data_custos_t1
-                        if arq_custos is not None:
-                            dt_custos_iso = data_custos.strftime("%Y-%m-%d")
-                            if ultima_data_custos_t1 and dt_custos_iso < ultima_data_custos_t1 and not ignorar_trava_data:
-                                dt_ult_c_fmt = pd.to_datetime(ultima_data_custos_t1, format="%Y-%m-%d", errors="coerce")
-                                str_ult_c = dt_ult_c_fmt.strftime("%d/%m/%Y") if pd.notna(dt_ult_c_fmt) else ultima_data_custos_t1
-                                raise ValueError(
-                                    f"Trava de Data Retroativa (Custos C1 & Tabela T1): A última carga de C1 & T1 gravada no sistema "
-                                    f"é de **{str_ult_c}**, e você selecionou **{data_custos.strftime('%d/%m/%Y')}**. "
-                                    f"Para evitar sobrescrever os custos e preços atuais com uma tabela antiga, o envio foi bloqueado. "
-                                    f"Se realmente precisar reimportar uma data anterior, marque '📅 Ignorar trava de data no nome' nas Opções Avançadas."
+
+                        # ------------------------------------------------------
+                        # CAIXA 5: BASE INICIAL HISTÓRICA (Validação Tudo ou Nada para 1..N arquivos)
+                        # ------------------------------------------------------
+                        if arqs_base:
+                            frames_base_lote = []
+                            qtd_desc_div_base = 0
+                            for idx_b, arq_b_item in enumerate(arqs_base, 1):
+                                try:
+                                    df_b_i, info_b_i = processar_planilha_base_vendas(
+                                        arq_b_item,
+                                        codigos_ref=codigos_ref_geral,
+                                        ignorar_trava_catalogo=ignorar_trava_catalogo,
+                                    )
+                                except Exception as erro_item_b:
+                                    prefixo_lote = (
+                                        f"[Base Inicial — Arquivo {idx_b}/{len(arqs_base)}: '{arq_b_item.name}'] "
+                                        if len(arqs_base) > 1
+                                        else f"[Base Inicial: '{arq_b_item.name}'] "
+                                    )
+                                    raise ValueError(
+                                        f"{prefixo_lote}{erro_item_b} (Nenhum arquivo do lote foi gravado — corrija e tente novamente)."
+                                    ) from erro_item_b
+                                frames_base_lote.append(df_b_i)
+                                qtd_desc_div_base += int(info_b_i.get("qtd_desc_divergentes", 0))
+
+                            nova_base = (
+                                pd.concat(frames_base_lote, ignore_index=True)
+                                .groupby("codigo", as_index=False)
+                                .agg(
+                                    descricao=("descricao", "last"),
+                                    qtd_vendida_base=("qtd_vendida_base", "sum"),
                                 )
-                            novos_custos, info_cus = processar_planilha_custos(
-                                arq_custos,
-                                codigos_ref=codigos_ref_geral,
-                                ignorar_trava_catalogo=ignorar_trava_catalogo,
-                                data_custos=data_custos,
-                                ignorar_trava_data=ignorar_trava_data,
                             )
-                            nova_ultima_data_custos_t1 = max(ultima_data_custos_t1, dt_custos_iso) if ultima_data_custos_t1 else dt_custos_iso
-                            if (not info_cus.get("tem_coluna_t1", False)) and (not df_custos.empty) and ("preco_tabela" in df_custos.columns):
-                                mapa_t1_prev = dict(zip(df_custos["codigo"], df_custos["preco_tabela"].fillna(0.0)))
-                                novos_custos["preco_tabela"] = novos_custos["codigo"].map(mapa_t1_prev).fillna(0.0)
-                            if info_cus["qtd_duplicadas"] > 0:
-                                teve_alerta = True
-                                mensagens_auditoria_upload.append(
-                                    f"⚠️ **Custos & Preços:** {formatar_num_br(info_cus['qtd_duplicadas'])} código(s) repetido(s) (mantido o último valor)."
-                                )
-                            str_t1_info = (
-                                f" | Preço Tabela T1: {formatar_num_br(info_cus.get('qtd_t1_positivos', 0))} SKUs"
-                                if info_cus.get("tem_coluna_t1", False)
-                                else ""
+                            nova_base = padronizar_dataframe(nova_base, "base_inicial")
+                            taxa_coinc_base = (
+                                (len(set(nova_base["codigo"].unique()) & codigos_ref_geral) / max(len(nova_base["codigo"].unique()), 1)) * 100.0
+                                if codigos_ref_geral
+                                else 100.0
                             )
-                            if info_cus["qtd_zerados"] > 0:
-                                pct_zero = (info_cus["qtd_zerados"] / max(info_cus["total_itens"], 1)) * 100.0
-                                if pct_zero >= 30.0:
-                                    teve_alerta = True
-                                mensagens_auditoria_upload.append(
-                                    f"ℹ️ **Custos C1 & T1:** {formatar_num_br(info_cus['qtd_positivos'])} C1 positivos e "
-                                    f"{formatar_num_br(info_cus['qtd_zerados'])} com C1 R$ 0,00 ({formatar_pct_br(pct_zero, 0)}{str_t1_info} | "
-                                    f"Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
-                                )
-                            else:
-                                mensagens_auditoria_upload.append(
-                                    f"✔️ **Custos C1 & T1 ({data_custos.strftime('%d/%m')}):** {formatar_num_br(info_cus['total_itens'])} itens verificados "
-                                    f"(100% C1 > R$ 0{str_t1_info} | Coincidência: {formatar_pct_br(info_cus['taxa_coincidencia'])})."
-                                )
-                            if info_cus.get("aviso_sem_data"):
-                                teve_alerta = True
-                                mensagens_auditoria_upload.append(info_cus["aviso_sem_data"])
-                        if arq_base is not None:
-                            nova_base, info_base = processar_planilha_base_vendas(
-                                arq_base,
-                                codigos_ref=codigos_ref_geral,
-                                ignorar_trava_catalogo=ignorar_trava_catalogo,
-                            )
+                            tag_arqs_base = f" ({len(arqs_base)} arqs)" if len(arqs_base) > 1 else ""
                             msg_base = (
-                                f"✔️ **Base Inicial:** {formatar_num_br(info_base['total_itens'])} SKUs consolidados "
-                                f"(Soma das vendas: {formatar_num_br(info_base['soma_vendas'])} un. | "
-                                f"Coincidência: {formatar_pct_br(info_base['taxa_coincidencia'])})"
+                                f"✔️ **Base Inicial{tag_arqs_base}:** {formatar_num_br(len(nova_base))} SKUs consolidados "
+                                f"(Soma das vendas: {formatar_num_br(float(nova_base['qtd_vendida_base'].sum()))} un. | "
+                                f"Coincidência: {formatar_pct_br(taxa_coinc_base)})"
                             )
-                            if info_base.get("qtd_desc_divergentes", 0) > 0:
-                                msg_base += f" — {formatar_num_br(info_base['qtd_desc_divergentes'])} SKU(s) tinham mais de uma descrição e foram unificados pelo código."
+                            if qtd_desc_div_base > 0:
+                                msg_base += f" — {formatar_num_br(qtd_desc_div_base)} SKU(s) tinham mais de uma descrição e foram unificados pelo código."
                             mensagens_auditoria_upload.append(msg_base)
+                            caixas_para_limpar.append("up_base")
+                            resumo_toast_partes.append(f"Base Inicial: {formatar_num_br(len(nova_base))} SKUs")
+
+                        # ------------------------------------------------------
+                        # GRAVAÇÃO ATÔMICA NO SUPABASE (Só chega aqui se 100% dos arquivos passaram)
+                        # ------------------------------------------------------
                         agora_str = agora_br().strftime("%d/%m/%Y %H:%M:%S")
-                        hashes_snapshot = {
-                            k_snap: list(v_snap)
-                            for k_snap, v_snap in st.session_state.get("hashes_soma_por_data", {}).items()
-                        }
+                        ultimas_att_atualizadas = dict(ultimas_att_caixas)
+                        if novo_estoque is not None:
+                            ultimas_att_atualizadas["estoque"] = f"{agora_str} (Posição {data_posicao.strftime('%d/%m/%Y')})"
+                        if novas_entradas is not None and not ent_ja_somada_antes:
+                            ultimas_att_atualizadas["entradas"] = f"{agora_str} (Ref. {data_entrada.strftime('%d/%m/%Y')})"
+                        if novas_saidas is not None:
+                            ultimas_att_atualizadas["saidas"] = f"{agora_str} (Ref. {data_saida.strftime('%d/%m/%Y')})"
+                        if novos_custos is not None:
+                            ultimas_att_atualizadas["custos"] = f"{agora_str} (Tabela {data_custos.strftime('%d/%m/%Y')})"
+                        if nova_base is not None:
+                            ultimas_att_atualizadas["base"] = f"{agora_str} ({int(dias_base_input)} dias)"
+
                         try:
                             with db_supabase.transacao() as conn_tx:
                                 if novo_estoque is not None:
@@ -3485,19 +3897,27 @@ with aba1:
                                     )
                                     abas_ja_gravadas.append("historico")
                                 if novas_entradas is not None:
+                                    hash_lote_ent_unico = "|".join(hashes_lote_ent) if hashes_lote_ent else ""
                                     gravar_tabela_incremental_por_data_sql(
                                         db_supabase,
                                         "entradas_diarias",
                                         novas_entradas,
                                         data_entrada.strftime("%Y-%m-%d"),
-                                        somar_mesma_data=somar_entradas_mesmo_dia,
+                                        somar_mesma_data=somar_ent_efetivo,
                                         df_atual_memoria=df_entradas_bruto,
-                                        hash_arquivo=hash_arq_ent,
+                                        hash_arquivo=hash_lote_ent_unico,
                                         criar_backup=True,
                                         hashes_soma_atuais=hashes_soma_meta,
                                         permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
                                         conn_externa=conn_tx,
                                     )
+                                    if len(hashes_lote_ent) > 1 and somar_ent_efetivo:
+                                        reg_h_e = st.session_state.setdefault("hashes_soma_por_data", {}).setdefault(
+                                            f"entradas_diarias::{data_entrada.strftime('%Y-%m-%d')}", []
+                                        )
+                                        for h_sub_e in hashes_lote_ent:
+                                            if h_sub_e not in reg_h_e:
+                                                reg_h_e.append(h_sub_e)
                                     abas_ja_gravadas.append("entradas_diarias")
                                     if not df_pedidos_transito.empty:
                                         df_ent_comb_temp = pd.concat([df_entradas_bruto, novas_entradas], ignore_index=True)
@@ -3525,7 +3945,7 @@ with aba1:
                                                 f"que estavam ocultos em trânsito chegaram nesta NF de Entrada e voltaram automaticamente ao painel!"
                                             )
                                 if novas_saidas is not None:
-                                    hash_arq_sai = hashlib.sha256(arq_saidas.getvalue()).hexdigest()[:16] if arq_saidas is not None else ""
+                                    hash_lote_sai_unico = "|".join(hashes_lote_sai) if hashes_lote_sai else ""
                                     sai_ja_somada = gravar_tabela_incremental_por_data_sql(
                                         db_supabase,
                                         "saidas_diarias",
@@ -3533,23 +3953,28 @@ with aba1:
                                         data_saida.strftime("%Y-%m-%d"),
                                         somar_mesma_data=somar_saidas_mesmo_dia,
                                         df_atual_memoria=df_saidas_bruto,
-                                        hash_arquivo=hash_arq_sai,
+                                        hash_arquivo=hash_lote_sai_unico,
                                         criar_backup=True,
                                         hashes_soma_atuais=hashes_soma_meta,
                                         permitir_somar_codigos_repetidos_dia=permitir_somar_codigos_repetidos_dia,
                                         conn_externa=conn_tx,
                                     )
+                                    if len(hashes_lote_sai) > 1 and somar_saidas_mesmo_dia:
+                                        reg_h_s = st.session_state.setdefault("hashes_soma_por_data", {}).setdefault(
+                                            f"saidas_diarias::{data_saida.strftime('%Y-%m-%d')}", []
+                                        )
+                                        for h_sub_s in hashes_lote_sai:
+                                            if h_sub_s not in reg_h_s:
+                                                reg_h_s.append(h_sub_s)
                                     if sai_ja_somada:
                                         teve_alerta = True
                                         mensagens_auditoria_upload.append(
                                             f"🛡️ **Proteção contra Soma Duplicada (Saídas {data_saida.strftime('%d/%m')}):** "
-                                            f"Este arquivo exato (`{arq_saidas.name}`) já havia sido somado nesta data e foi ignorado para não dobrar as vendas!"
+                                            f"Este arquivo exato (`{arqs_saidas[0].name}`) já havia sido somado nesta data e foi ignorado para não dobrar as vendas!"
                                         )
                                     abas_ja_gravadas.append("saidas_diarias")
                                 if novos_custos is not None:
                                     if not df_custos_via_entrada.empty:
-                                        # C1 tem prioridade máxima quando a Planilha Geral de Custos C1 é enviada no mesmo lote:
-                                        # preserva 100% dos custos positivos de novos_custos (C1) e só aproveita da NF itens ausentes/zerados no C1
                                         cods_c1_pos = set(novos_custos.loc[novos_custos["custo_unitario"] > 0, "codigo"].unique())
                                         df_ent_complementar = df_custos_via_entrada[~df_custos_via_entrada["codigo"].isin(cods_c1_pos)].copy()
                                         if not df_ent_complementar.empty:
@@ -3559,7 +3984,6 @@ with aba1:
                                         mensagens_auditoria_upload.append(
                                             "🛡️ **Prioridade C1 & T1 Mantida:** O Custo C1 prevaleceu sobre o custo da NF (incluindo bonificações) e o Preço Tabela T1 foi atualizado."
                                         )
-                                    # Audita todos os ajustes de C1 & T1, cruzando com NFs na janela configurada (padrão 3 dias)
                                     dt_ref_cruz_nf = max(hoje_br(), data_custos)
                                     limite_nf_rec_iso = (dt_ref_cruz_nf - timedelta(days=int(janela_cruzamento_nf_c1_dias))).strftime("%Y-%m-%d")
                                     frames_ent_rec = []
@@ -3612,7 +4036,6 @@ with aba1:
                                     salvar_backup_automatico_sql(db_supabase, "custos", df_custos, conn_externa=conn_tx)
                                     gravar_tabela_sql(db_supabase, "custos", novos_custos, conn_externa=conn_tx)
                                     abas_ja_gravadas.append("custos")
-                                    # Se não houve upload de Saídas neste clique, mas existe saída na data selecionada (data_saida), audita descontos > 5% contra o novo T1
                                     if novas_saidas is None and not df_saidas_bruto.empty and "data" in df_saidas_bruto.columns:
                                         dt_sai_ref_iso = data_saida.strftime("%Y-%m-%d")
                                         df_sai_dia_t1 = df_saidas_bruto[df_saidas_bruto["data"] == dt_sai_ref_iso].copy()
@@ -3668,6 +4091,7 @@ with aba1:
                                     salvar_backup_automatico_sql(db_supabase, "base_inicial", df_base_vendas, conn_externa=conn_tx)
                                     gravar_tabela_sql(db_supabase, "base_inicial", nova_base, conn_externa=conn_tx)
                                     abas_ja_gravadas.append("base_inicial")
+
                                 df_meta_novo = montar_dataframe_meta_completo(
                                     dias_base_val=int(dias_base_input),
                                     ult_att_val=agora_str,
@@ -3675,19 +4099,43 @@ with aba1:
                                     grupos_sku_custom=grupos_sku_custom,
                                     ultima_data_custos_t1=nova_ultima_data_custos_t1,
                                 )
+                                # Persiste também o timestamp individual de cada caixa importada no meta
+                                linhas_caixas_meta = [
+                                    {"chave": f"ult_att_{k_cx}", "valor": str(v_cx).strip()}
+                                    for k_cx, v_cx in sorted(ultimas_att_atualizadas.items())
+                                    if k_cx in ("estoque", "entradas", "saidas", "custos", "base") and str(v_cx).strip()
+                                ]
+                                if linhas_caixas_meta:
+                                    df_meta_novo = (
+                                        pd.concat([df_meta_novo, pd.DataFrame(linhas_caixas_meta)], ignore_index=True)
+                                        .drop_duplicates(subset=["chave"], keep="last")
+                                        .reset_index(drop=True)
+                                    )
                                 gravar_tabela_sql(db_supabase, "meta", df_meta_novo, conn_externa=conn_tx)
                                 abas_ja_gravadas.append("meta")
                         except Exception:
                             st.session_state["hashes_soma_por_data"] = hashes_snapshot
                             abas_ja_gravadas.clear()
                             raise
+
+                        # Sucesso total: limpa caches, renova chaves dinâmicas das caixas enviadas e prepara avisos persistentes
                         st.session_state.pop("bkp_db_xlsx_bytes", None)
                         st.session_state.pop("backup_zip_bytes", None)
+                        if caixas_para_limpar:
+                            _limpar_uploaders(*caixas_para_limpar)
                         carregar_estado_completo.clear()
                         calcular_motor_giro_sazonal.clear()
-                        st.session_state["msg_sucesso_sync"] = (
-                            f"✅ Dados validados, copiados em segurança (`_bkp_*`) e sincronizados na nuvem em {agora_str}!"
+
+                        resumo_banner = (
+                            " | ".join(resumo_toast_partes)
+                            if resumo_toast_partes
+                            else f"Período da base atualizado para {int(dias_base_input)} dias"
                         )
+                        st.session_state["msg_sucesso_sync"] = (
+                            f"✅ Importação concluída e gravada com segurança no Supabase em **{agora_str}**! "
+                            f"({resumo_banner})"
+                        )
+                        st.session_state["toast_sucesso_sync"] = f"Sincronizado com sucesso! ({resumo_banner})"
                         if mensagens_auditoria_upload:
                             st.session_state["aviso_duplicatas_sync"] = {
                                 "tipo": "warning" if teve_alerta else "info",
@@ -3696,7 +4144,7 @@ with aba1:
                         st.rerun()
                     except Exception as erro_gravacao:
                         st.error(
-                            f"❌ **Importação bloqueada antes de gravar na nuvem (transação revertida, nenhum dado anterior foi alterado):**\n\n"
+                            f"❌ **Importação bloqueada antes de gravar na nuvem (transação revertida — nenhum dado anterior foi alterado e seus arquivos foram mantidos nas caixas para revisão):**\n\n"
                             f"{erro_gravacao}"
                         )
 
@@ -5004,7 +5452,7 @@ with aba2:
             dt_sil_tr = converter_datas_deterministico(df_tr_view["silenciar_ate"])
             dt_comp_tr = converter_datas_deterministico(df_tr_view["data_compra"])
             dias_rest_tr = (dt_sil_tr - hoje_ts_tr).dt.days.fillna(0).astype(int)
-            df_tr_view[" data_compra_fmt"] = dt_comp_tr.dt.strftime("%d/%m/%Y").fillna(df_tr_view["data_compra"])
+            df_tr_view["data_compra_fmt"] = dt_comp_tr.dt.strftime("%d/%m/%Y").fillna(df_tr_view["data_compra"])
             df_tr_view["silenciar_ate_fmt"] = dt_sil_tr.dt.strftime("%d/%m/%Y").fillna(df_tr_view["silenciar_ate"])
             df_tr_view["dias_restantes"] = [f"{max(int(d), 0)} dia(s)" for d in dias_rest_tr]
 
@@ -5014,7 +5462,7 @@ with aba2:
                     "Código": df_tr_view["codigo"].values,
                     "Descrição": df_tr_view["descricao"].values,
                     "Qtd. Sugerida na Compra": [formatar_qtd_br(v) for v in df_tr_view["qtd_comprada"].values],
-                    "Marcado em": df_tr_view[" data_compra_fmt"].values,
+                    "Marcado em": df_tr_view["data_compra_fmt"].values,
                     "Oculto até (15d)": df_tr_view["silenciar_ate_fmt"].values,
                     "Prazo Restante": df_tr_view["dias_restantes"].values,
                 }
@@ -5621,7 +6069,7 @@ with aba5:
         "Abaixo, cada divergência é classificada por natureza operacional para facilitar a conferência no Siagri."
     )
     if df_estoque.empty:
-        st.info("Importe a Planilha de Estoque na Aba 1 para auditar divergências de lote e saldos.")
+        st.info("Importe a Planilha de Estoque na Aba 6 (Importação & Backup) para auditar divergências de lote e saldos.")
     else:
         df_com_lote = df_estoque[df_estoque["lote"] != ""].copy()
         if not df_com_lote.empty:
