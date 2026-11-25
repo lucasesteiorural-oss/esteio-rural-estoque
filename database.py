@@ -328,7 +328,7 @@ def _sanitizar_database_url(url_bruta: str) -> str:
     if not url_bruta:
         return ""
     s = str(url_bruta).strip().strip('"').strip("'")
-    s = re.sub(r":\[([^\[\]@]+)\]@", r":\1@", s)
+    s = re.sub(r":[([^[]@]+)]@", r":\1@", s)
     if s.startswith("postgres://"):
         s = "postgresql://" + s[len("postgres://"):]
     return s
@@ -890,7 +890,7 @@ def gravar_tabela_incremental_por_data_sql(
                 if hash_efetivo:
                     hashes_ja_no_dia.append(hash_efetivo)
                 hashes_ja_no_dia.extend(sigs_atuais_sku[:80])
-            registro_hashes_sessao[chave_op] = hashes_ja_no_dia
+                registro_hashes_sessao[chave_op] = hashes_ja_no_dia
     elif tabela in ("entradas_diarias", "saidas_diarias"):
         registro_hashes_sessao[chave_op] = ([hash_efetivo] if hash_efetivo else []) + sigs_atuais_sku[:80]
 
