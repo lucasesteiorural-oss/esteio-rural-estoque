@@ -3,6 +3,7 @@ analytics.py — Módulo de Inteligência Analítica: Motor de Giro Sazonal, Rad
 Curva ABC Financeira, Resolução Temporal Vetorizada (merge_asof) e Auditorias Fiscais/Descontos
 (Esteio Rural — Arquitetura Modular v37).
 """
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -16,8 +17,6 @@ from parsers import (
     padronizar_dataframe,
     identificar_produto_mp,
 )
-
-
 
 
 # ==============================================================================
@@ -312,18 +311,16 @@ def gerar_textos_campanha_promocional_fefo(
     txt_briefing_equipe = (
         f"🎯 *META DE ESCOAMENTO FEFO — EQUIPE DE VENDAS ESTEIO RURAL*\n"
         f"• *Produto:* [{codigo}] {descricao}\n"
-        f"• *Lote Prioritário:* {lote or 'S/L'}  |  *Validade:* {validade or '-'} ({dias_vencer} dias restantes)\n"
-        f"• *Saldo no Lote:* {formatar_qtd_br(saldo_lote)} un.  |  *Sobra Projetada s/ Ação:* {formatar_qtd_br(sobra_proj)} un.\n"
+        f"• *Lote Prioritário:* {lote or 'S/L'} | *Validade:* {validade or '-'} ({dias_vencer} dias restantes)\n"
+        f"• *Saldo no Lote:* {formatar_qtd_br(saldo_lote)} un. | *Sobra Projetada s/ Ação:* {formatar_qtd_br(sobra_proj)} un.\n"
         f"• *Mecânica Recomendada:* {mecanica_sugerida}\n"
-        f"• *Preço Tabela:* {formatar_moeda_br(preco_de)}  ➔  *Preço Promocional:* {formatar_moeda_br(preco_por)} (-{formatar_num_br(desconto_pct, 1)}%)\n"
+        f"• *Preço Tabela:* {formatar_moeda_br(preco_de)} ➔ *Preço Promocional:* {formatar_moeda_br(preco_por)} (-{formatar_num_br(desconto_pct, 1)}%)\n"
         f"• *Piso Mínimo (Custo C1 + {formatar_num_br(aliquota_imp_pct, 1)}% Impostos):* {formatar_moeda_br(preco_piso)} "
         f"(Margem líquida na promoção: {formatar_pct_br(margem_liq_pct, 1)})\n"
         f"• *Meta da Equipe:* Vender pelo menos *{formatar_num_br(meta_giro_dia, 1)} un./dia* para zerar o lote antes do vencimento "
         f"e recuperar *{formatar_moeda_br(receita_total_lote)}* em caixa!"
     )
     return txt_whatsapp_cliente, txt_briefing_equipe
-
-
 
 
 # ==============================================================================
@@ -408,8 +405,6 @@ def calcular_tabela_curva_abc(
     else:
         df_final_abc = df_pos
     return df_final_abc.reset_index(drop=True)
-
-
 
 
 # ==============================================================================
@@ -619,8 +614,6 @@ def resolver_custo_e_t1_temporal_saidas(
          marca `pre_reajuste = True` e `custo_u_efetivo = 0.0` (excluído da base de margem para
          não fabricar falso prejuízo nem inflar a margem com CMV zerado).
     """
-    import numpy as np
-
     if df_saidas_ref is None or df_saidas_ref.empty:
         return pd.DataFrame()
     df_s = df_saidas_ref.copy()
@@ -1283,12 +1276,12 @@ def auditar_fiscal_permanente_nf_c1_t1(
                 q_red += 1
             else:
                 q_alin += 1
-                if t1_comprimido:
-                    prio = 1
-                    cat_filtro = "margem_t1"
-                    status_txt = (
-                        f"⚠️ C1 Alinhado, mas Tabela T1 Comprimida (Margem {formatar_pct_br(mg_t1_nf, 1)} < {formatar_num_br(margem_minima_t1_pct, 0)}%)"
-                    )
+            if t1_comprimido:
+                prio = 1
+                cat_filtro = "margem_t1"
+                status_txt = (
+                    f"⚠️ C1 Alinhado, mas Tabela T1 Comprimida (Margem {formatar_pct_br(mg_t1_nf, 1)} < {formatar_num_br(margem_minima_t1_pct, 0)}%)"
+                )
 
         linhas.append(
             {
@@ -1326,8 +1319,6 @@ def auditar_fiscal_permanente_nf_c1_t1(
         "data_corte_br": dt_corte_ts.strftime("%d/%m/%Y"),
     }
     return df_out, resumo
-
-
 
 
 # ==============================================================================
@@ -1391,6 +1382,7 @@ def calcular_motor_giro_sazonal(
     else:
         df_prod["qtd_vendida"] = 0.0
         df_prod["giro_base"] = 0.0
+
     intervalo_historico_dias = 0
     peso_historico = 0.0
     df_saidas_sku = pd.DataFrame(
@@ -1463,175 +1455,179 @@ def calcular_motor_giro_sazonal(
             primeiro_saldo_sku = pivot_geral[datas_hist[0]]
             ultimo_saldo_sku = pivot_geral[datas_hist[-1]]
 
-        if len(datas_hist) >= 2:
-            deltas_geral = pivot_geral.diff(axis=1)
-            cols_fim_transicao = datas_hist[1:]
-            cols_transicao = datas_hist[:-1]
-            mapa_col_transicao = dict(zip(cols_fim_transicao, cols_transicao))
-            deltas_geral = deltas_geral[cols_fim_transicao].rename(columns=mapa_col_transicao)
+            if len(datas_hist) >= 2:
+                deltas_geral = pivot_geral.diff(axis=1)
+                cols_fim_transicao = datas_hist[1:]
+                cols_transicao = datas_hist[:-1]
+                mapa_col_transicao = dict(zip(cols_fim_transicao, cols_transicao))
+                deltas_geral = deltas_geral[cols_fim_transicao].rename(columns=mapa_col_transicao)
 
-            for idx_t, dt_ini_t in enumerate(cols_transicao):
-                dt_fim_t = datas_hist[idx_t + 1]
-                t1 = pd.to_datetime(dt_ini_t, format="%Y-%m-%d", errors="coerce")
-                t2 = pd.to_datetime(dt_fim_t, format="%Y-%m-%d", errors="coerce")
-                dias_por_coluna[dt_ini_t] = max(int((t2 - t1).days), 1) if (pd.notna(t1) and pd.notna(t2)) else 1
-
-            entradas_transicao = pd.DataFrame(0.0, index=pivot_geral.index, columns=cols_transicao)
-            if not df_ent_win.empty:
-                df_ent_grp = df_ent_win.groupby(["codigo", "data"], as_index=False)["qtd_entrada"].sum()
                 for idx_t, dt_ini_t in enumerate(cols_transicao):
                     dt_fim_t = datas_hist[idx_t + 1]
-                    mask_int = (df_ent_grp["data"] >= dt_ini_t) & (df_ent_grp["data"] < dt_fim_t)
-                    if mask_int.any():
-                        soma_ent = df_ent_grp.loc[mask_int].groupby("codigo")["qtd_entrada"].sum()
-                        novos_idx = soma_ent.index.difference(entradas_transicao.index)
-                        if len(novos_idx) > 0:
-                            entradas_transicao = entradas_transicao.reindex(entradas_transicao.index.union(novos_idx), fill_value=0.0)
-                            deltas_geral = deltas_geral.reindex(entradas_transicao.index, fill_value=0.0)
-                        entradas_transicao.loc[soma_ent.index, dt_ini_t] = soma_ent.values
+                    t1 = pd.to_datetime(dt_ini_t, format="%Y-%m-%d", errors="coerce")
+                    t2 = pd.to_datetime(dt_fim_t, format="%Y-%m-%d", errors="coerce")
+                    dias_por_coluna[dt_ini_t] = max(int((t2 - t1).days), 1) if (pd.notna(t1) and pd.notna(t2)) else 1
 
-            saidas_transicao = pd.DataFrame(0.0, index=entradas_transicao.index, columns=cols_transicao)
-            cols_com_planilha_saida = set()
-            if not df_sai_win.empty:
-                df_sai_grp = df_sai_win.groupby(["codigo", "data"], as_index=False)["qtd_saida"].sum()
-                for idx_t, dt_ini_t in enumerate(cols_transicao):
-                    dt_fim_t = datas_hist[idx_t + 1]
-                    mask_sai = (df_sai_grp["data"] >= dt_ini_t) & (df_sai_grp["data"] < dt_fim_t)
-                    if mask_sai.any():
-                        cols_com_planilha_saida.add(dt_ini_t)
-                        soma_sai = df_sai_grp.loc[mask_sai].groupby("codigo")["qtd_saida"].sum()
-                        novos_idx = soma_sai.index.difference(saidas_transicao.index)
-                        if len(novos_idx) > 0:
-                            saidas_transicao = saidas_transicao.reindex(saidas_transicao.index.union(novos_idx), fill_value=0.0)
-                            entradas_transicao = entradas_transicao.reindex(saidas_transicao.index, fill_value=0.0)
-                            deltas_geral = deltas_geral.reindex(saidas_transicao.index, fill_value=0.0)
-                        saidas_transicao.loc[soma_sai.index, dt_ini_t] = soma_sai.values
+                entradas_transicao = pd.DataFrame(0.0, index=pivot_geral.index, columns=cols_transicao)
+                if not df_ent_win.empty:
+                    df_ent_grp = df_ent_win.groupby(["codigo", "data"], as_index=False)["qtd_entrada"].sum()
+                    for idx_t, dt_ini_t in enumerate(cols_transicao):
+                        dt_fim_t = datas_hist[idx_t + 1]
+                        mask_int = (df_ent_grp["data"] >= dt_ini_t) & (df_ent_grp["data"] < dt_fim_t)
+                        if mask_int.any():
+                            soma_ent = df_ent_grp.loc[mask_int].groupby("codigo")["qtd_entrada"].sum()
+                            novos_idx = soma_ent.index.difference(entradas_transicao.index)
+                            if len(novos_idx) > 0:
+                                entradas_transicao = entradas_transicao.reindex(
+                                    entradas_transicao.index.union(novos_idx), fill_value=0.0
+                                )
+                                deltas_geral = deltas_geral.reindex(entradas_transicao.index, fill_value=0.0)
+                            entradas_transicao.loc[soma_ent.index, dt_ini_t] = soma_ent.values
 
-            # 1. Comparação direta das planilhas de Estoque Diário (captura quedas de saldo e consumo interno de fábrica)
-            queda_direta = (-deltas_geral[cols_transicao]).clip(lower=0.0)
+                saidas_transicao = pd.DataFrame(0.0, index=entradas_transicao.index, columns=cols_transicao)
+                cols_com_planilha_saida = set()
+                if not df_sai_win.empty:
+                    df_sai_grp = df_sai_win.groupby(["codigo", "data"], as_index=False)["qtd_saida"].sum()
+                    for idx_t, dt_ini_t in enumerate(cols_transicao):
+                        dt_fim_t = datas_hist[idx_t + 1]
+                        mask_sai = (df_sai_grp["data"] >= dt_ini_t) & (df_sai_grp["data"] < dt_fim_t)
+                        if mask_sai.any():
+                            cols_com_planilha_saida.add(dt_ini_t)
+                            soma_sai = df_sai_grp.loc[mask_sai].groupby("codigo")["qtd_saida"].sum()
+                            novos_idx = soma_sai.index.difference(saidas_transicao.index)
+                            if len(novos_idx) > 0:
+                                saidas_transicao = saidas_transicao.reindex(
+                                    saidas_transicao.index.union(novos_idx), fill_value=0.0
+                                )
+                                entradas_transicao = entradas_transicao.reindex(saidas_transicao.index, fill_value=0.0)
+                                deltas_geral = deltas_geral.reindex(saidas_transicao.index, fill_value=0.0)
+                            saidas_transicao.loc[soma_sai.index, dt_ini_t] = soma_sai.values
 
-            # Identifica quais SKUs são Matéria-Prima de Fábrica (saída via Ordem de Produção)
-            mapa_desc_prod = (
-                dict(zip(df_prod["codigo"], df_prod["descricao"]))
-                if (df_prod is not None and not df_prod.empty and "descricao" in df_prod.columns)
-                else {}
-            )
-            eh_mp_por_idx = pd.Series(
-                [
-                    identificar_produto_mp(c, mapa_desc_prod.get(c, ""), grupos_sku_custom, mp_custom_map)
-                    for c in entradas_transicao.index
-                ],
-                index=entradas_transicao.index,
-            )
+                # 1. Comparação direta das planilhas de Estoque Diário (captura quedas de saldo e consumo interno de fábrica)
+                queda_direta = (-deltas_geral[cols_transicao]).clip(lower=0.0)
 
-            # 2. Consumo em dia com NF de Entrada:
-            # - Para itens de revenda (não MP) sem saída na planilha de vendas daquele dia (saidas_transicao <= 0)
-            #   em que o estoque subiu menos que a NF (delta > 0 e delta < entrada): consumo = entrada - delta.
-            # - Para itens de Produção / Matéria-Prima (MP), cuja saída ocorre por Ordem de Produção (fora das saídas faturadas):
-            #   consumo_bruto = entrada - delta, protegido contra NF ainda não refletida no saldo físico (> 3x giro de referência).
-            del_trans = deltas_geral[cols_transicao]
-            sem_saida_no_sku_dia = saidas_transicao <= 0.0
-            mask_alta_parcial_sku = (
-                (entradas_transicao > 0.0)
-                & sem_saida_no_sku_dia
-                & (del_trans > 0.0)
-                & (del_trans < entradas_transicao)
-            )
-            consumo_parcial_prelim = (entradas_transicao - del_trans).clip(lower=0.0).where(
-                mask_alta_parcial_sku, 0.0
-            )
-
-            # Calcula giro médio de referência nos dias sem NF (ou fallback giro_base) para auditar consumo de MP
-            quedas_prelim = queda_direta.combine(consumo_parcial_prelim, lambda s1, s2: s1.combine(s2, max))
-            quedas_prelim = quedas_prelim.combine(saidas_transicao, lambda s1, s2: s1.combine(s2, max))
-            dias_sem_nf_mask = entradas_transicao <= 0.0
-            soma_sem_nf = quedas_prelim.where(dias_sem_nf_mask, 0.0).sum(axis=1)
-            qtd_dias_sem_nf = dias_sem_nf_mask.sum(axis=1).replace(0, float("nan"))
-            mapa_giro_base_idx = (
-                dict(zip(df_prod["codigo"], df_prod["giro_base"]))
-                if (df_prod is not None and not df_prod.empty and "giro_base" in df_prod.columns)
-                else {}
-            )
-            giro_base_s = pd.Series(
-                [float(mapa_giro_base_idx.get(c, 0.0)) for c in entradas_transicao.index],
-                index=entradas_transicao.index,
-            )
-            giro_ref_mp = (soma_sem_nf / qtd_dias_sem_nf).fillna(0.0)
-            giro_ref_mp = giro_ref_mp.where(giro_ref_mp > 0.0, giro_base_s)
-
-            consumo_bruto_mp_mat = (entradas_transicao - del_trans).clip(lower=0.0)
-            mask_mp_anomalia_nf = (
-                (entradas_transicao > 0.0)
-                & eh_mp_por_idx.values[:, None]
-                & (
-                    ((giro_ref_mp.values[:, None] > 0.0) & (consumo_bruto_mp_mat >= (giro_ref_mp.values[:, None] * 3.0)))
-                    | ((giro_ref_mp.values[:, None] <= 0.0) & ((del_trans + saidas_transicao) <= 0.0))
+                # Identifica quais SKUs são Matéria-Prima de Fábrica (saída via Ordem de Produção)
+                mapa_desc_prod = (
+                    dict(zip(df_prod["codigo"], df_prod["descricao"]))
+                    if (df_prod is not None and not df_prod.empty and "descricao" in df_prod.columns)
+                    else {}
                 )
-            )
-            mask_mp_producao_normal = (
-                (entradas_transicao > 0.0)
-                & sem_saida_no_sku_dia
-                & eh_mp_por_idx.values[:, None]
-                & (~mask_mp_anomalia_nf)
-            )
-            consumo_em_alta = consumo_bruto_mp_mat.where(
-                mask_alta_parcial_sku | mask_mp_producao_normal, 0.0
-            )
+                eh_mp_por_idx = pd.Series(
+                    [
+                        identificar_produto_mp(c, mapa_desc_prod.get(c, ""), grupos_sku_custom, mp_custom_map)
+                        for c in entradas_transicao.index
+                    ],
+                    index=entradas_transicao.index,
+                )
 
-            # Detecção de NF de Entrada sem reflexo no saldo ou consumo anormal de MP (> 3x giro médio)
-            mask_nf_nao_refletida = (
-                (entradas_transicao > 0.0)
-                & (~eh_mp_por_idx.values[:, None])
-                & ((del_trans + saidas_transicao) <= 0.0)
-            )
-            alertas_nf_dict = {}
-            for cod_nf in entradas_transicao.index:
-                if eh_mp_por_idx.loc[cod_nf] and mask_mp_anomalia_nf.loc[cod_nf].any():
-                    cols_mp_a = [c for c in cols_transicao if mask_mp_anomalia_nf.loc[cod_nf, c]]
-                    ult_dt_mp = cols_mp_a[-1]
-                    qtd_nf_mp = float(entradas_transicao.loc[cod_nf, ult_dt_mp])
-                    del_mp_v = float(del_trans.loc[cod_nf, ult_dt_mp])
-                    cons_bruto_mp = max(0.0, qtd_nf_mp - del_mp_v)
-                    dt_mp_fmt = pd.to_datetime(ult_dt_mp, format="%Y-%m-%d", errors="coerce")
-                    str_dt_mp = dt_mp_fmt.strftime("%d/%m") if pd.notna(dt_mp_fmt) else str(ult_dt_mp)
-                    alertas_nf_dict[cod_nf] = (
-                        f"⚠️ MP NF +{formatar_qtd_br(qtd_nf_mp)} ({str_dt_mp}) | Apurado {formatar_qtd_br(cons_bruto_mp)} (>3x giro / conferir saldo)"
+                # 2. Consumo em dia com NF de Entrada:
+                # - Para itens de revenda (não MP) sem saída na planilha de vendas daquele dia (saidas_transicao <= 0)
+                #   em que o estoque subiu menos que a NF (delta > 0 e delta < entrada): consumo = entrada - delta.
+                # - Para itens de Produção / Matéria-Prima (MP), cuja saída ocorre por Ordem de Produção (fora das saídas faturadas):
+                #   consumo_bruto = entrada - delta, protegido contra NF ainda não refletida no saldo físico (> 3x giro de referência).
+                del_trans = deltas_geral[cols_transicao]
+                sem_saida_no_sku_dia = saidas_transicao <= 0.0
+                mask_alta_parcial_sku = (
+                    (entradas_transicao > 0.0)
+                    & sem_saida_no_sku_dia
+                    & (del_trans > 0.0)
+                    & (del_trans < entradas_transicao)
+                )
+                consumo_parcial_prelim = (entradas_transicao - del_trans).clip(lower=0.0).where(
+                    mask_alta_parcial_sku, 0.0
+                )
+
+                # Calcula giro médio de referência nos dias sem NF (ou fallback giro_base) para auditar consumo de MP
+                quedas_prelim = queda_direta.combine(consumo_parcial_prelim, lambda s1, s2: s1.combine(s2, max))
+                quedas_prelim = quedas_prelim.combine(saidas_transicao, lambda s1, s2: s1.combine(s2, max))
+                dias_sem_nf_mask = entradas_transicao <= 0.0
+                soma_sem_nf = quedas_prelim.where(dias_sem_nf_mask, 0.0).sum(axis=1)
+                qtd_dias_sem_nf = dias_sem_nf_mask.sum(axis=1).replace(0, float("nan"))
+                mapa_giro_base_idx = (
+                    dict(zip(df_prod["codigo"], df_prod["giro_base"]))
+                    if (df_prod is not None and not df_prod.empty and "giro_base" in df_prod.columns)
+                    else {}
+                )
+                giro_base_s = pd.Series(
+                    [float(mapa_giro_base_idx.get(c, 0.0)) for c in entradas_transicao.index],
+                    index=entradas_transicao.index,
+                )
+                giro_ref_mp = (soma_sem_nf / qtd_dias_sem_nf).fillna(0.0)
+                giro_ref_mp = giro_ref_mp.where(giro_ref_mp > 0.0, giro_base_s)
+
+                consumo_bruto_mp_mat = (entradas_transicao - del_trans).clip(lower=0.0)
+                mask_mp_anomalia_nf = (
+                    (entradas_transicao > 0.0)
+                    & eh_mp_por_idx.values[:, None]
+                    & (
+                        ((giro_ref_mp.values[:, None] > 0.0) & (consumo_bruto_mp_mat >= (giro_ref_mp.values[:, None] * 3.0)))
+                        | ((giro_ref_mp.values[:, None] <= 0.0) & ((del_trans + saidas_transicao) <= 0.0))
                     )
-                elif (not eh_mp_por_idx.loc[cod_nf]) and mask_nf_nao_refletida.loc[cod_nf].any():
-                    cols_nf = [c for c in cols_transicao if mask_nf_nao_refletida.loc[cod_nf, c]]
-                    ult_dt_nf = cols_nf[-1]
-                    qtd_nf = float(entradas_transicao.loc[cod_nf, ult_dt_nf])
-                    dt_nf_fmt = pd.to_datetime(ult_dt_nf, format="%Y-%m-%d", errors="coerce")
-                    str_dt_nf = dt_nf_fmt.strftime("%d/%m") if pd.notna(dt_nf_fmt) else str(ult_dt_nf)
-                    alertas_nf_dict[cod_nf] = f"⏳ NF +{formatar_qtd_br(qtd_nf)} ({str_dt_nf}) s/ reflexo no saldo"
-            if alertas_nf_dict:
-                nf_nao_refletida_sku = pd.Series(alertas_nf_dict)
+                )
+                mask_mp_producao_normal = (
+                    (entradas_transicao > 0.0)
+                    & sem_saida_no_sku_dia
+                    & eh_mp_por_idx.values[:, None]
+                    & (~mask_mp_anomalia_nf)
+                )
+                consumo_em_alta = consumo_bruto_mp_mat.where(
+                    mask_alta_parcial_sku | mask_mp_producao_normal, 0.0
+                )
 
-            # 3. Cruzamento com Saídas/Vendas Diárias via max() (nunca soma duplicado com a queda de estoque)
-            quedas_por_sku = queda_direta.combine(consumo_em_alta, lambda s1, s2: s1.combine(s2, max))
-            quedas_por_sku = quedas_por_sku.combine(saidas_transicao, lambda s1, s2: s1.combine(s2, max))
+                # Detecção de NF de Entrada sem reflexo no saldo ou consumo anormal de MP (> 3x giro médio)
+                mask_nf_nao_refletida = (
+                    (entradas_transicao > 0.0)
+                    & (~eh_mp_por_idx.values[:, None])
+                    & ((del_trans + saidas_transicao) <= 0.0)
+                )
+                alertas_nf_dict = {}
+                for cod_nf in entradas_transicao.index:
+                    if eh_mp_por_idx.loc[cod_nf] and mask_mp_anomalia_nf.loc[cod_nf].any():
+                        cols_mp_a = [c for c in cols_transicao if mask_mp_anomalia_nf.loc[cod_nf, c]]
+                        ult_dt_mp = cols_mp_a[-1]
+                        qtd_nf_mp = float(entradas_transicao.loc[cod_nf, ult_dt_mp])
+                        del_mp_v = float(del_trans.loc[cod_nf, ult_dt_mp])
+                        cons_bruto_mp = max(0.0, qtd_nf_mp - del_mp_v)
+                        dt_mp_fmt = pd.to_datetime(ult_dt_mp, format="%Y-%m-%d", errors="coerce")
+                        str_dt_mp = dt_mp_fmt.strftime("%d/%m") if pd.notna(dt_mp_fmt) else str(ult_dt_mp)
+                        alertas_nf_dict[cod_nf] = (
+                            f"⚠️ MP NF +{formatar_qtd_br(qtd_nf_mp)} ({str_dt_mp}) | Apurado {formatar_qtd_br(cons_bruto_mp)} (>3x giro / conferir saldo)"
+                        )
+                    elif (not eh_mp_por_idx.loc[cod_nf]) and mask_nf_nao_refletida.loc[cod_nf].any():
+                        cols_nf = [c for c in cols_transicao if mask_nf_nao_refletida.loc[cod_nf, c]]
+                        ult_dt_nf = cols_nf[-1]
+                        qtd_nf = float(entradas_transicao.loc[cod_nf, ult_dt_nf])
+                        dt_nf_fmt = pd.to_datetime(ult_dt_nf, format="%Y-%m-%d", errors="coerce")
+                        str_dt_nf = dt_nf_fmt.strftime("%d/%m") if pd.notna(dt_nf_fmt) else str(ult_dt_nf)
+                        alertas_nf_dict[cod_nf] = f"⏳ NF +{formatar_qtd_br(qtd_nf)} ({str_dt_nf}) s/ reflexo no saldo"
+                if alertas_nf_dict:
+                    nf_nao_refletida_sku = pd.Series(alertas_nf_dict)
 
-            saldo_prev_base = (
-                pivot_geral
-                .reindex(index=quedas_por_sku.index, columns=cols_transicao)
-                .fillna(0.0)
-            )
-            entradas_alinhadas = (
-                entradas_transicao
-                .reindex(index=quedas_por_sku.index, columns=cols_transicao)
-                .fillna(0.0)
-            )
-            deltas_alinhados = (
-                deltas_geral
-                .reindex(index=quedas_por_sku.index, columns=cols_transicao)
-                .fillna(0.0)
-            )
-            entrada_nova_no_dia = entradas_alinhadas.where(
-                (deltas_alinhados > 0.0) | (saldo_prev_base <= 0.0), 0.0
-            )
-            saldo_prev_sku = (saldo_prev_base + entrada_nova_no_dia).combine(
-                quedas_por_sku, lambda s1, s2: s1.combine(s2, max)
-            ).fillna(0.0)
+                # 3. Cruzamento com Saídas/Vendas Diárias via max() (nunca soma duplicado com a queda de estoque)
+                quedas_por_sku = queda_direta.combine(consumo_em_alta, lambda s1, s2: s1.combine(s2, max))
+                quedas_por_sku = quedas_por_sku.combine(saidas_transicao, lambda s1, s2: s1.combine(s2, max))
+
+                saldo_prev_base = (
+                    pivot_geral
+                    .reindex(index=quedas_por_sku.index, columns=cols_transicao)
+                    .fillna(0.0)
+                )
+                entradas_alinhadas = (
+                    entradas_transicao
+                    .reindex(index=quedas_por_sku.index, columns=cols_transicao)
+                    .fillna(0.0)
+                )
+                deltas_alinhados = (
+                    deltas_geral
+                    .reindex(index=quedas_por_sku.index, columns=cols_transicao)
+                    .fillna(0.0)
+                )
+                entrada_nova_no_dia = entradas_alinhadas.where(
+                    (deltas_alinhados > 0.0) | (saldo_prev_base <= 0.0), 0.0
+                )
+                saldo_prev_sku = (saldo_prev_base + entrada_nova_no_dia).combine(
+                    quedas_por_sku, lambda s1, s2: s1.combine(s2, max)
+                ).fillna(0.0)
 
         if not df_sai_win.empty:
             df_sai_grp_all = df_sai_win.groupby(["codigo", "data"], as_index=False)["qtd_saida"].sum()
@@ -1661,8 +1657,8 @@ def calcular_motor_giro_sazonal(
                             saldo_prev_sku[col_dt_ex] = col_s_ex + saldo_base_ini
                         else:
                             saldo_prev_sku[col_dt_ex] = saldo_base_fim.combine(col_s_ex, max)
-                    quedas_por_sku = quedas_por_sku[sorted(quedas_por_sku.columns)]
-                    saldo_prev_sku = saldo_prev_sku[sorted(saldo_prev_sku.columns)]
+                quedas_por_sku = quedas_por_sku[sorted(quedas_por_sku.columns)]
+                saldo_prev_sku = saldo_prev_sku[sorted(saldo_prev_sku.columns)]
 
         if not quedas_por_sku.empty:
             ts_hist = [pd.to_datetime(d, format="%Y-%m-%d", errors="coerce") for d in datas_hist]
@@ -1749,6 +1745,7 @@ def calcular_motor_giro_sazonal(
                     "alerta_nf_nao_refletida": alerta_nf_s.values,
                 }
             )
+
     df_calc = df_prod.merge(df_saidas_sku, on="codigo", how="left")
     df_calc["giro_historico"] = df_calc["giro_historico"].fillna(0.0)
     df_calc["giro_historico_sem_pico"] = df_calc["giro_historico_sem_pico"].fillna(0.0)
@@ -1824,5 +1821,9 @@ def calcular_motor_giro_sazonal(
                                 idx_clamped = min(max(idx_raw, 0.60), 2.20)
                                 mapa_fator_saz_sku[cod_y] = 1.0 if abs(idx_clamped - 1.0) < 0.05 else round(idx_clamped, 3)
 
-    df_calc["fator_sazonal_sku"] = df_calc["codigo"].map(mapa_fator_saz_sku).fillna(1.0)
+    df_calc["fator_sazonal"] = df_calc["codigo"].map(mapa_fator_saz_sku).fillna(1.0)
+    df_calc["eh_mp"] = [
+        identificar_produto_mp(c, d, grupos_sku_custom, mp_custom_map)
+        for c, d in zip(df_calc["codigo"], df_calc["descricao"])
+    ]
     return df_calc, intervalo_historico_dias, peso_historico

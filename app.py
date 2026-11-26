@@ -851,7 +851,12 @@ with aba_dash:
 
         df_bi["saldo_pos"] = df_bi["saldo_atual"].clip(lower=0.0)
         df_bi["valor_estoque"] = df_bi["saldo_pos"] * df_bi["custo_unitario"]
-        df_bi["giro_dia"] = df_bi["giro_ponderado"].clip(lower=0.0)
+        fator_saz_bi = (
+            pd.to_numeric(df_bi["fator_sazonal"], errors="coerce").fillna(1.0)
+            if "fator_sazonal" in df_bi.columns
+            else 1.0
+        )
+        df_bi["giro_dia"] = (df_bi["giro_ponderado"] * fator_saz_bi).clip(lower=0.0)
         df_bi["cmv_diario"] = df_bi["giro_dia"] * df_bi["custo_unitario"]
         df_bi["cmv_mensal"] = df_bi["cmv_diario"] * 30.0
         df_bi["autonomia_dias"] = (
@@ -4971,8 +4976,8 @@ with aba2:
                 ]:
                     if col_num_fill in df_merged.columns:
                         df_merged[col_num_fill] = df_merged[col_num_fill].fillna(0.0)
-                if "fator_sazonal_sku" in df_merged.columns:
-                    df_merged["fator_sazonal_sku"] = df_merged["fator_sazonal_sku"].fillna(1.0)
+                if "fator_sazonal" in df_merged.columns:
+                    df_merged["fator_sazonal"] = df_merged["fator_sazonal"].fillna(1.0)
                 df_merged["data_ult_dia"] = df_merged["data_ult_dia"].fillna("-")
                 df_merged["data_pico_recente"] = df_merged["data_pico_recente"].fillna("-")
                 df_merged["alerta_nf_nao_refletida"] = df_merged["alerta_nf_nao_refletida"].fillna("")
@@ -4992,7 +4997,11 @@ with aba2:
         if codigos_em_transito and (not mostrar_comprados_transito) and (arq_lista_cotacao is None):
             df_calc = df_calc[~df_calc["codigo"].isin(codigos_em_transito)].copy()
 
-        fator_saz_sku_s = df_calc.get("fator_sazonal_sku", pd.Series(1.0, index=df_calc.index)).fillna(1.0)
+        fator_saz_sku_s = (
+            pd.to_numeric(df_calc["fator_sazonal"], errors="coerce").fillna(1.0)
+            if "fator_sazonal" in df_calc.columns
+            else pd.Series(1.0, index=df_calc.index)
+        )
         df_calc["giro_diario"] = (df_calc["giro_ponderado"] * fator_saz_sku_s).clip(lower=0.0)
         df_calc["giro_diario_sem_pico"] = (df_calc["giro_ponderado_sem_pico"] * fator_saz_sku_s).clip(lower=0.0)
         if not df_custos.empty:
@@ -5071,7 +5080,7 @@ with aba2:
             giro_sem_p = float(r.get("giro_diario_sem_pico", 0.0))
             mediana_d = float(r.get("mediana_diaria", 0.0))
             mad_d = float(r.get("mad_diario", 0.0))
-            fator_saz_i = float(r.get("fator_sazonal_sku", 1.0))
+            fator_saz_i = float(r.get("fator_sazonal", 1.0))
             ponto_ped = float(r.get("ponto_pedido", 0.0))
             est_ideal = float(r.get("estoque_ideal", 0.0))
             est_ideal_sem_p = float(r.get("estoque_ideal_sem_pico", 0.0))

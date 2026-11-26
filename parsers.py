@@ -1,6 +1,7 @@
 """
-parsers.py — Módulo de Formatação BR, Esquemas Siagri, Leitura/Travas de Planilhas,
-Departamentos/MP e Exportação Excel/ZIP (Esteio Rural — Arquitetura Modular v37).
+parsers.py — Módulo de Esquemas de Dados, Formatação Brasileira, Sanitização,
+Leitura Segura de Planilhas Siagri, Departamentos/MP e Exportação Excel/ZIP
+(Esteio Rural — Arquitetura Modular v37).
 """
 import io
 import re
@@ -13,13 +14,9 @@ import pandas as pd
 import streamlit as st
 
 
-
-
 # ==============================================================================
-# 1. FUSO HORÁRIO E DATAS BRASIL
+# 1. FUSO HORÁRIO, CONSTANTES GLOBAIS E ESQUEMAS DE TABELAS
 # ==============================================================================
-
-
 FUSO_BR = ZoneInfo("America/Sao_Paulo")
 
 
@@ -31,21 +28,9 @@ def agora_br() -> datetime:
     return datetime.now(FUSO_BR)
 
 
-
-
-# ==============================================================================
-# 2. CONSTANTES, ESQUEMAS E SINÔNIMOS SIAGRI
-# ==============================================================================
-
-
 DIAS_MAX_HISTORICO = 730
-
-
 DIAS_PADRAO_SONECA_COMPRA = 15
-
-
 LIMITE_COINCIDENCIA_CATALOGO = 80.0
-
 
 COLUNAS_NUMERICAS = {
     "saldo_geral",
@@ -60,7 +45,6 @@ COLUNAS_NUMERICAS = {
     "qtd_comprada",
 }
 
-
 ESQUEMA_ABAS = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
     "historico": ["codigo", "saldo_geral", "data"],
@@ -72,7 +56,6 @@ ESQUEMA_ABAS = {
     "pedidos_transito": ["codigo", "descricao", "qtd_comprada", "data_compra", "silenciar_ate"],
     "meta": ["chave", "valor"],
 }
-
 
 COLUNAS_OBRIGATORIAS_UPLOAD = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade"],
@@ -86,7 +69,6 @@ COLUNAS_OBRIGATORIAS_UPLOAD = {
     "meta": ["chave", "valor"],
 }
 
-
 ORDEM_POSICIONAL_PADRAO = {
     "estoque_atual": ["codigo", "saldo_geral", "descricao", "lote", "saldo_lote", "validade", "data"],
     "historico": ["codigo", "saldo_geral", "data"],
@@ -98,7 +80,6 @@ ORDEM_POSICIONAL_PADRAO = {
     "pedidos_transito": ["codigo", "descricao", "qtd_comprada", "data_compra", "silenciar_ate"],
     "meta": ["chave", "valor"],
 }
-
 
 MAPA_SINONIMOS = {
     "codigo": [
@@ -294,14 +275,12 @@ MAPA_SINONIMOS = {
     "valor": ["valor", "value", "conteudo"],
 }
 
-
+FORMATOS_DATA_ACEITOS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%y")
 
 
 # ==============================================================================
-# 3. FORMATAÇÃO BRASILEIRA (1.000,00) E ESTILIZAÇÃO DE TABELAS
+# 2. FORMATAÇÃO BRASILEIRA (1.000,00) E ESTILIZAÇÃO DE TABELAS STREAMLIT
 # ==============================================================================
-
-
 def formatar_num_br(valor, casas: int = 0) -> str:
     if pd.isna(valor) or valor is None:
         return "-"
@@ -375,13 +354,9 @@ def estilizar_tabela_br(
     return styler
 
 
-
-
 # ==============================================================================
-# 4. NORMALIZAÇÃO DE TEXTO, NÚMEROS, DATAS E DATAFRAMES
+# 3. SANITIZAÇÃO, NORMALIZAÇÃO DE SKU, NÚMEROS BR E DATAS DETERMINÍSTICAS
 # ==============================================================================
-
-
 def normalizar_chave_coluna(nome: str) -> str:
     s = unicodedata.normalize("NFKD", str(nome)).encode("ASCII", "ignore").decode("utf-8")
     s = re.sub(r"[^a-zA-Z0-9]+", "_", s.lower()).strip("_")
@@ -402,6 +377,7 @@ def limpar_serie_texto(serie: pd.Series) -> pd.Series:
         if s.lower() in ("nan", "none", "nat", "<na>"):
             return ""
         return re.sub(r"^(\d+)\.0$", r"\1", s)
+
     return serie.map(_limpar_val)
 
 
@@ -454,6 +430,7 @@ def converter_numero_br(
         tratar_1ponto_3dig_como_milhar = (not tem_ponto_nao_3_digitos) or tem_virgula_decimal_na_coluna
     else:
         tratar_1ponto_3dig_como_milhar = (not tem_ponto_nao_3_digitos) and tem_virgula_decimal_na_coluna
+
     erros_encontrados = []
     valores_convertidos = []
     for idx, val in serie.items():
@@ -505,6 +482,7 @@ def converter_numero_br(
                 identificador = f"SKU '{cod_id}'" if cod_id else f"Linha {idx + 2}"
                 erros_encontrados.append(f"{identificador} (valor lido: '{txt_bruto}')")
             valores_convertidos.append(0.0)
+
     if bloquear_invalidos and erros_encontrados:
         amostra = ", ".join(erros_encontrados[:8])
         raise ValueError(
@@ -514,9 +492,6 @@ def converter_numero_br(
             f"Corrija esses itens na planilha antes de importar."
         )
     return pd.Series(valores_convertidos, index=serie.index, dtype=float)
-
-
-FORMATOS_DATA_ACEITOS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%y")
 
 
 def _parse_data_segura_py(valor, ano_min: int = 2000, ano_max: int = None):
@@ -601,6 +576,9 @@ def restaurar_tipos(
     return df
 
 
+# ==============================================================================
+# 4. ESTRUTURAÇÃO DE DATAFRAMES, COMPACTAÇÃO, PODA E AUTO-DESPERTAR
+# ==============================================================================
 def estruturar_dataframe_bruto(
     df: pd.DataFrame,
     nome_aba: str,
@@ -616,6 +594,7 @@ def estruturar_dataframe_bruto(
     renomear = {}
     colunas_orig_usadas = set()
     alvos_encontrados = set()
+
     for col_alvo in colunas_esperadas:
         sinonimos = MAPA_SINONIMOS.get(col_alvo, [col_alvo])
         for sin in sinonimos:
@@ -629,6 +608,7 @@ def estruturar_dataframe_bruto(
                 colunas_orig_usadas.add(encontrada)
                 alvos_encontrados.add(col_alvo)
                 break
+
     if aba_esquema in ("saidas_diarias", "entradas_diarias") and df_orig.shape[1] >= 4:
         col_fin_alvo = "valor_venda" if aba_esquema == "saidas_diarias" else "valor_entrada"
         if col_fin_alvo not in alvos_encontrados:
@@ -653,6 +633,7 @@ def estruturar_dataframe_bruto(
                     colunas_orig_usadas.add(col_cand)
                     alvos_encontrados.add(col_fin_alvo)
                     break
+
     if not exigir_colunas_obrigatorias:
         if aba_esquema == "saidas_diarias" and df_orig.shape[1] == 4 and "valor_venda" not in alvos_encontrados:
             ordem_padrao = ["codigo", "descricao", "qtd_saida", "data"]
@@ -670,6 +651,7 @@ def estruturar_dataframe_bruto(
                     renomear[col_candidata] = col_alvo
                     colunas_orig_usadas.add(col_candidata)
                     alvos_encontrados.add(col_alvo)
+
     df = df_orig.rename(columns=renomear)
     if exigir_colunas_obrigatorias:
         obrigatorias = COLUNAS_OBRIGATORIAS_UPLOAD.get(aba_esquema, [])
@@ -682,6 +664,7 @@ def estruturar_dataframe_bruto(
                 f"Cabeçalhos encontrados na planilha enviada: [{cols_lidas}]. "
                 f"Verifique se a planilha está correta e com os títulos de coluna esperados."
             )
+
     for col_alvo in colunas_esperadas:
         if col_alvo not in df.columns:
             if col_alvo in COLUNAS_NUMERICAS:
@@ -692,6 +675,7 @@ def estruturar_dataframe_bruto(
                 df[col_alvo] = (hoje_br() + timedelta(days=DIAS_PADRAO_SONECA_COMPRA)).strftime("%Y-%m-%d")
             else:
                 df[col_alvo] = ""
+
     df = df[colunas_esperadas].copy()
     if "codigo" in df.columns:
         df["codigo"] = limpar_serie_codigo(df["codigo"])
@@ -701,6 +685,7 @@ def estruturar_dataframe_bruto(
                 ["codigo", "código", "cod", "sku", "id", "item", "total", "total geral", "subtotal"]
             )
         ].copy()
+
     df = restaurar_tipos(
         df,
         origem_banco=origem_banco,
@@ -833,228 +818,9 @@ def podar_historico_max_dias(df_hist: pd.DataFrame, nome_aba: str = "historico")
 podar_historico_180_dias = podar_historico_max_dias
 
 
-
-
 # ==============================================================================
-# 5. EXPORTAÇÃO E BACKUP EM MEMÓRIA (.XLSX, .ZIP E COTAÇÃO C/ FÓRMULAS)
+# 5. LEITURA SEGURA DE PLANILHAS SIAGRI E TRAVAS DE VALIDAÇÃO
 # ==============================================================================
-
-
-def _formatar_e_centralizar_aba_openpyxl(ws):
-    from openpyxl.styles import Alignment, Font
-    from openpyxl.utils import get_column_letter
-    alin_centro = Alignment(horizontal="center", vertical="center")
-    alin_esq = Alignment(horizontal="left", vertical="center")
-    fonte_cab = Font(bold=True)
-    max_row = ws.max_row
-    max_col = ws.max_column
-    for col_idx in range(1, max_col + 1):
-        letra = get_column_letter(col_idx)
-        titulo = str(ws.cell(row=1, column=col_idx).value or "").strip()
-        titulo_norm = normalizar_chave_coluna(titulo)
-        ws.cell(row=1, column=col_idx).alignment = alin_centro
-        ws.cell(row=1, column=col_idx).font = fonte_cab
-        eh_esquerda = any(p in titulo_norm for p in ["descricao", "diagnostico", "acao_ia", "mecanica", "status_margem", "departamento"])
-        eh_moeda = any(p in titulo_norm for p in ["custo", "valor", "capital", "preco", "recuperavel", "faturamento", "cmv", "imposto", "lucro", "compras_nf", "total_compra", "total_do_item", "total_estimado"]) and "pct" not in titulo_norm and "variacao" not in titulo_norm and "cresc" not in titulo_norm
-        eh_pct = "%" in titulo or "pct" in titulo_norm or "variacao" in titulo_norm
-        maior_tam = max(len(titulo), 12)
-        for row_idx in range(2, max_row + 1):
-            cel = ws.cell(row=row_idx, column=col_idx)
-            cel.alignment = alin_esq if eh_esquerda else alin_centro
-            val = cel.value
-            if isinstance(val, (int, float)):
-                if eh_moeda:
-                    cel.number_format = "R$ #,##0.00"
-                elif eh_pct:
-                    cel.number_format = '0.00"%"'
-                elif isinstance(val, float) and not val.is_integer():
-                    cel.number_format = "#,##0.00"
-                else:
-                    cel.number_format = "#,##0"
-            if val is not None:
-                maior_tam = max(maior_tam, min(len(str(val)) + 4, 46))
-        ws.column_dimensions[letra].width = max(maior_tam + 3, 14)
-
-
-def gerar_excel_banco_dados(estado: dict) -> bytes:
-    from openpyxl import load_workbook
-    buffer_xlsx = io.BytesIO()
-    linhas_meta_bkp = [
-        {"chave": "dias_base", "valor": str(estado.get("dias_base", 87))},
-        {"chave": "ultima_atualizacao", "valor": str(estado.get("ultima_atualizacao", "-"))},
-        {"chave": "data_exportacao_backup", "valor": agora_br().strftime("%d/%m/%Y %H:%M:%S")},
-    ]
-    if str(estado.get("ultima_data_custos_t1", "")).strip():
-        linhas_meta_bkp.append({"chave": "ultima_data_custos_t1", "valor": str(estado.get("ultima_data_custos_t1", "")).strip()})
-    if str(estado.get("ultimo_backup_semanal", "")).strip():
-        linhas_meta_bkp.append({"chave": "ultimo_backup_semanal", "valor": str(estado.get("ultimo_backup_semanal", "")).strip()})
-    for pref_k, nome_g in sorted((estado.get("grupos_pref_custom") or {}).items()):
-        linhas_meta_bkp.append({"chave": f"grp_pref_{pref_k}", "valor": str(nome_g)})
-    for sku_k, nome_g in sorted((estado.get("grupos_sku_custom") or {}).items()):
-        linhas_meta_bkp.append({"chave": f"grp_sku_{sku_k}", "valor": str(nome_g)})
-    for sku_m, flag_m in sorted((estado.get("mp_custom_map") or {}).items()):
-        sku_m_norm = normalizar_codigo_sku(sku_m)
-        if sku_m_norm and str(flag_m).strip() in ("0", "1"):
-            linhas_meta_bkp.append({"chave": f"mp_flag_{sku_m_norm}", "valor": str(flag_m).strip()})
-    df_meta_bkp = pd.DataFrame(linhas_meta_bkp)
-    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
-        estado.get("estoque_atual", pd.DataFrame()).to_excel(writer, sheet_name="estoque_atual", index=False)
-        estado.get("entradas_diarias", pd.DataFrame()).to_excel(writer, sheet_name="entradas_diarias", index=False)
-        estado.get("saidas_diarias", pd.DataFrame()).to_excel(writer, sheet_name="saidas_diarias", index=False)
-        estado.get("custos", pd.DataFrame()).to_excel(writer, sheet_name="custos", index=False)
-        estado.get("base_inicial", pd.DataFrame()).to_excel(writer, sheet_name="base_inicial", index=False)
-        estado.get("ocultos", pd.DataFrame()).to_excel(writer, sheet_name="ocultos", index=False)
-        estado.get("pedidos_transito", pd.DataFrame()).to_excel(writer, sheet_name="pedidos_transito", index=False)
-        df_meta_bkp.to_excel(writer, sheet_name="meta", index=False)
-    buffer_xlsx.seek(0)
-    wb = load_workbook(buffer_xlsx)
-    for nome_aba in wb.sheetnames:
-        _formatar_e_centralizar_aba_openpyxl(wb[nome_aba])
-    out_buffer = io.BytesIO()
-    wb.save(out_buffer)
-    return out_buffer.getvalue()
-
-
-def gerar_pacote_backup_leve(estado: dict) -> bytes:
-    buffer_zip = io.BytesIO()
-    with zipfile.ZipFile(buffer_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        xlsx_bytes = gerar_excel_banco_dados(estado)
-        zf.writestr("Banco_Dados_Esteio_Rural.xlsx", xlsx_bytes)
-        df_hist = estado.get("historico", pd.DataFrame())
-        csv_bytes = df_hist.to_csv(index=False, sep=";").encode("utf-8-sig")
-        zf.writestr("historico_2anos.csv", csv_bytes)
-    return buffer_zip.getvalue()
-
-
-@st.cache_data(ttl=3600, max_entries=20, show_spinner=False)
-def gerar_excel_relatorio(df: pd.DataFrame, nome_aba: str = "Relatorio") -> bytes:
-    from openpyxl import load_workbook
-    buffer_xlsx = io.BytesIO()
-    aba_limpa = nome_aba[:31]
-    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name=aba_limpa, index=False)
-    buffer_xlsx.seek(0)
-    wb = load_workbook(buffer_xlsx)
-    _formatar_e_centralizar_aba_openpyxl(wb[aba_limpa])
-    out_buffer = io.BytesIO()
-    wb.save(out_buffer)
-    return out_buffer.getvalue()
-
-
-@st.cache_data(ttl=3600, max_entries=20, show_spinner=False)
-def gerar_excel_com_formulas_cotacao(df_cotacao: pd.DataFrame) -> bytes:
-    from openpyxl import load_workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.utils import get_column_letter
-    buffer_xlsx = io.BytesIO()
-    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
-        df_cotacao.to_excel(writer, sheet_name="Cotacao_Compras", index=False)
-    buffer_xlsx.seek(0)
-    wb = load_workbook(buffer_xlsx)
-    ws = wb["Cotacao_Compras"]
-    max_row = ws.max_row
-    max_col = ws.max_column
-    fonte_negrito = Font(bold=True)
-    alin_centro = Alignment(horizontal="center", vertical="center")
-    alin_esq = Alignment(horizontal="left", vertical="center")
-    preenchimento_editavel = PatternFill(start_color="FFFDE7", end_color="FFFDE7", fill_type="solid")
-
-    mapa_letras = {}
-    for c_idx in range(1, max_col + 1):
-        ws.cell(row=1, column=c_idx).alignment = alin_centro
-        ws.cell(row=1, column=c_idx).font = fonte_negrito
-        tit_norm = normalizar_chave_coluna(ws.cell(row=1, column=c_idx).value or "")
-        if tit_norm:
-            mapa_letras[tit_norm] = get_column_letter(c_idx)
-
-    def _col(chave_norm: str, fallback_letra: str) -> str:
-        return mapa_letras.get(chave_norm, fallback_letra)
-
-    col_desc = _col("descricao", "B")
-    col_saldo = _col("saldo_atual", "D")
-    col_venc = _col("vencido_ou_vencendo_60d", "E")
-    col_giro = _col("giro_medio_dia", "F")
-    col_auton = _col("autonomia_dias", "G")
-    col_pped = mapa_letras.get("ponto_de_pedido_c_seg", "")
-    col_sug = _col("sugestao_sistema", "H")
-    col_qtd = _col("qtd_a_comprar", "I")
-    col_custo_erp = _col("ultimo_custo_erp_r", "J")
-    col_custo_cot = _col("custo_atual_cotado_r", "K")
-    col_var = _col("variacao_custo", "L")
-    col_total = _col("total_do_item_r", "M")
-
-    for r in range(2, max_row + 1):
-        for c_idx in range(1, max_col + 1):
-            letra_c = get_column_letter(c_idx)
-            ws.cell(row=r, column=c_idx).alignment = alin_esq if letra_c == col_desc else alin_centro
-        ws[f"{col_saldo}{r}"].number_format = "#,##0"
-        ws[f"{col_venc}{r}"].number_format = "#,##0"
-        ws[f"{col_giro}{r}"].number_format = "#,##0.00"
-        ws[f"{col_auton}{r}"].number_format = "#,##0.0"
-        if col_pped:
-            ws[f"{col_pped}{r}"].number_format = "#,##0"
-        ws[f"{col_sug}{r}"].number_format = "#,##0"
-        ws[f"{col_qtd}{r}"].number_format = "#,##0"
-        ws[f"{col_qtd}{r}"].fill = preenchimento_editavel
-        ws[f"{col_custo_cot}{r}"].fill = preenchimento_editavel
-        val_k = ws[f"{col_custo_cot}{r}"].value
-        if val_k is not None and float(val_k) == 0.0:
-            ws[f"{col_custo_cot}{r}"].value = None
-        ws[f"{col_custo_erp}{r}"].number_format = "R$ #,##0.00"
-        ws[f"{col_custo_cot}{r}"].number_format = "R$ #,##0.00"
-        ws[f"{col_var}{r}"] = (
-            f"=IF(AND({col_custo_cot}{r}>0,{col_custo_erp}{r}>0),"
-            f"({col_custo_cot}{r}-{col_custo_erp}{r})/{col_custo_erp}{r},0)"
-        )
-        ws[f"{col_var}{r}"].number_format = "+0.0%;-0.0%;0.0%"
-        ws[f"{col_total}{r}"] = f"={col_qtd}{r}*IF({col_custo_cot}{r}>0,{col_custo_cot}{r},{col_custo_erp}{r})"
-        ws[f"{col_total}{r}"].number_format = "R$ #,##0.00"
-
-    linha_total = max_row + 2
-    ws[f"{col_sug}{linha_total}"] = "TOTAL DO PEDIDO:"
-    ws[f"{col_sug}{linha_total}"].font = fonte_negrito
-    ws[f"{col_sug}{linha_total}"].alignment = Alignment(horizontal="right", vertical="center")
-    ws[f"{col_qtd}{linha_total}"] = f"=SUM({col_qtd}2:{col_qtd}{max_row})"
-    ws[f"{col_qtd}{linha_total}"].font = fonte_negrito
-    ws[f"{col_qtd}{linha_total}"].alignment = alin_centro
-    ws[f"{col_qtd}{linha_total}"].number_format = "#,##0"
-    ws[f"{col_total}{linha_total}"] = f"=SUM({col_total}2:{col_total}{max_row})"
-    ws[f"{col_total}{linha_total}"].font = fonte_negrito
-    ws[f"{col_total}{linha_total}"].alignment = alin_centro
-    ws[f"{col_total}{linha_total}"].number_format = "R$ #,##0.00"
-
-    larguras_por_chave = {
-        "codigo": 14,
-        "descricao": 38,
-        "saida_recente_alerta": 26,
-        "saldo_atual": 15,
-        "vencido_ou_vencendo_60d": 26,
-        "giro_medio_dia": 16,
-        "autonomia_dias": 16,
-        "ponto_de_pedido_c_seg": 19,
-        "sugestao_sistema": 17,
-        "qtd_a_comprar": 18,
-        "ultimo_custo_erp_r": 20,
-        "custo_atual_cotado_r": 22,
-        "variacao_custo": 18,
-        "total_do_item_r": 20,
-    }
-    for c_idx in range(1, max_col + 1):
-        letra_c = get_column_letter(c_idx)
-        tit_norm = normalizar_chave_coluna(ws.cell(row=1, column=c_idx).value or "")
-        ws.column_dimensions[letra_c].width = larguras_por_chave.get(tit_norm, 16)
-    out_buffer = io.BytesIO()
-    wb.save(out_buffer)
-    return out_buffer.getvalue()
-
-
-
-
-# ==============================================================================
-# 6. LEITURA DE UPLOADS, TRAVAS DE DATA/CATÁLOGO E PROCESSADORES SIAGRI
-# ==============================================================================
-
-
 def _preservar_celula_excel(val):
     if pd.isna(val) or val is None:
         return ""
@@ -1426,6 +1192,7 @@ def processar_planilha_movimento_diario(
                 eh_custo_unitario_direto = True
             if n_c_esc not in MAPA_SINONIMOS["valor_entrada"]:
                 df_raw = df_raw.rename(columns={col_escolhida_ent: "valor_entrada"})
+
     df = estruturar_dataframe_bruto(df_raw, nome_aba, exigir_colunas_obrigatorias=True)
     if nome_aba == "entradas_diarias" and eh_custo_unitario_direto and "valor_entrada" in df.columns:
         df["valor_entrada"] = df["qtd_entrada"] * df["valor_entrada"]
@@ -1444,6 +1211,7 @@ def processar_planilha_movimento_diario(
             ignorar_trava_catalogo=ignorar_trava_catalogo,
             exigir_cobertura_total=False,
         )
+
     contagem_por_sku = df.groupby("codigo")[col_qtd].count()
     cods_repetidos = contagem_por_sku[contagem_por_sku > 1].index.tolist()
     qtd_codigos_repetidos = len(cods_repetidos)
@@ -1457,6 +1225,7 @@ def processar_planilha_movimento_diario(
                 parcelas_str += "+..."
             soma_r = float(sub_r[col_qtd].sum())
             exemplos_repetidos.append(f"SKU {cod_r} ({parcelas_str} = {formatar_qtd_br(soma_r)})")
+
     agg_mov = {
         "descricao": ("descricao", "last"),
         col_qtd: (col_qtd, "sum"),
@@ -1466,6 +1235,7 @@ def processar_planilha_movimento_diario(
     if "valor_venda" in df.columns:
         agg_mov["valor_venda"] = ("valor_venda", "sum")
     agg_mov["data"] = ("data", "last")
+
     df_agrupado = df.groupby("codigo", as_index=False).agg(**agg_mov)
     df_agrupado = df_agrupado[df_agrupado[col_qtd] > 0].copy()
     if df_agrupado.empty:
@@ -1477,12 +1247,14 @@ def processar_planilha_movimento_diario(
     soma_qtd = float(df_final[col_qtd].sum())
     soma_valor_venda = float(df_final["valor_venda"].sum()) if "valor_venda" in df_final.columns else 0.0
     soma_valor_entrada = float(df_final["valor_entrada"].sum()) if "valor_entrada" in df_final.columns else 0.0
+
     df_custos_extraidos = pd.DataFrame(columns=["codigo", "descricao", "custo_unitario"])
     if nome_aba == "entradas_diarias" and "valor_entrada" in df_final.columns:
         df_c_val = df_final[(df_final["qtd_entrada"] > 0) & (df_final["valor_entrada"] > 0)].copy()
         if not df_c_val.empty:
             df_c_val["custo_unitario"] = (df_c_val["valor_entrada"] / df_c_val["qtd_entrada"]).round(4)
             df_custos_extraidos = df_c_val[["codigo", "descricao", "custo_unitario"]].copy()
+
     return df_final, {
         "total_itens": len(df_final),
         "soma_qtd": soma_qtd,
@@ -1500,13 +1272,9 @@ def processar_planilha_movimento_diario(
     }
 
 
-
-
 # ==============================================================================
-# 7. DEPARTAMENTOS SIAGRI, MATÉRIA-PRIMA (MP), BACKUP SEMANAL E METADADOS
+# 6. DEPARTAMENTOS SIAGRI, CLASSIFICAÇÃO MP, METADADOS E ALERTA DE BACKUP
 # ==============================================================================
-
-
 MAPA_DEPARTAMENTOS_SIAGRI = {
     "50": "50 - Veterinária & Reprodução",
     "70": "70 - Ferragens, Lonas & Selaria",
@@ -1650,3 +1418,254 @@ def montar_dataframe_meta_completo(
                 if hashes_unicos:
                     linhas.append({"chave": f"soma_hashes_{ch_op}", "valor": ",".join(hashes_unicos)})
     return pd.DataFrame(linhas)
+
+
+# ==============================================================================
+# 7. EXPORTAÇÃO EXCEL (.XLSX) E PACOTE COMPLETO DE BACKUP (.ZIP)
+# ==============================================================================
+def _formatar_e_centralizar_aba_openpyxl(ws):
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
+
+    alin_centro = Alignment(horizontal="center", vertical="center")
+    alin_esq = Alignment(horizontal="left", vertical="center")
+    fonte_cab = Font(bold=True)
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    for col_idx in range(1, max_col + 1):
+        letra = get_column_letter(col_idx)
+        titulo = str(ws.cell(row=1, column=col_idx).value or "").strip()
+        titulo_norm = normalizar_chave_coluna(titulo)
+        ws.cell(row=1, column=col_idx).alignment = alin_centro
+        ws.cell(row=1, column=col_idx).font = fonte_cab
+        eh_esquerda = any(
+            p in titulo_norm
+            for p in ["descricao", "diagnostico", "acao_ia", "mecanica", "status_margem", "departamento"]
+        )
+        eh_moeda = (
+            any(
+                p in titulo_norm
+                for p in [
+                    "custo",
+                    "valor",
+                    "capital",
+                    "preco",
+                    "recuperavel",
+                    "faturamento",
+                    "cmv",
+                    "imposto",
+                    "lucro",
+                    "compras_nf",
+                    "total_compra",
+                    "total_do_item",
+                    "total_estimado",
+                ]
+            )
+            and "pct" not in titulo_norm
+            and "variacao" not in titulo_norm
+            and "cresc" not in titulo_norm
+        )
+        eh_pct = "%" in titulo or "pct" in titulo_norm or "variacao" in titulo_norm
+        maior_tam = max(len(titulo), 12)
+        for row_idx in range(2, max_row + 1):
+            cel = ws.cell(row=row_idx, column=col_idx)
+            cel.alignment = alin_esq if eh_esquerda else alin_centro
+            val = cel.value
+            if isinstance(val, (int, float)):
+                if eh_moeda:
+                    cel.number_format = "R$ #,##0.00"
+                elif eh_pct:
+                    cel.number_format = '0.00"%"'
+                elif isinstance(val, float) and not val.is_integer():
+                    cel.number_format = "#,##0.00"
+                else:
+                    cel.number_format = "#,##0"
+            if val is not None:
+                maior_tam = max(maior_tam, min(len(str(val)) + 4, 46))
+        ws.column_dimensions[letra].width = max(maior_tam + 3, 14)
+
+
+def gerar_excel_banco_dados(estado: dict) -> bytes:
+    from openpyxl import load_workbook
+
+    buffer_xlsx = io.BytesIO()
+    linhas_meta_bkp = [
+        {"chave": "dias_base", "valor": str(estado.get("dias_base", 87))},
+        {"chave": "ultima_atualizacao", "valor": str(estado.get("ultima_atualizacao", "-"))},
+        {"chave": "data_exportacao_backup", "valor": agora_br().strftime("%d/%m/%Y %H:%M:%S")},
+    ]
+    if str(estado.get("ultima_data_custos_t1", "")).strip():
+        linhas_meta_bkp.append({"chave": "ultima_data_custos_t1", "valor": str(estado.get("ultima_data_custos_t1", "")).strip()})
+    if str(estado.get("ultimo_backup_semanal", "")).strip():
+        linhas_meta_bkp.append({"chave": "ultimo_backup_semanal", "valor": str(estado.get("ultimo_backup_semanal", "")).strip()})
+    for pref_k, nome_g in sorted((estado.get("grupos_pref_custom") or {}).items()):
+        linhas_meta_bkp.append({"chave": f"grp_pref_{pref_k}", "valor": str(nome_g)})
+    for sku_k, nome_g in sorted((estado.get("grupos_sku_custom") or {}).items()):
+        linhas_meta_bkp.append({"chave": f"grp_sku_{sku_k}", "valor": str(nome_g)})
+    for sku_m, flag_m in sorted((estado.get("mp_custom_map") or {}).items()):
+        sku_m_norm = normalizar_codigo_sku(sku_m)
+        if sku_m_norm and str(flag_m).strip() in ("0", "1"):
+            linhas_meta_bkp.append({"chave": f"mp_flag_{sku_m_norm}", "valor": str(flag_m).strip()})
+
+    df_meta_bruto = estado.get("df_meta_bruto")
+    if df_meta_bruto is not None and not df_meta_bruto.empty and "chave" in df_meta_bruto.columns and "valor" in df_meta_bruto.columns:
+        for _, r_mb in df_meta_bruto.iterrows():
+            ch_mb = str(r_mb["chave"]).strip()
+            val_mb = str(r_mb["valor"]).strip()
+            if ch_mb.startswith("ult_att_") and val_mb:
+                linhas_meta_bkp.append({"chave": ch_mb, "valor": val_mb})
+
+    df_meta_bkp = pd.DataFrame(linhas_meta_bkp).drop_duplicates(subset=["chave"], keep="last").reset_index(drop=True)
+    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
+        estado.get("estoque_atual", pd.DataFrame()).to_excel(writer, sheet_name="estoque_atual", index=False)
+        estado.get("entradas_diarias", pd.DataFrame()).to_excel(writer, sheet_name="entradas_diarias", index=False)
+        estado.get("saidas_diarias", pd.DataFrame()).to_excel(writer, sheet_name="saidas_diarias", index=False)
+        estado.get("custos", pd.DataFrame()).to_excel(writer, sheet_name="custos", index=False)
+        estado.get("base_inicial", pd.DataFrame()).to_excel(writer, sheet_name="base_inicial", index=False)
+        estado.get("ocultos", pd.DataFrame()).to_excel(writer, sheet_name="ocultos", index=False)
+        estado.get("pedidos_transito", pd.DataFrame()).to_excel(writer, sheet_name="pedidos_transito", index=False)
+        df_meta_bkp.to_excel(writer, sheet_name="meta", index=False)
+    buffer_xlsx.seek(0)
+    wb = load_workbook(buffer_xlsx)
+    for nome_aba in wb.sheetnames:
+        _formatar_e_centralizar_aba_openpyxl(wb[nome_aba])
+    out_buffer = io.BytesIO()
+    wb.save(out_buffer)
+    return out_buffer.getvalue()
+
+
+def gerar_pacote_backup_leve(estado: dict) -> bytes:
+    buffer_zip = io.BytesIO()
+    with zipfile.ZipFile(buffer_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        xlsx_bytes = gerar_excel_banco_dados(estado)
+        zf.writestr("Banco_Dados_Esteio_Rural.xlsx", xlsx_bytes)
+        df_hist = estado.get("historico", pd.DataFrame())
+        csv_bytes = df_hist.to_csv(index=False, sep=";").encode("utf-8-sig")
+        zf.writestr("historico_2anos.csv", csv_bytes)
+    return buffer_zip.getvalue()
+
+
+@st.cache_data(ttl=3600, max_entries=20, show_spinner=False)
+def gerar_excel_relatorio(df: pd.DataFrame, nome_aba: str = "Relatorio") -> bytes:
+    from openpyxl import load_workbook
+
+    buffer_xlsx = io.BytesIO()
+    aba_limpa = nome_aba[:31]
+    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=aba_limpa, index=False)
+    buffer_xlsx.seek(0)
+    wb = load_workbook(buffer_xlsx)
+    _formatar_e_centralizar_aba_openpyxl(wb[aba_limpa])
+    out_buffer = io.BytesIO()
+    wb.save(out_buffer)
+    return out_buffer.getvalue()
+
+
+@st.cache_data(ttl=3600, max_entries=20, show_spinner=False)
+def gerar_excel_com_formulas_cotacao(df_cotacao: pd.DataFrame) -> bytes:
+    from openpyxl import load_workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    buffer_xlsx = io.BytesIO()
+    with pd.ExcelWriter(buffer_xlsx, engine="openpyxl") as writer:
+        df_cotacao.to_excel(writer, sheet_name="Cotacao_Compras", index=False)
+    buffer_xlsx.seek(0)
+    wb = load_workbook(buffer_xlsx)
+    ws = wb["Cotacao_Compras"]
+    max_row = ws.max_row
+    max_col = ws.max_column
+    fonte_negrito = Font(bold=True)
+    alin_centro = Alignment(horizontal="center", vertical="center")
+    alin_esq = Alignment(horizontal="left", vertical="center")
+    preenchimento_editavel = PatternFill(start_color="FFFDE7", end_color="FFFDE7", fill_type="solid")
+
+    mapa_letras = {}
+    for c_idx in range(1, max_col + 1):
+        ws.cell(row=1, column=c_idx).alignment = alin_centro
+        ws.cell(row=1, column=c_idx).font = fonte_negrito
+        tit_norm = normalizar_chave_coluna(ws.cell(row=1, column=c_idx).value or "")
+        if tit_norm:
+            mapa_letras[tit_norm] = get_column_letter(c_idx)
+
+    def _col(chave_norm: str, fallback_letra: str) -> str:
+        return mapa_letras.get(chave_norm, fallback_letra)
+
+    col_desc = _col("descricao", "B")
+    col_saldo = _col("saldo_atual", "D")
+    col_venc = _col("vencido_ou_vencendo_60d", "E")
+    col_giro = _col("giro_medio_dia", "F")
+    col_auton = _col("autonomia_dias", "G")
+    col_pped = mapa_letras.get("ponto_de_pedido_c_seg", "")
+    col_sug = _col("sugestao_sistema", "H")
+    col_qtd = _col("qtd_a_comprar", "I")
+    col_custo_erp = _col("ultimo_custo_erp_r", "J")
+    col_custo_cot = _col("custo_atual_cotado_r", "K")
+    col_var = _col("variacao_custo", "L")
+    col_total = _col("total_do_item_r", "M")
+
+    for r in range(2, max_row + 1):
+        for c_idx in range(1, max_col + 1):
+            letra_c = get_column_letter(c_idx)
+            ws.cell(row=r, column=c_idx).alignment = alin_esq if letra_c == col_desc else alin_centro
+        ws[f"{col_saldo}{r}"].number_format = "#,##0"
+        ws[f"{col_venc}{r}"].number_format = "#,##0"
+        ws[f"{col_giro}{r}"].number_format = "#,##0.00"
+        ws[f"{col_auton}{r}"].number_format = "#,##0.0"
+        if col_pped:
+            ws[f"{col_pped}{r}"].number_format = "#,##0"
+        ws[f"{col_sug}{r}"].number_format = "#,##0"
+        ws[f"{col_qtd}{r}"].number_format = "#,##0"
+        ws[f"{col_qtd}{r}"].fill = preenchimento_editavel
+        ws[f"{col_custo_cot}{r}"].fill = preenchimento_editavel
+        val_k = ws[f"{col_custo_cot}{r}"].value
+        if val_k is not None and float(val_k) == 0.0:
+            ws[f"{col_custo_cot}{r}"].value = None
+        ws[f"{col_custo_erp}{r}"].number_format = "R$ #,##0.00"
+        ws[f"{col_custo_cot}{r}"].number_format = "R$ #,##0.00"
+        ws[f"{col_var}{r}"] = (
+            f"=IF(AND({col_custo_cot}{r}>0,{col_custo_erp}{r}>0),"
+            f"({col_custo_cot}{r}-{col_custo_erp}{r})/{col_custo_erp}{r},0)"
+        )
+        ws[f"{col_var}{r}"].number_format = "+0.0%;-0.0%;0.0%"
+        ws[f"{col_total}{r}"] = f"={col_qtd}{r}*IF({col_custo_cot}{r}>0,{col_custo_cot}{r},{col_custo_erp}{r})"
+        ws[f"{col_total}{r}"].number_format = "R$ #,##0.00"
+
+    linha_total = max_row + 2
+    ws[f"{col_sug}{linha_total}"] = "TOTAL DO PEDIDO:"
+    ws[f"{col_sug}{linha_total}"].font = fonte_negrito
+    ws[f"{col_sug}{linha_total}"].alignment = Alignment(horizontal="right", vertical="center")
+    ws[f"{col_qtd}{linha_total}"] = f"=SUM({col_qtd}2:{col_qtd}{max_row})"
+    ws[f"{col_qtd}{linha_total}"].font = fonte_negrito
+    ws[f"{col_qtd}{linha_total}"].alignment = alin_centro
+    ws[f"{col_qtd}{linha_total}"].number_format = "#,##0"
+    ws[f"{col_total}{linha_total}"] = f"=SUM({col_total}2:{col_total}{max_row})"
+    ws[f"{col_total}{linha_total}"].font = fonte_negrito
+    ws[f"{col_total}{linha_total}"].alignment = alin_centro
+    ws[f"{col_total}{linha_total}"].number_format = "R$ #,##0.00"
+
+    larguras_por_chave = {
+        "codigo": 14,
+        "descricao": 38,
+        "saida_recente_alerta": 26,
+        "saldo_atual": 15,
+        "vencido_ou_vencendo_60d": 26,
+        "giro_medio_dia": 16,
+        "autonomia_dias": 16,
+        "ponto_de_pedido_c_seg": 19,
+        "sugestao_sistema": 17,
+        "qtd_a_comprar": 18,
+        "ultimo_custo_erp_r": 20,
+        "custo_atual_cotado_r": 22,
+        "variacao_custo": 18,
+        "total_do_item_r": 20,
+    }
+    for c_idx in range(1, max_col + 1):
+        letra_c = get_column_letter(c_idx)
+        tit_norm = normalizar_chave_coluna(ws.cell(row=1, column=c_idx).value or "")
+        ws.column_dimensions[letra_c].width = larguras_por_chave.get(tit_norm, 16)
+
+    out_buffer = io.BytesIO()
+    wb.save(out_buffer)
+    return out_buffer.getvalue()

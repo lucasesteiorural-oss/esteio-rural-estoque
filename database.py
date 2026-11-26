@@ -30,8 +30,6 @@ from parsers import (
 )
 
 
-
-
 # ==============================================================================
 # 1. ACESSO A SECRETS, HASH DE SENHAS E AUTENTICAÇÃO DE USUÁRIOS
 # ==============================================================================
@@ -200,8 +198,6 @@ def _sincronizar_admin_mestre_supabase(planilha) -> None:
         pass
 
 
-
-
 # ==============================================================================
 # 2. CONSTANTES SQL, DDL E GERENCIADOR DE CONEXÃO SUPABASE (POSTGRESQL)
 # ==============================================================================
@@ -328,7 +324,7 @@ def _sanitizar_database_url(url_bruta: str) -> str:
     if not url_bruta:
         return ""
     s = str(url_bruta).strip().strip('"').strip("'")
-    s = re.sub(r":\[([^\[\]@]+)\]@", r":\1@", s)
+    s = re.sub(r":\[([^\[\]@]+)\]@", r":@", s)
     if s.startswith("postgres://"):
         s = "postgresql://" + s[len("postgres://"):]
     return s
@@ -461,8 +457,6 @@ def obter_conexao_supabase():
         return cliente_pg, None
     except Exception as e:
         return None, str(e)
-
-
 
 
 # ==============================================================================
@@ -967,7 +961,7 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
                 elif nz.lower().endswith(".csv") and "historico" in nz.lower():
                     bytes_csv = zf.read(nz)
                     for enc in ("utf-8-sig", "cp1252", "latin1"):
-                        for sep in (";", ",", "\t"):
+                        for sep in (";", ",", "	"):
                             try:
                                 df_h_csv = pd.read_csv(io.BytesIO(bytes_csv), sep=sep, encoding=enc, dtype=str)
                                 if df_h_csv.shape[1] >= 3:
@@ -1033,8 +1027,6 @@ def migrar_arquivo_banco_para_supabase(planilha: ConexaoSupabasePG, arquivo_uplo
         conn.rollback()
         raise
     return resumo_migrado
-
-
 
 
 # ==============================================================================
