@@ -3,7 +3,6 @@ analytics.py — Módulo de Inteligência Analítica: Motor de Giro Sazonal, Rad
 Curva ABC Financeira, Resolução Temporal Vetorizada (merge_asof) e Auditorias Fiscais/Descontos
 (Esteio Rural — Arquitetura Modular v37).
 """
-import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -614,6 +613,8 @@ def resolver_custo_e_t1_temporal_saidas(
          marca `pre_reajuste = True` e `custo_u_efetivo = 0.0` (excluído da base de margem para
          não fabricar falso prejuízo nem inflar a margem com CMV zerado).
     """
+    import numpy as np
+
     if df_saidas_ref is None or df_saidas_ref.empty:
         return pd.DataFrame()
     df_s = df_saidas_ref.copy()
@@ -1382,7 +1383,6 @@ def calcular_motor_giro_sazonal(
     else:
         df_prod["qtd_vendida"] = 0.0
         df_prod["giro_base"] = 0.0
-
     intervalo_historico_dias = 0
     peso_historico = 0.0
     df_saidas_sku = pd.DataFrame(
@@ -1478,9 +1478,7 @@ def calcular_motor_giro_sazonal(
                             soma_ent = df_ent_grp.loc[mask_int].groupby("codigo")["qtd_entrada"].sum()
                             novos_idx = soma_ent.index.difference(entradas_transicao.index)
                             if len(novos_idx) > 0:
-                                entradas_transicao = entradas_transicao.reindex(
-                                    entradas_transicao.index.union(novos_idx), fill_value=0.0
-                                )
+                                entradas_transicao = entradas_transicao.reindex(entradas_transicao.index.union(novos_idx), fill_value=0.0)
                                 deltas_geral = deltas_geral.reindex(entradas_transicao.index, fill_value=0.0)
                             entradas_transicao.loc[soma_ent.index, dt_ini_t] = soma_ent.values
 
@@ -1496,9 +1494,7 @@ def calcular_motor_giro_sazonal(
                             soma_sai = df_sai_grp.loc[mask_sai].groupby("codigo")["qtd_saida"].sum()
                             novos_idx = soma_sai.index.difference(saidas_transicao.index)
                             if len(novos_idx) > 0:
-                                saidas_transicao = saidas_transicao.reindex(
-                                    saidas_transicao.index.union(novos_idx), fill_value=0.0
-                                )
+                                saidas_transicao = saidas_transicao.reindex(saidas_transicao.index.union(novos_idx), fill_value=0.0)
                                 entradas_transicao = entradas_transicao.reindex(saidas_transicao.index, fill_value=0.0)
                                 deltas_geral = deltas_geral.reindex(saidas_transicao.index, fill_value=0.0)
                             saidas_transicao.loc[soma_sai.index, dt_ini_t] = soma_sai.values
@@ -1745,7 +1741,6 @@ def calcular_motor_giro_sazonal(
                     "alerta_nf_nao_refletida": alerta_nf_s.values,
                 }
             )
-
     df_calc = df_prod.merge(df_saidas_sku, on="codigo", how="left")
     df_calc["giro_historico"] = df_calc["giro_historico"].fillna(0.0)
     df_calc["giro_historico_sem_pico"] = df_calc["giro_historico_sem_pico"].fillna(0.0)
@@ -1821,9 +1816,10 @@ def calcular_motor_giro_sazonal(
                                 idx_clamped = min(max(idx_raw, 0.60), 2.20)
                                 mapa_fator_saz_sku[cod_y] = 1.0 if abs(idx_clamped - 1.0) < 0.05 else round(idx_clamped, 3)
 
-    df_calc["fator_sazonal"] = df_calc["codigo"].map(mapa_fator_saz_sku).fillna(1.0)
+    df_calc["fator_sazonal_sku"] = df_calc["codigo"].map(mapa_fator_saz_sku).fillna(1.0)
+    df_calc["fator_sazonal"] = df_calc["fator_sazonal_sku"]
     df_calc["eh_mp"] = [
         identificar_produto_mp(c, d, grupos_sku_custom, mp_custom_map)
         for c, d in zip(df_calc["codigo"], df_calc["descricao"])
     ]
-    return df_calc, intervalo_historico_dias, peso_historico
+    return df_calc, intervalo_historico_dias, round(peso_historico, 4)
