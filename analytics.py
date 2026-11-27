@@ -406,6 +406,398 @@ def calcular_tabela_curva_abc(
     return df_final_abc.reset_index(drop=True)
 
 
+def enriquecer_curva_abc_giro_t1(
+    df_abc_base: pd.DataFrame,
+    df_custos_ref: pd.DataFrame = None,
+    df_giro_ref: pd.DataFrame = None,
+    df_saidas_ref: pd.DataFrame = None,
+    margem_referencia_pct: float = 28.0,
+) -> pd.DataFrame:
+    """
+    Cruza a Curva ABC financeira com Preço Tabela T1 (ou média real de saídas),
+    Margem Atual (%), Giro Diário Ponderado e Autonomia (Dias), identificando
+    'Elefantes Brancos' (Classe A/B com 180+ dias parados) e itens de alta margem.
+    """
+    if df_abc_base is None or df_abc_base.empty:
+        return pd.DataFrame()
+
+    df_out = df_abc_base.copy()
+
+    # Mapa de Preço Tabela T1 a partir de df_custos_ref
+    mapa_t1 = {}
+    if (
+        df_custos_ref is not None
+        and not df_custos_ref.empty
+        and "codigo" in df_custos_ref.columns
+        and "preco_tabela" in df_custos_ref.columns
+    ):
+        df_c_val = df_custos_ref.dropna(subset=["codigo"]).drop_duplicates(subset=["codigo"], keep="last")
+        mapa_t1 = dict(
+            zip(
+                df_c_val["codigo"].astype(str),
+                pd.to_numeric(df_c_val["preco_tabela"], errors="coerce").fillna(0.0),
+            )
+        )
+
+    # Fallback: Preço Médio Praticado nas Saídas Faturadas
+    mapa_preco_saidas = {}
+    if (
+        df_saidas_ref is not None
+        and not df_saidas_ref.empty
+        and "codigo" in df_saidas_ref.columns
+        and "qtd_saida" in df_saidas_ref.columns
+        and "valor_venda" in df_saidas_ref.columns
+    ):
+        df_s_ok = df_saidas_ref[
+            (pd.to_numeric(df_saidas_ref["qtd_saida"], errors="coerce") > 0)
+            & (pd.to_numeric(df_saidas_ref["valor_venda"], errors="coerce") > 0)
+        ].copy()
+        if not df_s_ok.empty:
+            df_s_ok["_q"] = pd.to_numeric(df_s_ok["qtd_saida"], errors="coerce").fillna(0.0)
+            df_s_ok["_v"] = pd.to_numeric(df_s_ok["valor_venda"], errors="coerce").fillna(0.0)
+            grp_s = df_s_ok.groupby("codigo", as_index=False).agg(tot_q=("_q", "sum"), tot_v=("_v", "sum"))
+            grp_s = grp_s[grp_s["tot_q"] > 0]
+            mapa_preco_saidas = dict(zip(grp_s["codigo"].astype(str), grp_s["tot_v"] / grp_s["tot_q"]))
+
+    # Mapa de Giro Diário Ponderado
+    mapa_giro = {}
+    if (
+        df_giro_ref is not None
+        and not df_giro_ref.empty
+        and "codigo" in df_giro_ref.columns
+        and "giro_ponderado" in df_giro_ref.columns
+    ):
+        df_g_ok = df_giro_ref.dropna(subset=["codigo"]).drop_duplicates(subset=["codigo"], keep="first")
+        mapa_giro = dict(
+            zip(
+                df_g_ok["codigo"].astype(str),
+                pd.to_numeric(df_g_ok["giro_ponderado"], errors="coerce").fillna(0.0).clip(lower=0.0),
+            )
+        )
+
+    cods_str = df_out["codigo"].astype(str).tolist()
+    custos_arr = pd.to_numeric(df_out["custo_unitario"], errors="coerce").fillna(0.0).tolist()
+    saldos_arr = pd.to_numeric(df_out["saldo_geral"], errors="coerce").fillna(0.0).tolist()
+    classes_curtas = df_out["classe_abc_curta"].astype(str).tolist()
+
+    precos_base = []
+    origens_preco = []
+    margens_atuais = []
+    giros_dia = []
+    autonomias_dias = []
+    diagnosticos = []
+
+    fator_est_margem = max(0.10, 1.0 - (float(margem_referencia_pct) / 100.0))
+
+    for cod, custo_u, saldo_u, cls_c in zip(cods_str, custos_arr, saldos_arr, classes_curtas):
+        p_t1 = float(mapa_t1.get(cod, 0.0))
+        p_sai = float(mapa_preco_saidas.get(cod, 0.0))
+        if p_t1 > 0.0:
+            p_base = round(p_t1, 2)
+            orig = "Tabela T1"
+        elif p_sai > 0.0:
+            p_base = round(p_sai, 2)
+            orig = "Média Saídas"
+        elif custo_u > 0.0:
+            p_base = round(custo_u / fator_est_margem, 2)
+            orig = "Estimado"
+        else:
+            p_base = 0.0
+            orig = "Sem Preço"
+
+        if p_base > 0.0 and custo_u > 0.0:
+            margem_pct = round(((p_base - custo_u) / p_base) * 100.0, 1)
+        elif p_base > 0.0 and custo_u <= 0.0:
+            margem_pct = 100.0
+        else:
+            margem_pct = 0.0
+
+        giro_d = float(mapa_giro.get(cod, 0.0))
+        if saldo_u <= 0.0:
+            auton_d = 0.0
+        elif giro_d > 0.0:
+            auton_d = round(saldo_u / giro_d, 1)
+        else:
+            auton_d = 9999.0
+
+        if saldo_u <= 0.0:
+            diag = "⚪ Sem Saldo"
+        elif cls_c in ("Classe A", "Classe B") and auton_d >= 180.0:
+            diag = "🐘 Elefante Branco (180d+)"
+        elif cls_c in ("Classe A", "Classe B") and auton_d >= 90.0:
+            diag = "⚠️ Giro Lento (90-179d)"
+        elif margem_pct >= 35.0:
+            diag = "💎 Alta Margem (≥35%)"
+        else:
+            diag = "✅ Giro Saudável"
+
+        precos_base.append(p_base)
+        origens_preco.append(orig)
+        margens_atuais.append(margem_pct)
+        giros_dia.append(giro_d)
+        autonomias_dias.append(auton_d)
+        diagnosticos.append(diag)
+
+    df_out["preco_base"] = precos_base
+    df_out["origem_preco"] = origens_preco
+    df_out["margem_atual_pct"] = margens_atuais
+    df_out["giro_diario"] = giros_dia
+    df_out["autonomia_dias"] = autonomias_dias
+    df_out["diagnostico_alvo"] = diagnosticos
+    return df_out
+
+
+def calcular_simulacao_giro_abc(
+    custo_unit: float,
+    preco_de: float,
+    preco_por: float,
+    aliquota_imp_pct: float = 0.0,
+    margem_alvo_pct: float = 12.0,
+    saldo_atual: float = 0.0,
+    giro_diario: float = 0.0,
+) -> dict:
+    """
+    Calcula o Escudo Tributário, Preço Mínimo Autorizado (c/ margem alvo),
+    Margem Líquida Pós-Desconto e o Ponto de Equilíbrio de Volume (Break-Even de Lucro em R$)
+    para campanhas de aceleração de giro da Curva ABC.
+    """
+    custo_u = max(0.0, float(custo_unit))
+    p_de = max(0.01, float(preco_de))
+    p_por = max(0.01, float(preco_por))
+    aliq = max(0.0, min(float(aliquota_imp_pct), 80.0)) / 100.0
+    m_alvo = max(0.0, min(float(margem_alvo_pct), 80.0)) / 100.0
+
+    # Piso Tributário (Lucro Líquido = R$ 0,00)
+    denom_piso = max(0.05, 1.0 - aliq)
+    preco_piso = custo_u / denom_piso if custo_u > 0 else 0.0
+
+    # Preço Mínimo Autorizado respeitando Impostos + Margem Alvo
+    denom_alvo = max(0.05, 1.0 - aliq - m_alvo)
+    preco_min_autorizado = custo_u / denom_alvo if custo_u > 0 else 0.0
+
+    desconto_efetivo_pct = max(0.0, ((p_de - p_por) / p_de) * 100.0)
+    economia_un = max(0.0, p_de - p_por)
+
+    # Lucro Líquido Unitário Antes vs. Depois da Promoção
+    lucro_liq_atual_un = (p_de * (1.0 - aliq)) - custo_u
+    lucro_liq_promo_un = (p_por * (1.0 - aliq)) - custo_u
+    margem_liq_promo_pct = ((lucro_liq_promo_un / p_por) * 100.0) if p_por > 0 else 0.0
+
+    # Ponto de Equilíbrio de Volume (% extra de unidades necessárias para empatar o lucro total em R$)
+    if lucro_liq_promo_un <= 0.0:
+        break_even_vol_pct = None
+    elif lucro_liq_atual_un <= 0.0:
+        break_even_vol_pct = 0.0
+    elif lucro_liq_promo_un >= lucro_liq_atual_un:
+        break_even_vol_pct = 0.0
+    else:
+        break_even_vol_pct = ((lucro_liq_atual_un / lucro_liq_promo_un) - 1.0) * 100.0
+
+    # Meta de giro diário sugerida (acelera pelo menos 50% acima do giro atual ou cobre o break-even)
+    fator_aceleracao = 1.5
+    if break_even_vol_pct is not None and break_even_vol_pct > 0:
+        fator_aceleracao = max(1.5, 1.0 + (break_even_vol_pct / 100.0) + 0.15)
+    if giro_diario > 0:
+        meta_giro_dia = round(giro_diario * fator_aceleracao, 2)
+    elif saldo_atual > 0:
+        meta_giro_dia = round(max(1.0, saldo_atual / 30.0), 1)
+    else:
+        meta_giro_dia = 1.0
+
+    return {
+        "preco_piso": round(preco_piso, 2),
+        "preco_min_autorizado": round(preco_min_autorizado, 2),
+        "desconto_efetivo_pct": round(desconto_efetivo_pct, 2),
+        "economia_un": round(economia_un, 2),
+        "lucro_liq_atual_un": round(lucro_liq_atual_un, 2),
+        "lucro_liq_promo_un": round(lucro_liq_promo_un, 2),
+        "margem_liq_promo_pct": round(margem_liq_promo_pct, 2),
+        "break_even_vol_pct": round(break_even_vol_pct, 1) if break_even_vol_pct is not None else None,
+        "meta_giro_dia": meta_giro_dia,
+        "potencial_caixa_estoque": round(max(0.0, saldo_atual) * p_por, 2),
+        "potencial_lucro_estoque": round(max(0.0, saldo_atual) * lucro_liq_promo_un, 2),
+    }
+
+
+def gerar_textos_campanha_curva_abc(
+    codigo: str,
+    descricao: str,
+    classe_abc: str,
+    saldo_atual: float,
+    autonomia_dias: float,
+    custo_unit: float,
+    preco_de: float,
+    preco_por: float,
+    sim_avista: dict,
+    modelo_escolhido: str = "Modelo 1 — Oferta Relâmpago",
+    chamada_beneficio: str = "",
+    prazo_campanha: str = "",
+    rodape_comercial: str = "",
+    usar_atacado: bool = False,
+    qtd_atacado: int = 5,
+    preco_atacado: float = 0.0,
+    sim_atacado: dict = None,
+    exibir_preco_de: bool = True,
+) -> tuple[str, str]:
+    """
+    Gera copy comercial de alta conversão para grupos de WhatsApp (foco em giro rápido,
+    oportunidade de balcão e condição fazendeiro — sem menção a validade/vencimento)
+    e o Briefing Interno correspondente para a equipe de vendas.
+    """
+    economia_un = max(0.0, preco_de - preco_por)
+    desc_pct = float(sim_avista.get("desconto_efetivo_pct", 0.0))
+
+    linha_chamada = f"_{chamada_beneficio.strip()}_\n" if (chamada_beneficio and chamada_beneficio.strip()) else ""
+    linha_prazo = (
+        f"⚡ *{prazo_campanha.strip()}*\n"
+        if (prazo_campanha and prazo_campanha.strip())
+        else "⚡ *Condição por tempo limitado ou enquanto durar o estoque promocional.*\n"
+    )
+    linha_rodape = f"🚚 {rodape_comercial.strip()}\n" if (rodape_comercial and rodape_comercial.strip()) else ""
+
+    if "Modelo 2" in modelo_escolhido or usar_atacado:
+        p_atac = preco_atacado if preco_atacado > 0 else preco_por
+        q_atac = max(2, int(qtd_atacado))
+        econ_total_pacote = max(0.0, (preco_de - p_atac) * q_atac)
+        bloco_de = f" (De ~{formatar_moeda_br(preco_de)}~)" if (exibir_preco_de and preco_de > preco_por + 0.01) else ""
+        bloco_econ_pacote = (
+            f"📉 Economia total de *{formatar_moeda_br(econ_total_pacote)}* fechando o pacote de {q_atac} unidades para a fazenda!\n\n"
+            if econ_total_pacote > 0.05
+            else "\n"
+        )
+        txt_whatsapp = (
+            f"🌾 *CONDIÇÃO FAZENDEIRO — ESTEIO RURAL* 🌾\n\n"
+            f"📦 *{descricao}*\n"
+            f"{linha_chamada}"
+            f"✅ Condição especial liberada para compra fechada no balcão!\n\n"
+            f"💵 *Unitário à vista:* {formatar_moeda_br(preco_por)}{bloco_de}\n"
+            f"🚜 *Condição Volume (a partir de {q_atac} un.):* *{formatar_moeda_br(p_atac)}/un.*\n"
+            f"{bloco_econ_pacote}"
+            f"{linha_prazo}"
+            f"{linha_rodape}"
+            f"📲 Responda aqui ou fale com nosso balcão para reservar sua carga!"
+        )
+    else:
+        if exibir_preco_de and economia_un > 0.01:
+            bloco_preco = (
+                f"💰 De: ~{formatar_moeda_br(preco_de)}~\n"
+                f"🔥 *Por apenas: {formatar_moeda_br(preco_por)} à vista!* "
+                f"(Você economiza *{formatar_moeda_br(economia_un)}* por unidade!)\n\n"
+            )
+        else:
+            bloco_preco = f"🔥 *Por apenas: {formatar_moeda_br(preco_por)} à vista!* (*-{formatar_num_br(desc_pct, 1)}%*)\n\n"
+
+        txt_whatsapp = (
+            f"🚨 *OPORTUNIDADE RELÂMPAGO — ESTEIO RURAL* 🚨\n\n"
+            f"🐂 *{descricao}*\n"
+            f"{linha_chamada}"
+            f"✅ Condição especial liberada para giro rápido no balcão!\n\n"
+            f"{bloco_preco}"
+            f"{linha_prazo}"
+            f"{linha_rodape}"
+            f"📲 Chame agora no privado ou responda aqui para garantir o seu!"
+        )
+
+    be_vol = sim_avista.get("break_even_vol_pct")
+    txt_be = (
+        f"+{formatar_num_br(be_vol, 1)}% em volume para empatar o lucro R$ (acima disso é lucro extra)"
+        if be_vol is not None
+        else "Margem abaixo do custo+impostos (revisar preço)"
+    )
+    auton_txt = "999+ dias (Parado)" if autonomia_dias >= 999.0 else f"{formatar_num_br(autonomia_dias, 0)} dias"
+    bloco_atac_brief = ""
+    if usar_atacado and sim_atacado is not None:
+        be_at = sim_atacado.get("break_even_vol_pct")
+        be_at_txt = f"+{formatar_num_br(be_at, 1)}% vol." if be_at is not None else "Abaixo do piso"
+        bloco_atac_brief = (
+            f"\n• *Tabela Volume (≥ {max(2, int(qtd_atacado))} un.):* {formatar_moeda_br(preco_atacado)}/un. "
+            f"(Margem Líq.: {formatar_pct_br(sim_atacado.get('margem_liq_promo_pct', 0.0), 1)} | Break-Even: {be_at_txt})"
+        )
+
+    txt_briefing = (
+        f"🎯 *CAMPANHA DE ACELERAÇÃO DE GIRO (CURVA ABC) — EQUIPE ESTEIO RURAL*\n"
+        f"• *Produto:* [{codigo}] {descricao}\n"
+        f"• *Posição Estoque:* {classe_abc} | *Saldo:* {formatar_qtd_br(saldo_atual)} un. | *Autonomia Atual:* {auton_txt}\n"
+        f"• *Preço Tabela T1:* {formatar_moeda_br(preco_de)} ➔ *Preço Promo à Vista:* {formatar_moeda_br(preco_por)} (-{formatar_num_br(desc_pct, 1)}%)\n"
+        f"• *Preço Mínimo Autorizado no Siagri (Piso + Margem Alvo):* {formatar_moeda_br(sim_avista.get('preco_min_autorizado', 0.0))} "
+        f"(Piso Empate Zero: {formatar_moeda_br(sim_avista.get('preco_piso', 0.0))})\n"
+        f"• *Rentabilidade Pós-Desconto:* Margem Líq. {formatar_pct_br(sim_avista.get('margem_liq_promo_pct', 0.0), 1)} "
+        f"({formatar_moeda_br(sim_avista.get('lucro_liq_promo_un', 0.0))}/un.) | *Equilíbrio:* {txt_be}"
+        f"{bloco_atac_brief}\n"
+        f"• *Meta Sugerida Balcão:* {formatar_num_br(sim_avista.get('meta_giro_dia', 1.0), 1)} un./dia "
+        f"(Potencial de caixa no estoque: {formatar_moeda_br(sim_avista.get('potencial_caixa_estoque', 0.0))})"
+    )
+    return txt_whatsapp, txt_briefing
+
+
+def gerar_textos_vitrine_multi_abc(
+    itens_vitrine: list[dict],
+    chamada_beneficio: str = "",
+    prazo_campanha: str = "",
+    rodape_comercial: str = "",
+    exibir_preco_de: bool = True,
+) -> tuple[str, str]:
+    """
+    Gera a mensagem consolidada 'Modelo 3 — Combo / Vitrine da Semana' para múltiplos
+    produtos selecionados na Curva ABC e o respectivo Briefing Interno por item.
+    """
+    emojis_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    linhas_itens_wpp = []
+    linhas_briefing = [
+        "🎯 *VITRINE SEMANAL DE ACELERAÇÃO DE GIRO — EQUIPE ESTEIO RURAL*",
+    ]
+
+    for idx, item in enumerate(itens_vitrine):
+        marcador = emojis_num[idx] if idx < len(emojis_num) else f"*{idx + 1}.*"
+        cod = str(item.get("codigo", ""))
+        desc = str(item.get("descricao", ""))
+        p_de = float(item.get("preco_de", 0.0))
+        p_por = float(item.get("preco_por", 0.0))
+        desc_pct = float(item.get("desconto_pct", 0.0))
+        econ = max(0.0, p_de - p_por)
+        p_min_aut = float(item.get("preco_min_autorizado", 0.0))
+        m_liq = float(item.get("margem_liq_promo_pct", 0.0))
+        be_vol = item.get("break_even_vol_pct")
+
+        if exibir_preco_de and econ > 0.01:
+            preco_linha = (
+                f"   De ~{formatar_moeda_br(p_de)}~ ➔ *Por {formatar_moeda_br(p_por)} à vista* "
+                f"(Economia de *{formatar_moeda_br(econ)}*)"
+            )
+        else:
+            preco_linha = f"   🔥 *Por apenas {formatar_moeda_br(p_por)} à vista* (*-{formatar_num_br(desc_pct, 1)}%*)"
+
+        linhas_itens_wpp.append(f"{marcador} *{desc}*\n{preco_linha}")
+
+        be_txt = f"+{formatar_num_br(be_vol, 1)}% vol." if be_vol is not None else "Abaixo do piso"
+        linhas_briefing.append(
+            f"• *[{cod}] {desc}*\n"
+            f"  Tabela: {formatar_moeda_br(p_de)} ➔ Promo: *{formatar_moeda_br(p_por)}* (-{formatar_num_br(desc_pct, 1)}%) | "
+            f"Mín. Autorizado Siagri: {formatar_moeda_br(p_min_aut)} | Margem Líq.: {formatar_pct_br(m_liq, 1)} | Break-Even: {be_txt}"
+        )
+
+    linha_chamada = f"_{chamada_beneficio.strip()}_\n\n" if (chamada_beneficio and chamada_beneficio.strip()) else "\n"
+    linha_prazo = (
+        f"⚡ *{prazo_campanha.strip()}*\n"
+        if (prazo_campanha and prazo_campanha.strip())
+        else "⚡ *Condições válidas por tempo limitado ou enquanto durarem os estoques.*\n"
+    )
+    linha_rodape = f"🚚 {rodape_comercial.strip()}\n" if (rodape_comercial and rodape_comercial.strip()) else ""
+
+    corpo_lista = "\n\n".join(linhas_itens_wpp)
+    txt_whatsapp = (
+        f"🔥 *VITRINE DE OPORTUNIDADES — ESTEIO RURAL* 🔥\n"
+        f"Condições especiais liberadas para giro de estoque nesta semana:\n"
+        f"{linha_chamada}"
+        f"{corpo_lista}\n\n"
+        f"{linha_prazo}"
+        f"{linha_rodape}"
+        f"📲 Digite o número do item ou chame no privado para garantir o seu pedido!"
+    )
+    txt_briefing = "\n".join(linhas_briefing)
+    return txt_whatsapp, txt_briefing
+
+
 # ==============================================================================
 # 3. AUDITORIA FISCAL (NF x C1 x T1), RESOLUÇÃO TEMPORAL VETORIZADA E DESCONTOS
 # ==============================================================================
