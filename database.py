@@ -324,7 +324,7 @@ def _sanitizar_database_url(url_bruta: str) -> str:
     if not url_bruta:
         return ""
     s = str(url_bruta).strip().strip('"').strip("'")
-    s = re.sub(r":\[([^\[\]@]+)\]@", r":@", s)
+    s = re.sub(r":\[([^\[\]@]+)\]@", r":\1@", s)
     if s.startswith("postgres://"):
         s = "postgresql://" + s[len("postgres://"):]
     return s
